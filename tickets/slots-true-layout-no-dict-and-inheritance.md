@@ -1,7 +1,7 @@
 ---
 id: slots-true-layout-no-dict-and-inheritance
 title: "__slots__: true no-__dict__ semantics and slot inheritance"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

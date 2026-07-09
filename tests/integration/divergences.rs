@@ -92,3 +92,36 @@ async fn decimal_prec_is_per_interpreter() {
     // Fresh interpreter keeps default 28.
     assert_eq!(r2.stdout.trim(), "28");
 }
+
+#[tokio::test]
+async fn deepcopy_handles_list_cycle() {
+    // Cycle correctness is covered by `copy_mod` unit tests (memo by Arc
+    // identity). This integration check ensures deepcopy is independent of
+    // the original for nested lists (no shared mutation).
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r#"
+import copy
+a = [1, [2, 3]]
+b = copy.deepcopy(a)
+b[1].append(4)
+print(a[1])
+print(b[1])
+"#,
+            &Tools::new(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "[2, 3]\n[2, 3, 4]");
+}
+
+#[tokio::test]
+async fn max_int_bits_limits_power() {
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_int_bits = 64;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp.execute("print(1 << 100)", &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected overflow for max_int_bits=64 on shift");
+}

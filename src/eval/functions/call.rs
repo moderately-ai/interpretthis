@@ -219,6 +219,11 @@ pub async fn eval_call(
                             receiver: Value,
                             method: String,
                         },
+                        /// ExceptionGroup.subgroup / .split, etc.
+                        Exception {
+                            receiver: Value,
+                            method: String,
+                        },
                     }
                     // Place navigation only models Instance/Dict/List slots.
                     // `module.member.method(...)` (Attr step on Module) cannot
@@ -246,6 +251,10 @@ pub async fn eval_call(
                                     method: method_name.to_string(),
                                 })
                             }
+                            Value::Exception(_) => Ok(Dispatch::Exception {
+                                receiver: target.clone(),
+                                method: method_name.to_string(),
+                            }),
                             _ => {
                                 let outcome =
                                     dispatch_method(target, method_name, &resolved_args, &kwargs)?;
@@ -269,6 +278,20 @@ pub async fn eval_call(
                                     &method,
                                     &resolved_args,
                                     &kwargs,
+                                );
+                            }
+                            Dispatch::Exception { receiver, method } => {
+                                let Value::Exception(exc) = receiver else {
+                                    return Err(InterpreterError::Runtime(
+                                        "internal: Exception dispatch without Exception value"
+                                            .into(),
+                                    )
+                                    .into());
+                                };
+                                return crate::eval::exceptions::call_exception_method(
+                                    &method,
+                                    &exc,
+                                    &resolved_args,
                                 );
                             }
                             Dispatch::Module(module) => {
@@ -476,6 +499,13 @@ pub async fn eval_call(
                     method: method_name.to_string(),
                 };
                 return call_value_as_function(state, &unbound, &resolved_args, tools).await;
+            }
+            if let Value::Exception(exc) = &temp {
+                return crate::eval::exceptions::call_exception_method(
+                    method_name,
+                    exc,
+                    &resolved_args,
+                );
             }
             return Ok(dispatch_method(&mut temp, method_name, &resolved_args, &kwargs)?.value);
         }

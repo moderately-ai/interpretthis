@@ -118,6 +118,7 @@ pub fn apply_binop(
     right: &Value,
     op: ast::Operator,
     decimal_prec: i64,
+    max_int_bits: u64,
 ) -> Result<Value, EvalError> {
     match op {
         ast::Operator::Add => {
@@ -141,8 +142,8 @@ pub fn apply_binop(
         ast::Operator::Pow => {
             crate::types::dispatch_binop(crate::types::BinOp::Pow, left, right, decimal_prec)
         }
-        ast::Operator::LShift => lshift_values(left, right),
-        ast::Operator::RShift => rshift_values(left, right),
+        ast::Operator::LShift => lshift_values(left, right, max_int_bits),
+        ast::Operator::RShift => rshift_values(left, right, max_int_bits),
         ast::Operator::BitOr => bitor_values(left, right),
         ast::Operator::BitXor => bitxor_values(left, right),
         ast::Operator::BitAnd => bitand_values(left, right),
@@ -684,12 +685,14 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
                     "exponent too large for integer power",
                 )));
             }
-            Ok(crate::value::int_from_bigint(l.pow(exp)))
+            // Default max_int_bits; hosts that set a lower config limit still
+            // gate shifts (and can lower this via future ArithContext wiring).
+            crate::value::int_from_bigint_limited(l.pow(exp), 1_048_576)
         }
     }
 }
 
-fn lshift_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
+fn lshift_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, EvalError> {
     use num_traits::{Signed, ToPrimitive as _};
     let l = to_bigint(left)?;
     let r = to_bigint(right)?;
@@ -709,10 +712,10 @@ fn lshift_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
             "shift count too large",
         )));
     }
-    Ok(crate::value::int_from_bigint(l << shift))
+    crate::value::int_from_bigint_limited(l << shift, max_int_bits)
 }
 
-fn rshift_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
+fn rshift_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, EvalError> {
     use num_traits::{Signed, ToPrimitive as _};
     let l = to_bigint(left)?;
     let r = to_bigint(right)?;
@@ -725,7 +728,7 @@ fn rshift_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
             "shift count too large",
         ))
     })?;
-    Ok(crate::value::int_from_bigint(l >> shift))
+    crate::value::int_from_bigint_limited(l >> shift, max_int_bits)
 }
 
 fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {

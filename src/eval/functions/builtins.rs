@@ -507,6 +507,7 @@ pub(super) async fn try_builtin(
                     | Value::BuiltinName(_)
                     | Value::ToolName(_)
                     | Value::ExceptionType(_)
+                    | Value::ExceptionMethod { .. }
                     | Value::UnboundClassMethod { .. }
                     | Value::Partial(_)
                     | Value::LruCache(_)
@@ -700,6 +701,7 @@ pub(super) async fn try_builtin(
                     &item,
                     ast::Operator::Add,
                     state.decimal_prec,
+                    state.config.max_int_bits,
                 )?;
             }
             Ok(Some(total))

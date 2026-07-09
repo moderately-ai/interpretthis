@@ -321,3 +321,14 @@ Until then, prefer host-side async around `Interpreter::execute`.
 alternate rounding modes are not fully modelled.
 
 **Status**: Partial subset; traps/full rounding open.
+
+---
+
+## copy cycles and hooks
+<a id="copy-cycles"></a>
+
+`copy.deepcopy` uses an Arc-identity memo so mutual list/instance cycles
+terminate (unit-tested). User `__copy__` / `__deepcopy__` hooks are not
+invoked from the sync copy module path.
+
+**Status**: Cycles handled; hooks deferred.

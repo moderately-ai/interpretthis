@@ -957,3 +957,13 @@ async fn re_compile_is_unsupported() {
     // site. CPython exposes a `Pattern` object; we have no equivalent type.
     assert_error("import re\nre.compile(r\"\\d+\")").await;
 }
+
+#[test]
+fn value_enum_footprint_is_documented() {
+    use interpretthis::Value;
+    use std::mem::size_of;
+    // Documented baseline for hosts; bump intentionally when adding variants.
+    // On 64-bit targets Value is currently currently under 160 bytes on 64-bit (niche-optimized).
+    let sz = size_of::<Value>();
+    assert!(sz <= 160, "Value grew to {sz} bytes — re-check boxing of heavy variants");
+}

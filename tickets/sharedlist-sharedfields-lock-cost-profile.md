@@ -1,7 +1,7 @@
 ---
 id: sharedlist-sharedfields-lock-cost-profile
 title: Profile SharedList/SharedFields lock cost; document single-thread model
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

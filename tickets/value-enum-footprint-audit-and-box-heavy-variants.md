@@ -1,7 +1,7 @@
 ---
 id: value-enum-footprint-audit-and-box-heavy-variants
 title: Value enum footprint audit; box heavy variants if needed
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

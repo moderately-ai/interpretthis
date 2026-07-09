@@ -564,6 +564,9 @@ pub(crate) async fn call_value_as_function(
         // `e.args` carries the EXACT call arguments (preserving
         // types) so user code that inspects `e.args[0]` sees the
         // original value, not a stringification.
+        Value::ExceptionMethod { method, exception } => {
+            crate::eval::exceptions::call_exception_method(method, exception, args)
+        }
         Value::ExceptionType(type_name) => {
             crate::eval::exceptions::construct_exception_type(type_name, args)
         }

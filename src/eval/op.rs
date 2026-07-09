@@ -305,7 +305,13 @@ pub async fn binop(
             return Ok(returned);
         }
     }
-    crate::eval::operations::apply_binop(left, right, op, state.decimal_prec)
+    crate::eval::operations::apply_binop(
+        left,
+        right,
+        op,
+        state.decimal_prec,
+        state.config.max_int_bits,
+    )
 }
 
 const fn arith_slot(op: rustpython_parser::ast::Operator) -> &'static str {

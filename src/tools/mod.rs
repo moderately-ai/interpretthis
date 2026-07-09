@@ -2,6 +2,17 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Host tool injection surface for the interpreter.
+//!
+//! # Timeouts
+//!
+//! When [`crate::InterpreterConfig::max_execution_time`] is set, each tool
+//! call receives the **remaining** wall-clock budget (not a fresh full
+//! budget). Parallel tools share that same remaining budget via
+//! `tokio::time::timeout` per task. A timeout becomes [`ToolError`], which
+//! the eval layer maps to a catchable Python `Exception` if the call site
+//! is inside user `try`/`except`, otherwise a host [`crate::InterpreterError::Tool`].
+
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;

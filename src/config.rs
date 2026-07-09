@@ -31,6 +31,11 @@ pub struct InterpreterConfig {
     /// `max_memory_bytes` and surfaces as the less informative
     /// `LimitExceeded(memory)`.
     pub max_recursion_depth: u32,
+    /// Maximum bit length of a Python int (including sign bit magnitude).
+    /// Operations that would produce a larger int raise `OverflowError`.
+    /// Default: 1_048_576 bits (~128 KiB of limbs) — enough for crypto-scale
+    /// ints, not enough for trivial DoS via `2 ** (10**9)`.
+    pub max_int_bits: u64,
 }
 
 impl Default for InterpreterConfig {
@@ -43,6 +48,7 @@ impl Default for InterpreterConfig {
             max_concurrent_tools: 10,
             max_execution_time: None,
             max_recursion_depth: 1000,
+            max_int_bits: 1_048_576,
         }
     }
 }

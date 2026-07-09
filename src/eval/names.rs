@@ -446,6 +446,9 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
                 .unwrap_or_default();
             Ok(Value::Tuple(items))
         }
+        "subgroup" | "split" => {
+            Ok(Value::ExceptionMethod { method: attr_name.to_string(), exception: exc.clone() })
+        }
         // `args` is the truth — ExceptionValue::new defaults it from
         // the message (empty message → empty tuple, non-empty →
         // (message,)) so this never needs a synthesis fallback. Multi-

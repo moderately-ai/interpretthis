@@ -1,7 +1,7 @@
 ---
 id: metaclass-prepare-init-and-ns-methods-fidelity
 title: "Metaclass: __prepare__, __init__, and methods surviving type() rebuild"
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]
@@ -9,6 +9,9 @@ scopes: [eval, eval/functions]
 shared_scopes: []
 paths: []
 tags: [parity, classes, post-0.2]
+claimed_from: todo
+assignee: agent-main
+lease_expires_at: 1783618142
 ---
 ## Problem
 

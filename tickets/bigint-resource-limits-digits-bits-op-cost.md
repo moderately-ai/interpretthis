@@ -1,7 +1,7 @@
 ---
 id: bigint-resource-limits-digits-bits-op-cost
 title: "BigInt resource limits: max digits/bits and op-cost scaling"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity, bigint-op-matrix-indices-shifts-methods]

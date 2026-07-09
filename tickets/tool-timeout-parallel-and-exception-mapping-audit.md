@@ -1,7 +1,7 @@
 ---
 id: tool-timeout-parallel-and-exception-mapping-audit
 title: "Tool timeout: parallel tools and Exception vs host error mapping"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

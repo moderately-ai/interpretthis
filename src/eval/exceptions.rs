@@ -625,3 +625,99 @@ pub(crate) fn construct_exception_type(
     };
     Ok(Value::Exception(ExceptionValue::new(type_name, message).with_args(args.to_vec())))
 }
+
+/// `ExceptionGroup.subgroup(match)` / `.split(match)`.
+pub(crate) fn call_exception_method(
+    method: &str,
+    exception: &crate::value::ExceptionValue,
+    args: &[crate::value::Value],
+) -> crate::error::EvalResult {
+    use crate::error::InterpreterError;
+    use crate::value::{ExceptionValue, Value};
+
+    let matcher = args.first().ok_or_else(|| {
+        InterpreterError::TypeError(format!("{method}() takes exactly 1 argument (0 given)"))
+    })?;
+
+    let leaves = exception.exceptions.clone().unwrap_or_else(|| vec![exception.clone()]);
+
+    let matches_type = |leaf: &ExceptionValue| -> bool {
+        let name_matches =
+            |n: &str| leaf.type_name == n || builtin_exception_issubclass(&leaf.type_name, n);
+        match matcher {
+            Value::ExceptionType(n) | Value::Class(n) => name_matches(n),
+            Value::String(n) => name_matches(n.as_str()),
+            Value::Tuple(items) => items.iter().any(|item| match item {
+                Value::ExceptionType(n) | Value::Class(n) => name_matches(n),
+                Value::String(n) => name_matches(n.as_str()),
+                _ => false,
+            }),
+            _ => false,
+        }
+    };
+
+    // Recursively flatten nested groups into leaves for matching.
+    fn flatten(exc: &ExceptionValue, out: &mut Vec<ExceptionValue>) {
+        if let Some(nested) = &exc.exceptions {
+            for child in nested {
+                flatten(child, out);
+            }
+        } else {
+            out.push(exc.clone());
+        }
+    }
+    let mut flat = Vec::new();
+    for leaf in &leaves {
+        flatten(leaf, &mut flat);
+    }
+
+    let mut matched = Vec::new();
+    let mut rest = Vec::new();
+    for leaf in flat {
+        if matches_type(&leaf) {
+            matched.push(leaf);
+        } else {
+            rest.push(leaf);
+        }
+    }
+
+    match method {
+        "subgroup" => {
+            if matched.is_empty() {
+                Ok(Value::None)
+            } else {
+                Ok(Value::Exception(ExceptionValue::group(
+                    exception.type_name.clone(),
+                    exception.message.clone(),
+                    matched,
+                )))
+            }
+        }
+        "split" => {
+            let m = if matched.is_empty() {
+                Value::None
+            } else {
+                Value::Exception(ExceptionValue::group(
+                    exception.type_name.clone(),
+                    exception.message.clone(),
+                    matched,
+                ))
+            };
+            let r = if rest.is_empty() {
+                Value::None
+            } else {
+                Value::Exception(ExceptionValue::group(
+                    exception.type_name.clone(),
+                    exception.message.clone(),
+                    rest,
+                ))
+            };
+            Ok(Value::Tuple(vec![m, r]))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'{}' object has no attribute '{method}'",
+            exception.type_name
+        ))
+        .into()),
+    }
+}

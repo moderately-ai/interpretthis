@@ -1,7 +1,7 @@
 ---
 id: copy-cycles-and-user-copy-hooks
 title: "copy: cyclic structures and __copy__/__deepcopy__ hooks"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

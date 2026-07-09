@@ -1,7 +1,7 @@
 ---
 id: exception-group-nested-and-subgroup-split-api
 title: "ExceptionGroup: nested groups, subgroup/split, BaseExceptionGroup rules"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

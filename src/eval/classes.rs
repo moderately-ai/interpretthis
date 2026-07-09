@@ -232,7 +232,20 @@ pub async fn eval_class_def(
         class_attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
     // Class-body `__slots__ = ('x', 'y')` / `"x"` / `["x"]`.
-    let (slots, slot_names) = parse_slots_attr(class_attrs.get("__slots__"));
+    // Inherit parent slot names when any base uses slots (CPython merges).
+    let (mut slots, mut slot_names) = parse_slots_attr(class_attrs.get("__slots__"));
+    for base in &bases {
+        if let Some(b) = state.classes.get(base) {
+            if b.slots {
+                slots = true;
+                for n in &b.slot_names {
+                    if !slot_names.iter().any(|s| s == n) {
+                        slot_names.push(n.clone());
+                    }
+                }
+            }
+        }
+    }
 
     state.classes.insert(class_name.to_string(), {
         let mut cv = ClassValue::new(class_name);

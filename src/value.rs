@@ -15,6 +15,11 @@ use parking_lot::Mutex;
 /// mutation via any alias is visible through every other alias —
 /// matching CPython's reference semantics for chained assignment,
 /// mutable defaults, and closure captures.
+///
+/// `Mutex` (not `RefCell`) so `Value` stays `Send` across `.await` points
+/// inside `Interpreter::execute`. Hot loops pay lock overhead; a
+/// single-thread `RefCell` model is not used because tool futures and
+/// async eval interleave on the runtime.
 pub type SharedList = Arc<Mutex<Vec<Value>>>;
 
 /// Shared instance-field map backing [`InstanceValue::fields`].
@@ -57,6 +62,23 @@ pub fn int_from_bigint(n: num_bigint::BigInt) -> Value {
         Ok(v) => Value::Int(v),
         Err(_) => Value::BigInt(Box::new(n)),
     }
+}
+
+/// Like [`int_from_bigint`] but rejects magnitudes beyond `max_bits`.
+pub(crate) fn int_from_bigint_limited(
+    n: num_bigint::BigInt,
+    max_bits: u64,
+) -> Result<Value, crate::error::EvalError> {
+    use crate::error::EvalError;
+    use crate::value::ExceptionValue;
+    // bits() is magnitude bits; allow a little headroom for sign.
+    if n.bits() > max_bits {
+        return Err(EvalError::Exception(ExceptionValue::new(
+            "OverflowError",
+            format!("int exceeds max_int_bits limit ({max_bits} bits)"),
+        )));
+    }
+    Ok(int_from_bigint(n))
 }
 
 /// Lift a Python numeric value to `BigInt` (int / bigint / bool).
@@ -221,6 +243,8 @@ pub enum Value {
     Range { start: i64, stop: i64, step: i64 },
     /// Runtime exception instance (for `try`/`except`/`raise`).
     Exception(ExceptionValue),
+    /// Bound method on an exception instance (`eg.subgroup`, `eg.split`).
+    ExceptionMethod { method: String, exception: ExceptionValue },
     /// Deferred tool result — resolved lazily when consumed.
     /// Not serializable; filtered before state export.
     #[serde(skip)]
@@ -1216,6 +1240,7 @@ impl Value {
             Self::Function(_)
             | Self::Lambda(_)
             | Self::Exception(_)
+            | Self::ExceptionMethod { .. }
             | Self::LazyProxy(_)
             | Self::Type(_)
             | Self::Class(_)
@@ -1280,6 +1305,7 @@ impl Value {
             Self::Function(_) | Self::Lambda(_) => "function",
             Self::Range { .. } => "range",
             Self::Exception(_) => "Exception",
+            Self::ExceptionMethod { .. } => "method",
             Self::LazyProxy(_) => "LazyProxy",
             // A type object, a user class, and a builtin exception type
             // are all instances of `type`.
@@ -1509,6 +1535,9 @@ impl fmt::Display for Value {
             // -> `ValueError('boom')`. Display IS str(); reserve the
             // typed repr for the repr() builtin.
             Self::Exception(e) => write!(f, "{}", e.message),
+            Self::ExceptionMethod { method, exception } => {
+                write!(f, "<bound method {method} of {}>", exception.type_name)
+            }
             Self::LazyProxy(p) => write!(f, "<LazyProxy tool={}>", p.tool_name),
             Self::Type(n) | Self::Class(n) => write!(f, "<class '{n}'>"),
             Self::Module(n) => write!(f, "<module '{n}'>"),

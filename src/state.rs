@@ -400,6 +400,9 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::Function(_) | Value::Lambda(_) | Value::LazyProxy(_) => 64,
         Value::Range { .. } => 24,
         Value::Exception(e) => 32 + e.type_name.len() + e.message.len(),
+        Value::ExceptionMethod { method, exception } => {
+            32 + method.len() + exception.type_name.len() + exception.message.len()
+        }
         // Type / class / module handles carry just a name.
         Value::Type(n) | Value::Class(n) | Value::Module(n) => 8 + n.len(),
         Value::ModuleFunction { module, name } => 16 + module.len() + name.len(),
