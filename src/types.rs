@@ -1074,10 +1074,6 @@ fn bool_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     }
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Python int↔float eq matches CPython's lossy compare; the parity corpus pins the cases that matter"
-)]
 fn int_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     let a = crate::value::value_as_bigint(lhs)?;
     match rhs {
@@ -2582,7 +2578,6 @@ fn fraction_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, E
             BinOp::FloorDiv => (a / b).floor(),
             BinOp::Mod => a % b,
             BinOp::Pow => a.powf(b),
-            _ => return None,
         };
         return Some(Ok(Value::Float(result)));
     }
@@ -2607,7 +2602,8 @@ fn fraction_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, E
             }
             (a / b).floor()
         }
-        _ => return None,
+        // Mod / Pow on Fraction: uncommon; leave unsupported for now.
+        BinOp::Mod | BinOp::Pow => return None,
     };
     Some(Ok(Value::Fraction(Box::new(result))))
 }

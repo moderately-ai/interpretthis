@@ -619,10 +619,10 @@ fn matmult_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     let mut out = Vec::with_capacity(a_rows.len());
     for row in &a_rows {
         let mut out_row = Vec::with_capacity(n);
-        for j in 0..n {
+        for col in 0..n {
             let mut sum = 0.0;
-            for (t, &ai) in row.iter().enumerate() {
-                sum += ai * b_rows[t][j];
+            for (ai, brow) in row.iter().zip(b_rows.iter()) {
+                sum += ai * brow[col];
             }
             // Prefer int when the sum is an exact integer in i64 range.
             #[allow(clippy::cast_possible_truncation, clippy::float_cmp)]
@@ -658,18 +658,14 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
                 right.type_name()
             ))
         })?;
+        use num_traits::{Pow, ToPrimitive as _, Zero as _};
         if r < num_bigint::BigInt::from(0) {
-            use num_traits::ToPrimitive as _;
             let l_f = l.to_f64().unwrap_or(f64::INFINITY);
             let r_f = r.to_f64().unwrap_or(f64::NEG_INFINITY);
             Ok(Value::Float(l_f.powf(r_f)))
-        } else if {
-            use num_traits::Zero as _;
-            r.is_zero()
-        } {
+        } else if r.is_zero() {
             Ok(Value::Int(1))
         } else {
-            use num_traits::Pow;
             let exp = u32::try_from(&r).map_err(|_| {
                 EvalError::Exception(crate::value::ExceptionValue::new(
                     "OverflowError",

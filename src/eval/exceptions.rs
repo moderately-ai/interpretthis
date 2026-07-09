@@ -158,7 +158,8 @@ async fn try_match_star_handlers(
 
     if !remaining.is_empty() {
         let re_raise = if remaining.len() == 1 && remaining[0].exceptions.is_none() {
-            remaining.into_iter().next().unwrap()
+            // Single unmatched leaf: re-raise bare (not wrapped).
+            remaining.remove(0)
         } else {
             ExceptionValue::group("ExceptionGroup", exc.message.clone(), remaining)
         };
