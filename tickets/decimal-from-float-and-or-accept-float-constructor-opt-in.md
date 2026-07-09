@@ -1,7 +1,7 @@
 ---
 id: decimal-from-float-and-or-accept-float-constructor-opt-in
 title: Decimal.from_float and/or accept float constructor (opt-in)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

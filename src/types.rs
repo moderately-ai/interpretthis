@@ -2486,15 +2486,33 @@ fn fraction_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
     Some(fraction_to_bigrational(lhs)? < fraction_to_bigrational(rhs)?)
 }
 
+fn fraction_to_f64(value: &Value) -> Option<f64> {
+    use num_traits::ToPrimitive as _;
+    match value {
+        Value::Float(f) => Some(*f),
+        Value::Fraction(f) => f.to_f64(),
+        Value::Int(i) => Some(*i as f64),
+        Value::Bool(b) => Some(f64::from(*b)),
+        _ => None,
+    }
+}
+
 fn fraction_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+    // CPython: Fraction ±/* float → float.
     if matches!(lhs, Value::Float(_)) || matches!(rhs, Value::Float(_)) {
-        // Deferred to FLOAT_TYPE's slot via `None`, but FLOAT_TYPE's
-        // `numeric_arith` is_numeric guard does not include Fraction,
-        // so the dispatcher falls through to TypeError. CPython returns
-        // a float here; closing the gap requires teaching numeric_arith
-        // to lift Fraction to float on mixed operands. See
-        // CONFORMANCE.md#fraction-float-rejection.
-        return None;
+        let a = fraction_to_f64(lhs)?;
+        let b = fraction_to_f64(rhs)?;
+        let result = match op {
+            BinOp::Add => a + b,
+            BinOp::Sub => a - b,
+            BinOp::Mul => a * b,
+            BinOp::Div => a / b,
+            BinOp::FloorDiv => (a / b).floor(),
+            BinOp::Mod => a % b,
+            BinOp::Pow => a.powf(b),
+            _ => return None,
+        };
+        return Some(Ok(Value::Float(result)));
     }
     let (a, b) = (fraction_to_bigrational(lhs)?, fraction_to_bigrational(rhs)?);
     let result: num_rational::BigRational = match op {

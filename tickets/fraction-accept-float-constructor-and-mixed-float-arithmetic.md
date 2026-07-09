@@ -1,7 +1,7 @@
 ---
 id: fraction-accept-float-constructor-and-mixed-float-arithmetic
 title: "Fraction: accept float constructor and mixed float arithmetic"
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

@@ -27,12 +27,37 @@ use crate::{
 };
 
 pub fn has_function(name: &str) -> bool {
+    // from_float is a Decimal classmethod only (type_classmethod), not a
+    // module-level import.
     matches!(name, "Decimal")
+}
+
+/// Classmethods on `decimal.Decimal`.
+#[must_use]
+pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
+    match (type_name, method) {
+        ("Decimal", "from_float") => Some("from_float"),
+        _ => None,
+    }
 }
 
 pub fn call(func: &str, args: &[Value]) -> EvalResult {
     match func {
         "Decimal" => construct_decimal(args.first()),
+        // CPython: Decimal.from_float(0.1) — explicit opt-in to the binary expansion.
+        "from_float" => {
+            let Some(Value::Float(f)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "from_float() argument must be a float".into(),
+                )
+                .into());
+            };
+            // BigDecimal::try_from(f64) uses exact conversion of the binary value.
+            let big = BigDecimal::try_from(*f).map_err(|_| {
+                InterpreterError::ValueError(format!("cannot convert float {f} to Decimal"))
+            })?;
+            Ok(Value::Decimal(Box::new(big)))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'decimal' has no attribute '{func}'"
         ))

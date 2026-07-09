@@ -59,13 +59,13 @@ fn from_single(arg: &Value) -> EvalResult {
         Value::Bool(b) => BigRational::from_integer(BigInt::from(i64::from(*b))),
         Value::Fraction(f) => (**f).clone(),
         Value::String(s) => parse_fraction_str(s)?,
-        Value::Float(_) => {
-            return Err(InterpreterError::TypeError(
-                "Fraction() does not accept float — pass a string instead \
-                 (see CONFORMANCE.md#fraction-float-rejection)"
-                    .into(),
-            )
-            .into());
+        Value::Float(f) => {
+            // Exact rational for the binary float (CPython as_integer_ratio path).
+            BigRational::from_float(*f).ok_or_else(|| {
+                EvalError::from(InterpreterError::ValueError(format!(
+                    "cannot convert float {f} to Fraction"
+                )))
+            })?
         }
         other => {
             return Err(InterpreterError::TypeError(format!(

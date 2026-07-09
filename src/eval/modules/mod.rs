@@ -246,6 +246,7 @@ fn has_function(module: &str, name: &str) -> bool {
 pub fn type_classmethod(module: &str, type_name: &str, method: &str) -> Option<&'static str> {
     match module {
         "datetime" => datetime::type_classmethod(type_name, method),
+        "decimal" => decimal::type_classmethod(type_name, method),
         _ => None,
     }
 }

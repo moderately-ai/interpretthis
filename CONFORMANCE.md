@@ -212,7 +212,7 @@ The currently supported subset on `strftime` / `strptime` covers what `chrono::N
 
 **Rationale**: avoid the binary-float-expansion surprise. CPython's `Decimal.from_float(0.1)` is the explicit-opt-in form for users who want the expansion; we do not yet expose `from_float`.
 
-**Status**: Deliberate divergence. Lift if a real consumer needs `Decimal.from_float`-shape behaviour.
+**Status**: `Decimal(float)` still rejected (use strings for literals). `Decimal.from_float` shipped for explicit binary expansion.
 
 ---
 
@@ -225,7 +225,7 @@ The currently supported subset on `strftime` / `strptime` covers what `chrono::N
 
 **Rationale**: avoids a known surprise on the constructor. The arithmetic divergence is a side-effect of how the dispatch slot tables are populated today — closing it requires teaching `numeric_arith` to lift `Fraction` to `float` on mixed-type operations.
 
-**Status**: Divergence from CPython on both construction and arithmetic-with-float. Pass strings or pre-convert to `float` explicitly.
+**Status**: `Fraction(float)` and Fraction±float→float shipped (CPython-aligned).
 
 ---
 
