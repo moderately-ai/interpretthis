@@ -1,7 +1,7 @@
 ---
 id: wall-clock-timeout-does-not-pre-empt-blocked-tool-futures
 title: Wall-clock timeout does not pre-empt blocked tool futures
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

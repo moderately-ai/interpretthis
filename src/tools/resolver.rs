@@ -135,26 +135,55 @@ pub async fn resolve_and_dispatch(
         tool_kwargs.insert(k.clone(), v.clone());
     }
 
+    let tool_timeout = remaining_tool_timeout(state);
+
     if tool_config.parallelizable {
         // Spawn as a background task — the caller gets a LazyProxy handle
         // that materialises when awaited. The semaphore bounds in-flight
-        // concurrency.
+        // concurrency. When max_execution_time is set, the task itself is
+        // capped to the remaining budget so a hung tool cannot outlive it.
         let semaphore = state.tool_semaphore.clone();
         let handler = tool_config.handler.clone();
         let tool_name = name.to_string();
 
         let handle = tokio::spawn(async move {
             let _permit = semaphore.acquire_owned().await;
-            handler.call(tool_kwargs).await
+            call_handler(handler.as_ref(), tool_kwargs, tool_timeout).await
         });
 
         return Ok(Some(Value::LazyProxy(LazyProxy::new(handle, tool_name))));
     }
 
-    match tool_config.handler.call(tool_kwargs).await {
+    match call_handler(tool_config.handler.as_ref(), tool_kwargs, tool_timeout).await {
         Ok(val) => Ok(Some(val)),
         Err(e) => {
             Err(InterpreterError::Tool { tool_name: name.to_string(), message: e.message }.into())
         }
+    }
+}
+
+/// Remaining wall-clock budget for a tool call, if configured.
+fn remaining_tool_timeout(state: &InterpreterState) -> Option<std::time::Duration> {
+    let max = state.config.max_execution_time?;
+    Some(max.saturating_sub(state.execution_start.elapsed()))
+}
+
+async fn call_handler(
+    handler: &dyn crate::tools::ToolHandler,
+    tool_kwargs: HashMap<String, Value>,
+    timeout: Option<std::time::Duration>,
+) -> Result<Value, crate::tools::ToolError> {
+    use crate::tools::ToolError;
+    match timeout {
+        Some(d) if d.is_zero() => {
+            Err(ToolError::new("tool timed out (no remaining execution budget)"))
+        }
+        Some(d) => match tokio::time::timeout(d, handler.call(tool_kwargs)).await {
+            Ok(r) => r,
+            Err(_) => Err(ToolError::new(format!(
+                "tool timed out after {d:?} (max_execution_time budget)"
+            ))),
+        },
+        None => handler.call(tool_kwargs).await,
     }
 }
