@@ -1,7 +1,7 @@
 ---
 id: int-power-large-exponents-use-float-path-precision-loss
 title: Int power large exponents use float path (precision loss)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

@@ -500,6 +500,8 @@ pub(super) async fn try_builtin(
                     | Value::ToolName(_)
                     | Value::ExceptionType(_)
                     | Value::UnboundClassMethod { .. }
+                    | Value::Partial(_)
+                    | Value::LruCache(_)
             );
             Ok(Some(Value::Bool(is_callable)))
         }

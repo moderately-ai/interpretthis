@@ -1,7 +1,7 @@
 ---
 id: functools-lru-cache-and-cache-decorators
 title: functools.lru_cache and cache decorators
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [e-richer-functools-partial-complete-lru-cache-cmp-to-key-etc]

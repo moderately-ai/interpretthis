@@ -417,7 +417,15 @@ pub(crate) async fn apply_decorator(
             crate::eval::modules::dataclasses::apply_dataclass(state, &class_name, &kwargs)?;
             Ok(Value::Class(class_name))
         }
-        // `@dataclass(frozen=True)` produces a Partial carrying kwargs.
+        // @lru_cache / @cache as bare ModuleFunction decorator.
+        Value::ModuleFunction { module, name }
+            if module == "functools" && (name == "lru_cache" || name == "cache") =>
+        {
+            let maxsize = if name == "cache" { None } else { Some(128) };
+            Ok(crate::eval::modules::functools::make_lru_cache_pub(target, maxsize))
+        }
+        // Partial: `@dataclass(frozen=True)` carries kwargs; `@lru_cache(n)`
+        // carries maxsize. Generic path: call the partial with the target.
         Value::Partial(data) => {
             if let Value::ModuleFunction { module, name } = &data.func {
                 if module == "dataclasses" && name == "dataclass" {
@@ -439,11 +447,11 @@ pub(crate) async fn apply_decorator(
                     return Ok(Value::Class(class_name));
                 }
             }
-            Err(InterpreterError::TypeError(format!(
-                "decorator is not callable (got '{}')",
-                data.func.type_name()
-            ))
-            .into())
+            // General: decorator = partial; result = partial(target)
+            let mut combined = data.args.clone();
+            combined.push(target);
+            crate::eval::functions::call_value_as_function(state, &data.func, &combined, tools)
+                .await
         }
         other => Err(InterpreterError::TypeError(format!(
             "decorator is not callable (got '{}')",

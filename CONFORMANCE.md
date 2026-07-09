@@ -262,3 +262,16 @@ Binding uses `bind_method_params` in `src/eval/functions/method_dispatch.rs`.
 `for x in nt`, `list(nt)`, unpacking, and `len(nt)` work on `collections.namedtuple` instances: `op::iter` / `op::len` materialise field values in `_fields` declaration order (same marker used for `nt[i]` subscript). Attribute access (`nt.x`) and subscript remain supported.
 
 **Status**: Shipped.
+
+---
+
+## Integer power beyond i64
+<a id="int-power-i64-overflow"></a>
+
+CPython `int` is arbitrary-precision: `2**100` returns a big integer.
+`interpretthis` stores `Value::Int` as `i64`. Integer power is computed
+exactly via `BigInt`, then **narrowed** to `i64`. Results that do not fit
+raise `OverflowError` rather than coercing to an imprecise `float`
+(the previous behaviour). Full bigint `Value` support is tracked separately.
+
+**Status**: Intentional until arbitrary-precision int lands.

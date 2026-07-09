@@ -26,7 +26,58 @@ use crate::{
 pub const CMP_KEY_CLASS: &str = "functools.CmpKey";
 
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "wraps" | "reduce" | "partial" | "cmp_to_key" | "_cmp_key")
+    matches!(
+        name,
+        "wraps"
+            | "reduce"
+            | "partial"
+            | "cmp_to_key"
+            | "_cmp_key"
+            | "lru_cache"
+            | "cache"
+            | "_lru_wrap"
+    )
+}
+
+fn parse_maxsize(
+    positional: Option<&Value>,
+    kwargs: &IndexMap<String, Value>,
+) -> Result<Option<usize>, EvalError> {
+    if let Some(v) = kwargs.get("maxsize") {
+        return match v {
+            Value::None => Ok(None),
+            Value::Int(n) if *n < 0 => Ok(None),
+            Value::Int(n) => Ok(Some(usize::try_from(*n).unwrap_or(usize::MAX))),
+            other => Err(InterpreterError::TypeError(format!(
+                "maxsize must be an integer or None, not '{}'",
+                other.type_name()
+            ))
+            .into()),
+        };
+    }
+    match positional {
+        Some(Value::None) => Ok(None),
+        Some(Value::Int(n)) if *n < 0 => Ok(None),
+        Some(Value::Int(n)) => Ok(Some(usize::try_from(*n).unwrap_or(usize::MAX))),
+        None => Ok(Some(128)), // CPython default
+        Some(other) => Err(InterpreterError::TypeError(format!(
+            "maxsize must be an integer or None, not '{}'",
+            other.type_name()
+        ))
+        .into()),
+    }
+}
+
+pub(crate) fn make_lru_cache_pub(func: Value, maxsize: Option<usize>) -> Value {
+    make_lru_cache(func, maxsize)
+}
+
+fn make_lru_cache(func: Value, maxsize: Option<usize>) -> Value {
+    Value::LruCache(std::sync::Arc::new(crate::value::LruCacheData {
+        func,
+        maxsize,
+        cache: parking_lot::Mutex::new(IndexMap::new()),
+    }))
 }
 
 pub async fn call(
@@ -54,6 +105,73 @@ pub async fn call(
                 args: args[1..].to_vec(),
                 keywords: kwargs.clone(),
             })))
+        }
+        "lru_cache" => {
+            // Forms:
+            //   @lru_cache          → ModuleFunction applied as decorator
+            //   @lru_cache()        → maxsize=128 factory
+            //   @lru_cache(maxsize=n)
+            //   @lru_cache(None)    → unbounded
+            //   lru_cache(f)        → wrap f directly
+            if let Some(func) = args.first() {
+                if matches!(func, Value::Function(_) | Value::Lambda(_) | Value::Partial(_)) {
+                    let maxsize = parse_maxsize(args.get(1), kwargs)?;
+                    return Ok(make_lru_cache(func.clone(), maxsize));
+                }
+                // lru_cache(None) → unbounded factory
+                if matches!(func, Value::None) {
+                    return Ok(Value::Partial(Box::new(crate::value::PartialData {
+                        func: Value::ModuleFunction {
+                            module: "functools".into(),
+                            name: "_lru_wrap".into(),
+                        },
+                        args: vec![Value::None],
+                        keywords: IndexMap::new(),
+                    })));
+                }
+            }
+            let maxsize = parse_maxsize(None, kwargs)?;
+            // Factory decorator: bind maxsize, wait for function.
+            Ok(Value::Partial(Box::new(crate::value::PartialData {
+                func: Value::ModuleFunction {
+                    module: "functools".into(),
+                    name: "_lru_wrap".into(),
+                },
+                args: vec![Value::Int(
+                    maxsize.map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX)),
+                )],
+                keywords: IndexMap::new(),
+            })))
+        }
+        "cache" => {
+            // @cache ≡ @lru_cache(maxsize=None)
+            if let Some(func) = args.first() {
+                return Ok(make_lru_cache(func.clone(), None));
+            }
+            Ok(Value::Partial(Box::new(crate::value::PartialData {
+                func: Value::ModuleFunction {
+                    module: "functools".into(),
+                    name: "_lru_wrap".into(),
+                },
+                args: vec![Value::None],
+                keywords: IndexMap::new(),
+            })))
+        }
+        "_lru_wrap" => {
+            // Internal: _lru_wrap(maxsize_sentinel, func)
+            // maxsize: Int(n), None or Int(-1) => unbounded
+            let maxsize = match args.first() {
+                Some(Value::None) | None => None,
+                Some(Value::Int(n)) if *n < 0 => None,
+                Some(Value::Int(n)) => Some(usize::try_from(*n).unwrap_or(usize::MAX)),
+                _ => Some(128),
+            };
+            let func = args.get(1).cloned().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError(
+                    "lru_cache decorator requires a function".into(),
+                ))
+            })?;
+            Ok(make_lru_cache(func, maxsize))
         }
         "cmp_to_key" => {
             // Returns a key= factory: key(obj) wraps obj for cmp-based sort.

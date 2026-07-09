@@ -207,6 +207,9 @@ pub enum Value {
     /// `Partial` is one of the rarer variants and gating Value enum size
     /// on it hurts every other clone / push / match.
     Partial(Box<PartialData>),
+    /// `functools.lru_cache`-wrapped callable. Shared interior state so
+    /// clones share the memo table (CPython identity of the wrapper).
+    LruCache(std::sync::Arc<LruCacheData>),
     /// A callable bound to a stdlib module function (`math.sqrt`, or a name
     /// pulled in via `from math import sqrt`). Carries the module and function
     /// names; the call path dispatches it against the module registry.
@@ -420,6 +423,40 @@ pub struct PartialData {
     pub args: Vec<Value>,
     /// Bound keyword args, merged into the dispatched call's kwargs.
     pub keywords: indexmap::IndexMap<String, Value>,
+}
+
+/// Shared state for [`Value::LruCache`].
+#[derive(Debug)]
+pub struct LruCacheData {
+    /// Wrapped callable.
+    pub func: Value,
+    /// Max entries; `None` = unbounded (CPython `maxsize=None`).
+    pub maxsize: Option<usize>,
+    /// Insertion-ordered memo: key = positional ValueKeys (kwargs unsupported).
+    pub cache: Mutex<IndexMap<Vec<ValueKey>, Value>>,
+}
+
+// LruCache is process-local memo state — not restored from checkpoints.
+impl Serialize for LruCacheData {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("LruCacheData", 2)?;
+        st.serialize_field("func", &self.func)?;
+        st.serialize_field("maxsize", &self.maxsize)?;
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for LruCacheData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            func: Value,
+            maxsize: Option<usize>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self { func: w.func, maxsize: w.maxsize, cache: Mutex::new(IndexMap::new()) })
+    }
 }
 
 /// A regex match: its capture groups (index 0 is the whole match) plus a
@@ -1052,7 +1089,8 @@ impl Value {
             | Self::ExceptionType(_)
             | Self::UnboundClassMethod { .. }
             | Self::Lazy { .. }
-            | Self::Partial { .. } => true,
+            | Self::Partial { .. }
+            | Self::LruCache(_) => true,
             // Counter, TimeDelta: zero is falsy (matches CPython's
             // `bool(timedelta(0))` being False).
             Self::Counter(c) => !c.is_empty(),
@@ -1127,6 +1165,7 @@ impl Value {
             Self::Fraction(_) => "Fraction",
             Self::Lazy { .. } => "generator",
             Self::Partial { .. } => "functools.partial",
+            Self::LruCache(_) => "functools._lru_cache_wrapper",
         }
     }
 
@@ -1468,6 +1507,7 @@ impl fmt::Display for Value {
             // placeholder suffices for printing.
             Self::Lazy { .. } => write!(f, "<generator object>"),
             Self::Partial(data) => write!(f, "functools.partial({})", data.func),
+            Self::LruCache(_) => write!(f, "<functools._lru_cache_wrapper>"),
         }
     }
 }

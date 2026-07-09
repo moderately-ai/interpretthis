@@ -590,6 +590,35 @@ pub(crate) async fn call_value_as_function(
             combined.extend_from_slice(args);
             return Box::pin(call_value_as_function(state, target, &combined, tools)).await;
         }
+        Value::LruCache(data) => {
+            // Memoize by positional ValueKeys only (kwargs unsupported).
+            use crate::eval::literals::value_to_key;
+            let key: Result<Vec<_>, _> = args.iter().map(value_to_key).collect();
+            let key = key.map_err(|_| {
+                InterpreterError::TypeError("lru_cache arguments must be hashable".into())
+            })?;
+            {
+                let mut cache = data.cache.lock();
+                if let Some(hit) = cache.get(&key) {
+                    // LRU: move hit to end
+                    let hit = hit.clone();
+                    cache.shift_remove(&key);
+                    cache.insert(key.clone(), hit.clone());
+                    return Ok(hit);
+                }
+            }
+            let result = Box::pin(call_value_as_function(state, &data.func, args, tools)).await?;
+            let mut cache = data.cache.lock();
+            if let Some(max) = data.maxsize {
+                while cache.len() >= max && max > 0 {
+                    cache.shift_remove_index(0);
+                }
+            }
+            if data.maxsize != Some(0) {
+                cache.insert(key, result.clone());
+            }
+            Ok(result)
+        }
         // User-class instance with `__call__`: dispatch the slot via
         // `call_method`. Callable instances (factories, partial-
         // application objects, configured strategy patterns) are a

@@ -18,3 +18,35 @@
 //! variant with the CPython-matching `Counter({...})` repr. The test
 //! moved to the parity corpus under
 //! `parity_corpus/modules/collections/counter_repr.py`.
+
+use std::collections::HashMap;
+
+use interpretthis::{Interpreter, InterpreterConfig, InterpreterDeps, Tools};
+
+fn interpreter() -> Interpreter {
+    Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default())
+}
+
+/// CONFORMANCE.md#int-power-i64-overflow
+/// CPython returns an arbitrary-precision int for `2**100`. We raise
+/// OverflowError once the result exceeds i64 (prefer loud failure over
+/// the previous silent f64 precision loss).
+#[tokio::test]
+async fn int_pow_overflow_is_error_not_float() {
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r#"
+print(2 ** 10)
+try:
+    print(2 ** 100)
+except OverflowError:
+    print("overflow")
+"#,
+            &Tools::new(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "1024\noverflow");
+}

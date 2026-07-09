@@ -484,6 +484,10 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
                 + data.args.iter().map(estimate_value_size).sum::<usize>()
                 + data.keywords.values().map(estimate_value_size).sum::<usize>()
         }
+        Value::LruCache(data) => {
+            16 + estimate_value_size(&data.func)
+                + data.cache.lock().values().map(estimate_value_size).sum::<usize>()
+        }
     }
 }
 

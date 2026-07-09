@@ -505,19 +505,31 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         let l = to_int(left)?;
         let r = to_int(right)?;
         if r < 0 {
-            // Negative exponent => float result
+            // Negative exponent => float result (CPython returns float for ints).
             let l_f = l as f64;
             let r_f = r as f64;
             Ok(Value::Float(l_f.powf(r_f)))
-        } else if r > 63 {
-            // Very large exponent — use float to avoid overflow
-            Ok(Value::Float((l as f64).powf(r as f64)))
+        } else if r == 0 {
+            Ok(Value::Int(1))
         } else {
-            // Use integer power — r is validated in [0, 63] by the checks above.
-            let exponent = bounded_u32(r)?;
-            Ok(Value::Int(l.checked_pow(exponent).ok_or_else(|| {
-                EvalError::from(InterpreterError::Runtime("integer overflow".into()))
-            })?))
+            // Exact integer power via BigInt. Narrow to i64 when possible;
+            // otherwise OverflowError (no silent f64 precision loss).
+            // Full arbitrary-precision `Value::Int` is a separate ticket.
+            use num_traits::Pow;
+            let exp = u32::try_from(r).map_err(|_| {
+                EvalError::Exception(crate::value::ExceptionValue::new(
+                    "OverflowError",
+                    "exponent too large for integer power",
+                ))
+            })?;
+            let big = num_bigint::BigInt::from(l).pow(exp);
+            match i64::try_from(&big) {
+                Ok(n) => Ok(Value::Int(n)),
+                Err(_) => Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                    "OverflowError",
+                    "integer power result exceeds i64 range (arbitrary-precision int not yet enabled)",
+                ))),
+            }
         }
     }
 }
