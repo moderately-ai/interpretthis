@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-07-09
+
+Post-0.2 hardening: true generator frames, eval stack, security/docs, and
+parity polish. Closes the post-0.2 ticket epic.
+
+### Added
+
+- True generator suspend/resume (`Value::Generator`) for for-based bodies;
+  `next` / `send` / `throw` / `close`; `yield from`; while-based gens stay eager
+- `ExceptionGroup.subgroup` / `.split` with nested flatten
+- `decimal.localcontext` (save/restore `prec`); per-interpreter decimal prec
+  (no process-global atomics)
+- `InterpreterConfig::max_int_bits` resource gate on large shifts
+- Class `__slots__` inheritance across bases
+- Metaclass `__prepare__(name, bases)` namespace seed; method tables restored
+  after `type()` rebuild
+- Non-data descriptor precedence (instance dict shadows `__get__`-only)
+- BigInt-aware `<<` / `>>` with shift-size caps
+- `copy.deepcopy` cycle memo (Arc identity)
+- `cargo deny` config + CI job (advisories/licenses)
+- Table-driven builtin method handlers in `method_dispatch`
+- `ClassValue::new` defaults for synthetic classes
+- Host-facing crate docs for int / ExceptionGroup / async / tool timeouts
+
+### Changed
+
+- `eval_stmt` / `eval_expr` box each match arm separately (~8-deep recursion on
+  default test stacks vs ~3 before)
+- ExceptionType construction unified (direct + indirect calls)
+- State export round-trips BigInt and ExceptionGroup.exceptions
+- CONFORMANCE / STATUS truth pass for 0.2+ surface
+- Dependency-update process documented for PR-disabled workflow
+
+### Notes
+
+- Generator bodies that use `while` still use the eager Lazy buffer path
+- True async/await remains unsupported
+
 ## [0.2.0] — 2026-07-09
 
 Language-surface and stdlib parity expansion after the 0.1.0 extract.
@@ -43,7 +81,7 @@ Language-surface and stdlib parity expansion after the 0.1.0 extract.
 ### Notes
 
 - `async`/`await` remains unsupported (clear runtime error + CONFORMANCE)
-- Full coroutine frames, true async I/O, and cargo-deny are still backlog
+- Full coroutine frames and true async I/O remain backlog
 
 ## [0.1.0] — 2026-07-09
 
@@ -65,5 +103,6 @@ for untrusted and LLM-generated code.
 - Not an embedded CPython; language surface is intentional — see
   [`CONFORMANCE.md`](./CONFORMANCE.md) and [`THREAT_MODEL.md`](./THREAT_MODEL.md).
 
+[0.3.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.3.0
 [0.2.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.2.0
 [0.1.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.1.0
