@@ -1,7 +1,7 @@
 ---
 id: parity-strptime-exception-mro-d-follow-up-g
 title: "Parity: strptime + exception MRO (D follow-up + G)"
-status: todo
+status: closed
 priority: p2
 dependencies: []
 related: [epic-post-0-1-hardening-and-product-backlog]
@@ -9,6 +9,8 @@ scopes: [eval/modules, eval]
 shared_scopes: []
 paths: []
 tags: [parity, eval/modules]
+closed_reason: superseded
+closed_note: Split into d-implement-datetime-strptime and g-full-exception-hierarchy-mro-and-cause-context-chaining
 ---
 ## Why
 CONFORMANCE: strptime not implemented; exception hierarchy only hard-coded subsets.

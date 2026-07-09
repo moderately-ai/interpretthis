@@ -1,14 +1,16 @@
 ---
 id: parity-user-class-dunder-slot-dispatch-a1-a6-spine
 title: "Parity: user-class dunder slot dispatch (A1–A6 spine)"
-status: todo
+status: closed
 priority: p1
 dependencies: []
-related: [epic-post-0-1-hardening-and-product-backlog]
+related: [epic-post-0-1-hardening-and-product-backlog, epic-full-gap-and-divergence-inventory]
 scopes: [eval, core]
 shared_scopes: []
 paths: []
 tags: [parity, eval]
+closed_reason: superseded
+closed_note: Split into a1..a6 granular inventory tickets
 ---
 ## Why
 STATUS.md A1–A6 partial: builtins use TypeObject slots; hand-written user-class
