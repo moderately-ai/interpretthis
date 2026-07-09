@@ -364,6 +364,8 @@ pub(crate) fn call_namedtuple_with_state(
             enum_kind: None,
             annotations: Vec::new(),
             dataclass_fields: None,
+            frozen: false,
+            order: false,
         },
     );
     Ok(Value::Class(class_name_str))

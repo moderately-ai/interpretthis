@@ -384,8 +384,74 @@ pub async fn compare(
             }
         }
     }
+    // `@dataclass(order=True)` — field-tuple ordering when neither side
+    // defined a custom dunder (above).
+    if let Some(r) = dataclass_order_compare(state, op, left, right) {
+        return Ok((r?, None, None));
+    }
     let r = crate::eval::operations::compare_builtin(state, op, left, right)?;
     Ok((r, None, None))
+}
+
+/// Field-tuple comparison for `@dataclass(order=True)` instances of the
+/// same class. Returns `None` when the pair is not an ordered dataclass.
+fn dataclass_order_compare(
+    state: &InterpreterState,
+    op: rustpython_parser::ast::CmpOp,
+    left: &Value,
+    right: &Value,
+) -> Option<Result<bool, EvalError>> {
+    use rustpython_parser::ast::CmpOp;
+    let (Value::Instance(a), Value::Instance(b)) = (left, right) else {
+        return None;
+    };
+    if a.class_name != b.class_name {
+        return None;
+    }
+    let class = state.classes.get(&a.class_name)?;
+    if !class.order {
+        return None;
+    }
+    let fields = class.dataclass_fields.as_ref()?;
+    // Build compare-key tuples (fields with compare=True, in order).
+    let key_a: Vec<&Value> =
+        fields.iter().filter(|f| f.compare).filter_map(|f| a.fields.get(&f.name)).collect();
+    let key_b: Vec<&Value> =
+        fields.iter().filter(|f| f.compare).filter_map(|f| b.fields.get(&f.name)).collect();
+    // Lexicographic compare using values_equal / dispatch_lt for elements.
+    let mut less = false;
+    let mut equal = true;
+    for (va, vb) in key_a.iter().zip(key_b.iter()) {
+        if crate::eval::operations::values_equal_pub(va, vb) {
+            continue;
+        }
+        equal = false;
+        match crate::types::dispatch_lt(va, vb) {
+            Ok(true) => {
+                less = true;
+                break;
+            }
+            Ok(false) => {
+                less = false;
+                break;
+            }
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    if equal && key_a.len() != key_b.len() {
+        equal = false;
+        less = key_a.len() < key_b.len();
+    }
+    let result = match op {
+        CmpOp::Eq => equal,
+        CmpOp::NotEq => !equal,
+        CmpOp::Lt => less && !equal,
+        CmpOp::LtE => less || equal,
+        CmpOp::Gt => !less && !equal,
+        CmpOp::GtE => !less || equal,
+        _ => return None,
+    };
+    Some(Ok(result))
 }
 
 /// Async-aware `<` for sorted / min / max. Dispatches `__lt__` on a
@@ -397,6 +463,7 @@ pub async fn lt(
     right: &Value,
     tools: &Tools,
 ) -> Result<bool, EvalError> {
+    use rustpython_parser::ast::CmpOp;
     if let Some(method) = instance_slot(state, left, "__lt__") {
         let (returned, _self) =
             invoke_slot(state, left, &method, std::slice::from_ref(right), tools).await?;
@@ -406,6 +473,9 @@ pub async fn lt(
         let (returned, _self) =
             invoke_slot(state, right, &method, std::slice::from_ref(left), tools).await?;
         return Ok(returned.is_truthy());
+    }
+    if let Some(r) = dataclass_order_compare(state, CmpOp::Lt, left, right) {
+        return r;
     }
     crate::types::dispatch_lt(left, right)
 }

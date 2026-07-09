@@ -79,7 +79,7 @@ pub use interpreter::{Interpreter, InterpreterDeps, InterpreterResponse};
 pub use serialize::STATE_FORMAT_VERSION;
 // --- Public re-exports: tool system ---
 pub use tools::{KwargsExt, ToolDefinition, ToolError, ToolHandler, Tools};
-pub use value::{
-    ClassValue, ExceptionValue, FunctionDef, FunctionParams, InstanceValue, LambdaDef, MatchGroup,
-    MatchValue, Param, SharedList, Value, ValueKey, shared_list,
-};
+// Host-facing value surface. Deeper interpreter shapes (`ClassValue`,
+// `FunctionDef`, `MatchValue`, …) remain available under `interpretthis::value`
+// for advanced hosts but are intentionally not re-exported at the crate root.
+pub use value::{ExceptionValue, Value, ValueKey, shared_list};

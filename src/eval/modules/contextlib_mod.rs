@@ -125,6 +125,8 @@ fn ensure_marker_classes(state: &mut InterpreterState) {
                 enum_kind: None,
                 annotations: Vec::new(),
                 dataclass_fields: None,
+                frozen: false,
+                order: false,
             },
         );
     }

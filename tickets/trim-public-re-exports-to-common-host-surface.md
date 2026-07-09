@@ -1,7 +1,7 @@
 ---
 id: trim-public-re-exports-to-common-host-surface
 title: Trim public re-exports to common host surface
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-post-0-1-hardening-and-product-backlog]

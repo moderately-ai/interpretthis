@@ -210,6 +210,8 @@ pub async fn eval_class_def(
             enum_kind,
             annotations,
             dataclass_fields: None,
+            frozen: false,
+            order: false,
         },
     );
     state
@@ -401,6 +403,34 @@ pub(crate) async fn apply_decorator(
             };
             crate::eval::modules::dataclasses::apply_dataclass(state, &class_name, &kwargs)?;
             Ok(Value::Class(class_name))
+        }
+        // `@dataclass(frozen=True)` produces a Partial carrying kwargs.
+        Value::Partial(data) => {
+            if let Value::ModuleFunction { module, name } = &data.func {
+                if module == "dataclasses" && name == "dataclass" {
+                    let class_name = match &target {
+                        Value::Class(n) => n.clone(),
+                        other => {
+                            return Err(InterpreterError::TypeError(format!(
+                                "@dataclass requires a class target (got '{}')",
+                                other.type_name()
+                            ))
+                            .into());
+                        }
+                    };
+                    crate::eval::modules::dataclasses::apply_dataclass(
+                        state,
+                        &class_name,
+                        &data.keywords,
+                    )?;
+                    return Ok(Value::Class(class_name));
+                }
+            }
+            Err(InterpreterError::TypeError(format!(
+                "decorator is not callable (got '{}')",
+                data.func.type_name()
+            ))
+            .into())
         }
         other => Err(InterpreterError::TypeError(format!(
             "decorator is not callable (got '{}')",

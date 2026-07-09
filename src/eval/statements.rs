@@ -325,6 +325,15 @@ pub fn assign_target<'a>(
                         if let Value::Instance(inst) = &obj {
                             let class_name = inst.class_name.clone();
                             let attr_name = attr_node.attr.as_str().to_string();
+                            // `@dataclass(frozen=True)` — reject field writes.
+                            if state.classes.get(&class_name).is_some_and(|c| c.frozen) {
+                                return Err(EvalError::Exception(
+                                    crate::value::ExceptionValue::new(
+                                        "FrozenInstanceError",
+                                        format!("cannot assign to field '{attr_name}'"),
+                                    ),
+                                ));
+                            }
                             if let Some(prop) = crate::eval::classes::lookup_property(
                                 state,
                                 &class_name,

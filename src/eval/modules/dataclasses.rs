@@ -66,9 +66,19 @@ pub fn call(
                 apply_dataclass(state, class_name, kwargs)?;
                 return Ok(Value::Class(class_name.clone()));
             }
-            // Otherwise return a callable decorator handle. The
-            // ModuleFunction handle will be applied to the class by the
-            // decorator pipeline.
+            // `@dataclass(frozen=True, …)` — return a Partial that carries
+            // the kwargs so the decorator pipeline can apply them.
+            if !kwargs.is_empty() {
+                return Ok(Value::Partial(Box::new(crate::value::PartialData {
+                    func: Value::ModuleFunction {
+                        module: "dataclasses".to_string(),
+                        name: "dataclass".to_string(),
+                    },
+                    args: Vec::new(),
+                    keywords: kwargs.clone(),
+                })));
+            }
+            // Bare `@dataclass` — ModuleFunction handle applied later.
             Ok(Value::ModuleFunction {
                 module: "dataclasses".to_string(),
                 name: "dataclass".to_string(),
@@ -281,15 +291,15 @@ fn resolve_class_name(arg: Option<&Value>) -> Result<String, EvalError> {
 /// `__match_args__` (a tuple of field names) so PEP-634 class patterns
 /// work without further plumbing.
 ///
-/// CPython kwargs not yet honoured (`frozen`, `order`, `slots`,
-/// `kw_only`) are accepted but no-op; the corpus pins the bare
-/// `@dataclass` behaviour and the kwargs-only follow-ons land as
-/// independent slices.
+/// Honours `frozen=` and `order=` kwargs. `slots=` / `kw_only=` are
+/// accepted but no-op (see tickets).
 pub(crate) fn apply_dataclass(
     state: &mut InterpreterState,
     class_name: &str,
-    _kwargs: &IndexMap<String, Value>,
+    kwargs: &IndexMap<String, Value>,
 ) -> Result<(), EvalError> {
+    let frozen = kwargs.get("frozen").is_some_and(Value::is_truthy);
+    let order = kwargs.get("order").is_some_and(Value::is_truthy);
     let class = state
         .classes
         .get(class_name)
@@ -333,6 +343,8 @@ pub(crate) fn apply_dataclass(
         .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
     class_mut.class_attrs.insert("__match_args__".to_string(), match_args);
     class_mut.dataclass_fields = Some(fields);
+    class_mut.frozen = frozen;
+    class_mut.order = order;
     Ok(())
 }
 

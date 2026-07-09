@@ -473,6 +473,12 @@ pub struct ClassValue {
     /// `__init__`, `__repr__`, and `__eq__` behaviour at instance-time.
     #[serde(default)]
     pub dataclass_fields: Option<Vec<DataclassField>>,
+    /// `@dataclass(frozen=True)` — instance field writes raise FrozenInstanceError.
+    #[serde(default)]
+    pub frozen: bool,
+    /// `@dataclass(order=True)` — rich comparisons use field tuples.
+    #[serde(default)]
+    pub order: bool,
 }
 
 /// A single field of an `@dataclass`-decorated class.

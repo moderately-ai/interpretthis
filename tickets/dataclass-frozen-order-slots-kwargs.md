@@ -1,7 +1,7 @@
 ---
 id: dataclass-frozen-order-slots-kwargs
 title: "Dataclass: frozen, order, slots kwargs"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]
