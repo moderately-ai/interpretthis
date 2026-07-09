@@ -214,6 +214,11 @@ pub async fn eval_call(
                             type_name: String,
                         },
                         Class(String),
+                        /// Eager generator buffer (`Value::Lazy`) + protocol method.
+                        Generator {
+                            receiver: Value,
+                            method: String,
+                        },
                     }
                     // Place navigation only models Instance/Dict/List slots.
                     // `module.member.method(...)` (Attr step on Module) cannot
@@ -233,6 +238,14 @@ pub async fn eval_call(
                                 type_name: name.clone(),
                             }),
                             Value::Class(class_name) => Ok(Dispatch::Class(class_name.clone())),
+                            Value::Lazy { .. }
+                                if super::generators::is_generator_method(method_name) =>
+                            {
+                                Ok(Dispatch::Generator {
+                                    receiver: target.clone(),
+                                    method: method_name.to_string(),
+                                })
+                            }
                             _ => {
                                 let outcome =
                                     dispatch_method(target, method_name, &resolved_args, &kwargs)?;
@@ -248,6 +261,15 @@ pub async fn eval_call(
                             Dispatch::Done(value, mem_delta) => {
                                 place::apply_mem_delta(state, mem_delta)?;
                                 return Ok(value);
+                            }
+                            Dispatch::Generator { receiver, method } => {
+                                return super::generators::dispatch_generator_method(
+                                    state,
+                                    &receiver,
+                                    &method,
+                                    &resolved_args,
+                                    &kwargs,
+                                );
                             }
                             Dispatch::Module(module) => {
                                 return crate::eval::modules::call_function(
@@ -372,6 +394,17 @@ pub async fn eval_call(
             // discarded value, matching CPython where `[1, 2].append(3)` mutates
             // an object that is immediately thrown away.
             let mut temp = eval_expr(state, obj_expr, tools).await?;
+            if matches!(temp, Value::Lazy { .. })
+                && super::generators::is_generator_method(method_name)
+            {
+                return super::generators::dispatch_generator_method(
+                    state,
+                    &temp,
+                    method_name,
+                    &resolved_args,
+                    &kwargs,
+                );
+            }
             if matches!(temp, Value::Instance(_)) {
                 let call = CallArgs { positional: &resolved_args, keyword: &kwargs };
                 let (returned, _self) = crate::eval::classes::instance_method_call(

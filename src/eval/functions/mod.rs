@@ -22,6 +22,7 @@ mod builtins;
 mod call;
 mod definitions;
 pub(crate) mod dispatch;
+mod generators;
 pub(crate) mod helpers;
 mod method_dispatch;
 

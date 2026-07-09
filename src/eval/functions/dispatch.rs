@@ -404,40 +404,77 @@ pub(crate) async fn call_value_as_function(
         //   the slot and dispatch in-place. Mutations through the bound method (xs.append stashed
         //   as `push`) propagate back to the original variable. Memory delta applied to the budget
         //   after the borrow ends.
-        Value::BoundMethod { receiver, method } => match receiver {
-            crate::value::BoundMethodReceiver::Snapshot(value) => {
-                let mut recv = (**value).clone();
-                let empty_kwargs = IndexMap::new();
-                Ok(dispatch_method(&mut recv, method, args, &empty_kwargs)?.value)
-            }
-            crate::value::BoundMethodReceiver::Place { root, steps } => {
-                use crate::{
-                    eval::place::{PlaceStep, apply_mem_delta, with_navigate_mut},
-                    value::BoundMethodStep,
-                };
+        Value::BoundMethod { receiver, method } => {
+            match receiver {
+                crate::value::BoundMethodReceiver::Snapshot(value) => {
+                    let empty_kwargs = IndexMap::new();
+                    if matches!(**value, Value::Lazy { .. })
+                        && super::generators::is_generator_method(method)
+                    {
+                        return super::generators::dispatch_generator_method(
+                            state,
+                            value,
+                            method,
+                            args,
+                            &empty_kwargs,
+                        );
+                    }
+                    let mut recv = (**value).clone();
+                    Ok(dispatch_method(&mut recv, method, args, &empty_kwargs)?.value)
+                }
+                crate::value::BoundMethodReceiver::Place { root, steps } => {
+                    use crate::{
+                        eval::place::{PlaceStep, apply_mem_delta, with_navigate_mut},
+                        value::BoundMethodStep,
+                    };
 
-                let pl_steps: Vec<PlaceStep> = steps
-                    .iter()
-                    .map(|s| match s {
-                        BoundMethodStep::Index(v) => PlaceStep::Index(v.clone()),
-                        BoundMethodStep::Attr(n) => PlaceStep::Attr(n.clone()),
-                    })
-                    .collect();
+                    let pl_steps: Vec<PlaceStep> = steps
+                        .iter()
+                        .map(|s| match s {
+                            BoundMethodStep::Index(v) => PlaceStep::Index(v.clone()),
+                            BoundMethodStep::Attr(n) => PlaceStep::Attr(n.clone()),
+                        })
+                        .collect();
 
-                let empty_kwargs = IndexMap::new();
-                let outcome = {
-                    let root_slot = state
-                        .variables
-                        .get_mut(root)
-                        .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(root)))?;
-                    with_navigate_mut(root_slot, &pl_steps, |target| {
-                        dispatch_method(target, method, args, &empty_kwargs)
-                    })??
-                };
-                apply_mem_delta(state, outcome.mem_delta)?;
-                Ok(outcome.value)
+                    let empty_kwargs = IndexMap::new();
+                    // Generator methods need `&mut state` for the cursor map —
+                    // classify under the place borrow, then dispatch after.
+                    let gen_recv = {
+                        let root_slot = state.variables.get_mut(root).ok_or_else(|| {
+                            EvalError::from(InterpreterError::name_not_defined(root))
+                        })?;
+                        with_navigate_mut(root_slot, &pl_steps, |target| {
+                            if matches!(target, Value::Lazy { .. })
+                                && super::generators::is_generator_method(method)
+                            {
+                                Ok::<Option<Value>, EvalError>(Some(target.clone()))
+                            } else {
+                                Ok(None)
+                            }
+                        })??
+                    };
+                    if let Some(recv) = gen_recv {
+                        return super::generators::dispatch_generator_method(
+                            state,
+                            &recv,
+                            method,
+                            args,
+                            &empty_kwargs,
+                        );
+                    }
+                    let outcome = {
+                        let root_slot = state.variables.get_mut(root).ok_or_else(|| {
+                            EvalError::from(InterpreterError::name_not_defined(root))
+                        })?;
+                        with_navigate_mut(root_slot, &pl_steps, |target| {
+                            dispatch_method(target, method, args, &empty_kwargs)
+                        })??
+                    };
+                    apply_mem_delta(state, outcome.mem_delta)?;
+                    Ok(outcome.value)
+                }
             }
-        },
+        }
         // Unbound method descriptor — `str.upper`, `list.append`.
         // First positional arg becomes the receiver; rest are the
         // method's own arguments. CPython:

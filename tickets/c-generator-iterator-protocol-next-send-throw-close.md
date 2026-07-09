@@ -1,7 +1,7 @@
 ---
 id: c-generator-iterator-protocol-next-send-throw-close
 title: "C: generator iterator protocol (next/send/throw/close)"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]
