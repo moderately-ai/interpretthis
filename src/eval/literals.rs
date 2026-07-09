@@ -73,7 +73,13 @@ pub async fn eval_dict(
         if let Some(key_expr) = key_opt {
             let key = eval_expr(state, key_expr, tools).await?;
             let val = eval_expr(state, value_expr, tools).await?;
-            map.insert(crate::eval::op::key(state, &key, tools).await?, val);
+            if matches!(key, Value::Instance(_)) {
+                // Instance keys: hash + `__eq__` replace (not structural IndexMap Eq).
+                crate::eval::op::dict_insert_instance_key_pub(state, &mut map, &key, val, tools)
+                    .await?;
+            } else {
+                map.insert(crate::eval::op::key(state, &key, tools).await?, val);
+            }
         } else {
             // **dict unpacking
             let unpacked = eval_expr(state, value_expr, tools).await?;
@@ -123,10 +129,16 @@ pub async fn eval_set(
     for elt in &node.elts {
         let candidate = eval_expr(state, elt, tools).await?;
         let exists = if let Value::Instance(_) = &candidate {
-            // Instance dedup respects user __eq__ — kept on the linear
-            // scan path. Sets of mixed Instance + builtin values do an
-            // extra Instance-only scan; rare in practice.
-            items.iter().any(|v| crate::eval::operations::values_equal_pub(v, &candidate))
+            // Instance dedup via async `__eq__` (structural scan misses
+            // custom equality such as case-insensitive wrappers).
+            let mut found = false;
+            for v in &items {
+                if crate::eval::op::eq(state, v, &candidate, tools).await? {
+                    found = true;
+                    break;
+                }
+            }
+            found
         } else {
             value_to_key(&candidate).is_ok_and(|ck| !seen.insert(ck))
         };

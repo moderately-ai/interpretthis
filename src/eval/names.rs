@@ -433,7 +433,10 @@ pub async fn eval_subscript(
                             | Value::Range { .. }
                             | Value::Bytes(_)
                     );
-                    if take_fast_path {
+                    // Instance keys need async `__hash__` / `__eq__` via
+                    // `op::getitem`. The sync `dispatch_getitem` path rejects
+                    // them as unhashable (`type_name() == "object"`).
+                    if take_fast_path && !matches!(index, Value::Instance(_)) {
                         return crate::types::dispatch_getitem(container, &index);
                     }
                 }

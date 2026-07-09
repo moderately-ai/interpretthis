@@ -105,6 +105,18 @@ pub async fn eval_call(
                 return crate::eval::strings::str_format(&template, &[], &kw);
             }
 
+            // list.count / index / remove need async `__eq__` when elements
+            // or the needle are user-class instances. The sync method table
+            // only has structural `values_equal`.
+            if matches!(method_name, "count" | "index" | "remove") {
+                if let Some(result) =
+                    list_eq_method(state, obj_expr, method_name, &resolved_args, &kwargs, tools)
+                        .await?
+                {
+                    return Ok(result);
+                }
+            }
+
             // `list.sort()` is special-cased: CPython 3.12 makes both
             // `key=` and `reverse=` keyword-only, and key= needs async
             // call_value_as_function. Shares `dsu_sort` with `sorted`.
@@ -457,6 +469,105 @@ pub async fn eval_call(
     // variant payload is the bare identifier — passing a pre-formatted sentence
     // here double-wraps it into `name 'name '…' is not defined' is not defined`.
     Err(InterpreterError::name_not_defined(name).into())
+}
+
+/// Async `list.count` / `list.index` / `list.remove` using user-class
+/// `__eq__` when needed. Returns `Ok(None)` if the receiver is not a
+/// list (caller falls through to the positional method table).
+async fn list_eq_method(
+    state: &mut InterpreterState,
+    obj_expr: &Expr,
+    method_name: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> Result<Option<Value>, EvalError> {
+    use crate::eval::functions::{reject_kwargs, to_len_i64};
+
+    reject_kwargs(method_name, kwargs)?;
+    let needle = args.first().ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "{method_name}() takes exactly 1 argument"
+        )))
+    })?;
+
+    let raw_place = place::eval_place(state, obj_expr, tools).await?;
+    let usable_place =
+        raw_place.filter(|p| p.is_navigable() && state.variables.contains_key(&p.root));
+
+    // Snapshot list items under the place lock (or from a temporary).
+    let items: Vec<Value> = if let Some(pl) = &usable_place {
+        let root = state
+            .variables
+            .get_mut(&pl.root)
+            .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&pl.root)))?;
+        let got = place::with_navigate_mut(root, &pl.steps, |target| {
+            let Value::List(items) = target else {
+                return Ok::<Option<Vec<Value>>, EvalError>(None);
+            };
+            Ok(Some(items.lock().clone()))
+        })??;
+        let Some(v) = got else {
+            return Ok(None);
+        };
+        v
+    } else {
+        let obj = eval_expr(state, obj_expr, tools).await?;
+        let Value::List(items) = obj else {
+            return Ok(None);
+        };
+        match std::sync::Arc::try_unwrap(items) {
+            Ok(mutex) => mutex.into_inner(),
+            Err(shared) => shared.lock().clone(),
+        }
+    };
+
+    // Find first equal index (shared by index/remove).
+    let mut first_eq: Option<usize> = None;
+    let mut count = 0i64;
+    for (i, item) in items.iter().enumerate() {
+        if crate::eval::op::eq(state, item, needle, tools).await? {
+            count = count.saturating_add(1);
+            if first_eq.is_none() {
+                first_eq = Some(i);
+            }
+        }
+    }
+
+    match method_name {
+        "count" => Ok(Some(Value::Int(count))),
+        "index" => match first_eq {
+            Some(i) => Ok(Some(Value::Int(to_len_i64(i)?))),
+            None => Err(EvalError::Exception(ExceptionValue::new(
+                "ValueError",
+                format!("{} is not in list", needle.repr()),
+            ))),
+        },
+        "remove" => {
+            let Some(idx) = first_eq else {
+                return Err(EvalError::Exception(ExceptionValue::new(
+                    "ValueError",
+                    "list.remove(x): x not in list",
+                )));
+            };
+            if let Some(pl) = usable_place {
+                let root = state
+                    .variables
+                    .get_mut(&pl.root)
+                    .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&pl.root)))?;
+                let freed = place::with_navigate_mut(root, &pl.steps, |target| {
+                    let Value::List(items) = target else {
+                        return Ok::<usize, EvalError>(0);
+                    };
+                    let removed = items.lock().remove(idx);
+                    Ok(estimate_value_size(&removed))
+                })??;
+                place::apply_mem_delta(state, -place::to_isize(freed))?;
+            }
+            Ok(Some(Value::None))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Extract function name and method call info from a Call func expression.

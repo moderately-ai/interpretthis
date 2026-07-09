@@ -1056,7 +1056,10 @@ pub(super) async fn try_builtin(
         }
         "hash" => {
             check_arg_count(name, args, 1, 1)?;
-            crate::types::dispatch_hash(state, &args[0]).map(|h| Some(Value::Int(h)))
+            // Route through `op::hash` so user-class `__hash__` runs; the
+            // sync `dispatch_hash` path only covers builtins + identity.
+            let h = crate::eval::op::hash(state, &args[0], tools).await?;
+            Ok(Some(Value::Int(h)))
         }
         "pow" => {
             // CPython: pow(base, exp[, mod]). The 3-arg form is integer

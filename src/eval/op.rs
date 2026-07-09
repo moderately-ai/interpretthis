@@ -90,11 +90,13 @@ pub async fn getitem(
         return Ok(returned);
     }
     if let (Value::Dict(map), Value::Instance(_)) = (container, index) {
-        let k = key(state, index, tools).await?;
-        return map
-            .get(&k)
-            .cloned()
-            .ok_or_else(|| EvalError::Exception(crate::value::ExceptionValue::key_error(&k)));
+        return match dict_get_instance_key(state, map, index, tools).await? {
+            Some(v) => Ok(v),
+            None => {
+                let k = key(state, index, tools).await?;
+                Err(EvalError::Exception(crate::value::ExceptionValue::key_error(&k)))
+            }
+        };
     }
     crate::types::dispatch_getitem(container, index)
 }
@@ -451,6 +453,72 @@ pub async fn key(
     crate::eval::literals::value_to_key(value)
 }
 
+/// Async equality for values that may be user-class instances with a
+/// custom `__eq__`. Builtins fall through to `dispatch_eq`.
+pub async fn eq(
+    state: &mut InterpreterState,
+    left: &Value,
+    right: &Value,
+    tools: &Tools,
+) -> Result<bool, EvalError> {
+    use rustpython_parser::ast::CmpOp;
+    let (result, _, _) = compare(state, CmpOp::Eq, left, right, tools).await?;
+    Ok(result)
+}
+
+/// Look up `needle` in a dict whose keys may include user-class
+/// instances. Hash via `__hash__`, then match entries with equal hash
+/// using async `__eq__` (IndexMap's `Eq` is structural-only for
+/// Instance keys and cannot run user dunders).
+async fn dict_get_instance_key(
+    state: &mut InterpreterState,
+    map: &indexmap::IndexMap<crate::value::ValueKey, Value>,
+    needle: &Value,
+    tools: &Tools,
+) -> Result<Option<Value>, EvalError> {
+    let h = hash(state, needle, tools).await?;
+    for (k, v) in map {
+        if let crate::value::ValueKey::Instance { hash: kh, value } = k {
+            if *kh == h && eq(state, value, needle, tools).await? {
+                return Ok(Some(v.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Insert-or-replace for an Instance dict key using `__hash__` + `__eq__`.
+pub async fn dict_insert_instance_key_pub(
+    state: &mut InterpreterState,
+    map: &mut indexmap::IndexMap<crate::value::ValueKey, Value>,
+    needle: &Value,
+    value: Value,
+    tools: &Tools,
+) -> Result<(), EvalError> {
+    let h = hash(state, needle, tools).await?;
+    // Replace the first equal-by-eq entry (CPython keeps first-inserted key object).
+    let mut replace_at: Option<usize> = None;
+    for (idx, (k, _)) in map.iter().enumerate() {
+        if let crate::value::ValueKey::Instance { hash: kh, value: stored } = k {
+            if *kh == h && eq(state, stored, needle, tools).await? {
+                replace_at = Some(idx);
+                break;
+            }
+        }
+    }
+    if let Some(idx) = replace_at {
+        if let Some(entry) = map.get_index_mut(idx) {
+            *entry.1 = value;
+        }
+    } else {
+        map.insert(
+            crate::value::ValueKey::Instance { hash: h, value: Box::new(needle.clone()) },
+            value,
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Predicate protocols — len / contains / truthy.
 // ---------------------------------------------------------------------------
@@ -500,15 +568,23 @@ pub async fn contains(
     }
     if matches!(item, Value::Instance(_)) {
         if let Value::Dict(map) = container {
-            let k = key(state, item, tools).await?;
-            return Ok(map.contains_key(&k));
+            return Ok(dict_get_instance_key(state, map, item, tools).await?.is_some());
         }
-        if let Value::Set(items) = container {
+        // list / tuple / set: scan with async `__eq__` (structural
+        // `values_equal` misses custom equality logic).
+        if let Value::List(items) = container {
+            let snapshot = items.lock().clone();
+            for stored in &snapshot {
+                if eq(state, stored, item, tools).await? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        if let Value::Tuple(items) | Value::Set(items) = container {
             for stored in items {
-                if let Value::Instance(_) = stored {
-                    if crate::eval::operations::values_equal_pub(stored, item) {
-                        return Ok(true);
-                    }
+                if eq(state, stored, item, tools).await? {
+                    return Ok(true);
                 }
             }
             return Ok(false);

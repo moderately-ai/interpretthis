@@ -10,7 +10,7 @@ what has shipped, what is partial, and what is still open.
 |---|---|---|
 | Foundation | Differential corpus runner, `STATE_FORMAT_VERSION`, CONFORMANCE / THREAT / MODULE_TEMPLATE | ✅ shipped |
 | A0 — Type infrastructure | `TypeObject` + slot tables + builtin singletons | ✅ shipped |
-| A1 — Hash/equality dispatch | `__eq__` / `__hash__` + bool↔int unification + user-class `__eq__` | ⚠️ partial — builtins on slots; hand-written user-class `__eq__` still falls through to pointer identity (dataclass-synthesized `__eq__` works) |
+| A1 — Hash/equality dispatch | `__eq__` / `__hash__` + bool↔int unification + user-class `__eq__` | ✅ shipped — async `op::compare` / `op::hash` / `op::eq`; dict/set/list membership + `list.count`/`index`/`remove` + `hash()` builtin; custom `__eq__` beyond structural fields covered |
 | A2 — Ordering dispatch | `__lt__` / `__le__` / `__gt__` / `__ge__` / `__contains__` | ⚠️ partial — builtins on slots; user-class not yet |
 | A3 — Arithmetic dispatch | Binary / unary / augmented arith + reflected + `NotImplemented` | ⚠️ partial — builtins on slots; user-class not yet |
 | A4 — Iteration dispatch | `__iter__` / `__next__` | ⚠️ partial — builtins on slots; user-class not yet |
