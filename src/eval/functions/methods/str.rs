@@ -202,11 +202,11 @@ pub(crate) fn dispatch_string_method(
             };
             Ok(Value::Bool(s.ends_with(suffix)))
         }
-        // casefold collapses to lower for ASCII; full Unicode
-        // case-folding (eg. ß → ss) is a separate refinement we
-        // don't currently model — to_lowercase already handles the
-        // vast majority of customer text.
-        "casefold" => Ok(Value::String(s.to_lowercase().into())),
+        // Unicode-aware casefold for the common non-lower surprises:
+        // German ß → ss, Greek final sigma. Remaining characters use
+        // Rust's to_lowercase (covers most scripts; not a full UCD
+        // CaseFolding.txt pass).
+        "casefold" => Ok(Value::String(unicode_casefold(s).into())),
         "encode" => {
             // CPython: str.encode(encoding="utf-8", errors="strict").
             // We only support utf-8 (the default); other encodings
@@ -675,4 +675,17 @@ fn rsplit_whitespace_max(s: &str, maxsplit: i64) -> Result<Vec<Value>, EvalError
         parts.push(Value::String((*w).into()));
     }
     Ok(parts)
+}
+
+/// Approximate Unicode casefold (Python `str.casefold`).
+fn unicode_casefold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            'ß' | 'ẞ' => out.push_str("ss"),
+            'ς' | 'Σ' => out.push('σ'),
+            c => out.extend(c.to_lowercase()),
+        }
+    }
+    out
 }
