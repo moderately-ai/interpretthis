@@ -10,6 +10,7 @@ use crate::{
     eval::place,
     value::{Value, shared_list},
 };
+// EvalError used for BigInt method overflow path.
 
 /// The positional and keyword arguments of a call, bundled so call-machinery
 /// signatures stay under the argument-count limit and the pair always travels
@@ -166,16 +167,21 @@ pub(super) async fn resolve_method_kwargs(
 
 /// Dispatch a method call against a mutable receiver slot.
 ///
-/// Read-only methods return a fresh value (`mem_delta == 0`); mutating methods
-/// modify `obj` in place and report the byte delta. `args` / `kwargs` must
-/// already be proxy-resolved (see [`resolve_method_args`] /
-/// [`resolve_method_kwargs`]).
+/// Per-type method tables live here (keyed by the builtin type name from
+/// [`crate::types::type_name_of`]); `TypeObject::has_methods_table` marks
+/// which builtins participate. Read-only methods return a fresh value
+/// (`mem_delta == 0`); mutating methods modify `obj` in place and report
+/// the byte delta. `args` / `kwargs` must already be proxy-resolved
+/// (see [`resolve_method_args`] / [`resolve_method_kwargs`]).
 pub(super) fn dispatch_method(
     obj: &mut Value,
     method: &str,
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
+    // Prefer TypeObject::has_methods_table when the value is on the
+    // type-object table; module-backed variants (ReMatch, HashDigest
+    // already flagged, Date*) still dispatch via the match below.
     match obj {
         Value::String(s) => {
             methods::str::dispatch_string_method(s, method, args, kwargs).map(MethodOutcome::pure)
@@ -236,16 +242,34 @@ pub(super) fn dispatch_method(
         Value::Int(i) => {
             methods::int::dispatch_int_method(*i, method, args, kwargs).map(MethodOutcome::pure)
         }
+        Value::BigInt(i) => {
+            // int methods that need i64 (bit_length, etc.) narrow or error.
+            match i64::try_from(i.as_ref()) {
+                Ok(n) => methods::int::dispatch_int_method(n, method, args, kwargs)
+                    .map(MethodOutcome::pure),
+                Err(_) => Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                    "OverflowError",
+                    "Python int too large to convert to C long",
+                ))),
+            }
+        }
         Value::Bytes(b) => {
             methods::bytes::dispatch_bytes_method(b, method, args, kwargs).map(MethodOutcome::pure)
         }
         // A function/lambda stored in a variable then called as `f.attr()` lands
         // here, as does any other non-method-bearing type.
-        _ => Err(InterpreterError::AttributeError(format!(
-            "'{}' object has no attribute '{method}'",
-            obj.type_name()
-        ))
-        .into()),
+        other => {
+            debug_assert!(
+                !crate::types::type_has_methods_table(other),
+                "type {} claims has_methods_table but has no match arm",
+                crate::types::type_name_of(other)
+            );
+            Err(InterpreterError::AttributeError(format!(
+                "'{}' object has no attribute '{method}'",
+                other.type_name()
+            ))
+            .into())
+        }
     }
 }
 

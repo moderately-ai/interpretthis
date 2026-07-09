@@ -1,7 +1,7 @@
 ---
 id: epic-full-gap-and-divergence-inventory
 title: "Epic: full gap and divergence inventory"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: []

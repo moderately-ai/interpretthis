@@ -1,7 +1,7 @@
 ---
 id: typeobject-methods-slot-move-per-type-method-tables
 title: "TypeObject methods_slot: move per-type method tables"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

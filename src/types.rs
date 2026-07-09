@@ -120,6 +120,12 @@ pub struct TypeObject {
     /// `TypeError("'<name>' object has no attribute '<name>' to set")`
     /// via the dispatcher.
     pub set_attr_slot: Option<SetAttrSlot>,
+    /// Method-table marker: when true, `method_dispatch` owns a per-type
+    /// method table for this builtin (str/list/dict/…). Kept as a bool
+    /// rather than an fn pointer so `TypeObject` stays free of the
+    /// `eval::functions` dependency cycle; the tables themselves live in
+    /// `method_dispatch::METHODS_TABLE` keyed by [`TypeObject::name`].
+    pub has_methods_table: bool,
 }
 
 /// The seven binary-arithmetic operators dispatched through `arith_slot`.
@@ -550,6 +556,18 @@ fn type_of(value: &Value) -> &'static TypeObject {
     }
 }
 
+/// Display name of the builtin type object for `value`.
+#[must_use]
+pub fn type_name_of(value: &Value) -> &'static str {
+    type_of(value).name
+}
+
+/// Whether this value's type has a per-type method table in `method_dispatch`.
+#[must_use]
+pub fn type_has_methods_table(value: &Value) -> bool {
+    type_of(value).has_methods_table
+}
+
 // ---------------------------------------------------------------------------
 // Builtin type singletons
 // ---------------------------------------------------------------------------
@@ -569,6 +587,7 @@ static NONE_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(noattr_get_attr),
     set_attr_slot: None,
+    has_methods_table: false,
 };
 static BOOL_TYPE: TypeObject = TypeObject {
     name: "bool",
@@ -585,6 +604,7 @@ static BOOL_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(noattr_get_attr),
     set_attr_slot: None,
+    has_methods_table: false,
 };
 static INT_TYPE: TypeObject = TypeObject {
     name: "int",
@@ -601,6 +621,7 @@ static INT_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(noattr_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static FLOAT_TYPE: TypeObject = TypeObject {
     name: "float",
@@ -617,6 +638,7 @@ static FLOAT_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(noattr_get_attr),
     set_attr_slot: None,
+    has_methods_table: false,
 };
 static STR_TYPE: TypeObject = TypeObject {
     name: "str",
@@ -633,6 +655,7 @@ static STR_TYPE: TypeObject = TypeObject {
     len_slot: Some(str_len),
     get_attr_slot: Some(str_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static BYTES_TYPE: TypeObject = TypeObject {
     name: "bytes",
@@ -649,6 +672,7 @@ static BYTES_TYPE: TypeObject = TypeObject {
     len_slot: Some(bytes_len),
     get_attr_slot: Some(noattr_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static LIST_TYPE: TypeObject = TypeObject {
     name: "list",
@@ -665,6 +689,7 @@ static LIST_TYPE: TypeObject = TypeObject {
     len_slot: Some(sequence_len),
     get_attr_slot: Some(list_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static TUPLE_TYPE: TypeObject = TypeObject {
     name: "tuple",
@@ -681,6 +706,7 @@ static TUPLE_TYPE: TypeObject = TypeObject {
     len_slot: Some(sequence_len),
     get_attr_slot: Some(tuple_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static DICT_TYPE: TypeObject = TypeObject {
     name: "dict",
@@ -704,6 +730,7 @@ static DICT_TYPE: TypeObject = TypeObject {
     // no attribute 'foo'")`. A6 closes the pre-existing divergence
     // where dict accepted attribute writes as string-key inserts.
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static SET_TYPE: TypeObject = TypeObject {
     name: "set",
@@ -721,6 +748,7 @@ static SET_TYPE: TypeObject = TypeObject {
     len_slot: Some(sequence_len),
     get_attr_slot: Some(set_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 /// Range first-class TypeObject. Supports iteration, membership
 /// (with the step-aware modular check), `len`, and indexed access —
@@ -740,6 +768,7 @@ static RANGE_TYPE: TypeObject = TypeObject {
     len_slot: Some(range_len),
     get_attr_slot: Some(noattr_get_attr),
     set_attr_slot: None,
+    has_methods_table: false,
 };
 /// `collections.Counter` first-class TypeObject. Inherits dict's slot
 /// shape — same get_item / set_item / del_item / iter / contains /
@@ -766,6 +795,7 @@ static COUNTER_TYPE: TypeObject = TypeObject {
     len_slot: Some(counter_len),
     get_attr_slot: Some(counter_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 /// `collections.deque` TypeObject. Iteration, containment,
 /// length, and indexing inherit from VecDeque. Arithmetic /
@@ -786,6 +816,7 @@ static DEQUE_TYPE: TypeObject = TypeObject {
     len_slot: Some(deque_len),
     get_attr_slot: Some(deque_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 /// `collections.defaultdict` TypeObject. Inherits dict's
 /// slot shape — same get_item / set_item / del_item / iter / contains
@@ -810,6 +841,7 @@ static DEFAULTDICT_TYPE: TypeObject = TypeObject {
     len_slot: Some(defaultdict_len),
     get_attr_slot: Some(dict_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 /// `hashlib` digest TypeObject. HashDigest's
 /// surface is attribute-style methods (`.hexdigest()`, `.digest()`,
@@ -831,6 +863,7 @@ static HASHDIGEST_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(hashdigest_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 /// `enum.Enum` member TypeObject. Exposes `.name`
 /// and `.value`. Equality / ordering / arithmetic stay on the existing
@@ -853,6 +886,7 @@ static ENUMMEMBER_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(enummember_get_attr),
     set_attr_slot: None,
+    has_methods_table: false,
 };
 /// `datetime.date` TypeObject. Arithmetic and
 /// attribute access route through the shared datetime cluster slots;
@@ -873,6 +907,7 @@ static DATE_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(date_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static DATETIME_TYPE: TypeObject = TypeObject {
     name: "datetime",
@@ -889,6 +924,7 @@ static DATETIME_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(datetime_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static TIME_TYPE: TypeObject = TypeObject {
     name: "time",
@@ -905,6 +941,7 @@ static TIME_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(time_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 static TIMEDELTA_TYPE: TypeObject = TypeObject {
     name: "timedelta",
@@ -921,6 +958,7 @@ static TIMEDELTA_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(timedelta_get_attr),
     set_attr_slot: None,
+    has_methods_table: true,
 };
 /// `datetime.timezone` TypeObject. No arithmetic, no attribute surface
 /// beyond construction; lives here for completeness so `type(tz)`
@@ -941,6 +979,7 @@ static TIMEZONE_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: None,
     set_attr_slot: None,
+    has_methods_table: false,
 };
 /// `decimal.Decimal` TypeObject. Arithmetic + ordering + equality
 /// (with int-lift on either side) flow through the regular dispatch
@@ -960,6 +999,7 @@ static DECIMAL_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: None,
     set_attr_slot: None,
+    has_methods_table: false,
 };
 /// `fractions.Fraction` TypeObject. Same Pass 2a promotion as Decimal,
 /// plus a `get_attr_slot` for `.numerator` / `.denominator` — moved out
@@ -979,6 +1019,7 @@ static FRACTION_TYPE: TypeObject = TypeObject {
     len_slot: None,
     get_attr_slot: Some(fraction_get_attr),
     set_attr_slot: None,
+    has_methods_table: false,
 };
 static OBJECT_TYPE: TypeObject = TypeObject {
     name: "object",
@@ -1006,6 +1047,7 @@ static OBJECT_TYPE: TypeObject = TypeObject {
     // slot impl.
     get_attr_slot: None,
     set_attr_slot: None,
+    has_methods_table: false,
 };
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 ---
 id: epic-post-0-1-hardening-and-product-backlog
 title: "Epic: post-0.1 hardening and product backlog"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: []
