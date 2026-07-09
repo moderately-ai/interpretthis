@@ -222,7 +222,7 @@ fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool {
 
 /// `except Handler` matches when the raised type is Handler or a subclass.
 /// Walks the raised user class's MRO (and builtin bases on that MRO).
-fn matches_user_exception(
+pub(crate) fn matches_user_exception(
     state: &InterpreterState,
     exc: &ExceptionValue,
     handler_name: &str,

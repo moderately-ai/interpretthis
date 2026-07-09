@@ -1,7 +1,7 @@
 ---
 id: contextlib-module-contextmanager-suppress-nullcontext
 title: contextlib module (contextmanager, suppress, nullcontext)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

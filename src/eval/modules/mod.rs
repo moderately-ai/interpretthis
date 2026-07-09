@@ -14,6 +14,7 @@
 
 pub mod base64;
 pub mod collections;
+pub mod contextlib_mod;
 pub mod copy_mod;
 pub mod dataclasses;
 pub mod datetime;
@@ -95,7 +96,7 @@ pub trait Module: Sync + Send {
 /// plus one `pub struct XModule;` + `impl Module for XModule` in its
 /// own file. Lookup is O(1) hashed by module name.
 static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock::new(|| {
-    let modules: [&'static dyn Module; 18] = [
+    let modules: [&'static dyn Module; 19] = [
         &math::MathModule,
         &json::JsonModule,
         &re::ReModule,
@@ -114,6 +115,7 @@ static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock:
         &decimal::DecimalModule,
         &fractions::FractionsModule,
         &copy_mod::CopyModule,
+        &contextlib_mod::ContextlibModule,
     ];
     modules.into_iter().map(|m| (m.name(), m)).collect()
 });

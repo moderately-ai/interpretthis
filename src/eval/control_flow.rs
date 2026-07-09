@@ -328,6 +328,12 @@ async fn call_context_method(
     args: &[Value],
     tools: &Tools,
 ) -> EvalResult {
+    // contextlib.nullcontext / suppress — marker instances without Python methods.
+    if let Some(result) =
+        crate::eval::modules::contextlib_mod::try_contextlib_method(state, receiver, method, args)
+    {
+        return result;
+    }
     if !matches!(receiver, Value::Instance(_)) {
         return Err(InterpreterError::AttributeError(format!(
             "'{}' object has no attribute '{method}'",
