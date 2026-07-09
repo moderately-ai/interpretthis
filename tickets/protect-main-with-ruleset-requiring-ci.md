@@ -1,7 +1,7 @@
 ---
 id: protect-main-with-ruleset-requiring-ci
 title: Protect main with ruleset requiring CI
-status: ready
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-1-hardening-and-product-backlog]

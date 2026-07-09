@@ -1,7 +1,7 @@
 ---
 id: add-dependabot-for-actions-and-cargo
 title: Add Dependabot for Actions and Cargo
-status: ready
+status: closed
 priority: p2
 dependencies: []
 related: [epic-post-0-1-hardening-and-product-backlog]
@@ -9,6 +9,8 @@ scopes: [meta]
 shared_scopes: []
 paths: []
 tags: [post-release, deps, ci]
+closed_reason: wontdo
+closed_note: PRs fully disabled on the repo; Dependabot PRs cannot land. Revisit if contribution model changes.
 ---
 ## Why
 No dependabot.yml; Actions still on Node 20 deprecation warnings; deps will rot.
