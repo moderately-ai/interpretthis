@@ -1,7 +1,7 @@
 ---
 id: publish-interpretthis-0-1-0-to-crates-io
 title: Publish interpretthis 0.1.0 to crates.io
-status: ready
+status: done
 priority: p0
 dependencies: []
 related: [epic-post-0-1-hardening-and-product-backlog]
