@@ -50,3 +50,23 @@ except OverflowError:
     assert!(resp.error.is_none(), "{:?}", resp.error);
     assert_eq!(resp.stdout.trim(), "1024\noverflow");
 }
+
+/// interpretthis accepts 2-D list `@` as matrix multiply (numpy-like).
+/// CPython raises TypeError for list @ list.
+#[tokio::test]
+async fn list_matmul_is_supported() {
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r#"
+a = [[1, 2], [3, 4]]
+b = [[5, 6], [7, 8]]
+print(a @ b)
+"#,
+            &Tools::new(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "[[19, 22], [43, 50]]");
+}

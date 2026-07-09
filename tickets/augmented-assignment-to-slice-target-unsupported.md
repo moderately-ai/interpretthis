@@ -1,7 +1,7 @@
 ---
 id: augmented-assignment-to-slice-target-unsupported
 title: Augmented assignment to slice target unsupported
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

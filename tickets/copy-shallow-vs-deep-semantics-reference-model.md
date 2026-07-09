@@ -1,7 +1,7 @@
 ---
 id: copy-shallow-vs-deep-semantics-reference-model
 title: "copy: shallow vs deep semantics (reference model)"
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

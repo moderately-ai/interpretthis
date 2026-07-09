@@ -80,21 +80,36 @@ pub async fn eval_class_def(
     let mut bases: Vec<String> = Vec::new();
     let mut enum_kind: Option<crate::value::EnumKind> = None;
     for base in &node.bases {
-        let Expr::Name(name_node) = base else {
-            return Err(InterpreterError::Security(
-                "class base must be a bare class name; computed bases are not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
-            )
-            .into());
+        // Resolve bare names from the environment, or evaluate computed
+        // base expressions (`collections.UserList`, `mod.Base`, …).
+        let (base_name, resolved): (String, Option<Value>) = match base {
+            Expr::Name(name_node) => {
+                let base_name = name_node.id.as_str().to_string();
+                let resolved = state.variables.get(&base_name).cloned();
+                (base_name, resolved)
+            }
+            other => {
+                let val = eval_expr(state, other, tools).await?;
+                match &val {
+                    Value::Class(n) | Value::ExceptionType(n) => (n.clone(), Some(val)),
+                    Value::Type(n) => (n.clone(), Some(val)),
+                    other_v => {
+                        return Err(InterpreterError::TypeError(format!(
+                            "bases must be types, not '{}'",
+                            other_v.type_name()
+                        ))
+                        .into());
+                    }
+                }
+            }
         };
-        let base_name = name_node.id.as_str();
         if base_name == "object" {
             continue;
         }
         // Check resolved value for the enum sentinels (`enum.Enum`,
         // `enum.IntEnum`, `enum.StrEnum`, etc.) so aliased imports
         // (`from enum import Enum as MyBase`) work too.
-        let resolved = state.variables.get(base_name);
-        if let Some(Value::Type(type_name)) = resolved {
+        if let Some(Value::Type(type_name)) = &resolved {
             match type_name.as_str() {
                 "enum.Enum" | "enum.Flag" => enum_kind = Some(crate::value::EnumKind::Plain),
                 "enum.IntEnum" | "enum.IntFlag" => {
@@ -114,12 +129,12 @@ pub async fn eval_class_def(
         // bases so `class AppError(Exception)` works; MRO stores the
         // name string and except-matching walks it via the hard-coded
         // hierarchy + user MRO.
-        let is_exception_base = crate::eval::functions::is_exception_type_name(base_name)
+        let is_exception_base = crate::eval::functions::is_exception_type_name(&base_name)
             || matches!(resolved, Some(Value::ExceptionType(_)));
-        if !state.classes.contains_key(base_name) && !is_exception_base {
-            return Err(InterpreterError::name_not_defined(base_name).into());
+        if !state.classes.contains_key(&base_name) && !is_exception_base {
+            return Err(InterpreterError::name_not_defined(&base_name).into());
         }
-        bases.push(base_name.to_string());
+        bases.push(base_name);
     }
 
     let mut methods: BTreeMap<String, FunctionDef> = BTreeMap::new();

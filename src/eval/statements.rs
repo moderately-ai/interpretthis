@@ -94,6 +94,38 @@ pub async fn eval_aug_assign(
             "unsupported augmented assignment target (see CONFORMANCE.md#unsupported-language-features)".into(),
         ))
     })?;
+
+    // Slice aug-assign (`a[1:3] += rhs`): CPython evaluates as
+    // `a[1:3] = a[1:3] + rhs` — get a fresh slice list, combine, set slice.
+    if let Some((place::PlaceStep::Slice(spec), prefix)) = place.steps.split_last() {
+        if !prefix.iter().all(|s| !matches!(s, place::PlaceStep::Slice(_))) {
+            return Err(InterpreterError::Runtime(
+                "augmented assignment to a nested slice target is not supported".into(),
+            )
+            .into());
+        }
+        let current = {
+            let root = state
+                .variables
+                .get_mut(&place.root)
+                .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&place.root)))?;
+            place::with_navigate_mut(root, prefix, |parent| place::get_slice(parent, spec))??
+        };
+        let rhs = eval_expr(state, &node.value, tools).await?;
+        let new_value = crate::eval::op::aug_binop(state, node.op, &current, &rhs, tools).await?;
+        let delta = {
+            let root = state
+                .variables
+                .get_mut(&place.root)
+                .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&place.root)))?;
+            place::with_navigate_mut(root, prefix, |parent| {
+                place::set_slice(parent, spec, new_value)
+            })??
+        };
+        place::apply_mem_delta(state, delta)?;
+        return Ok(Value::None);
+    }
+
     if !place.is_navigable() {
         return Err(InterpreterError::Runtime(
             "augmented assignment to a slice target is not supported (see CONFORMANCE.md#unsupported-language-features)".into(),

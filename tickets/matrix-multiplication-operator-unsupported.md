@@ -1,7 +1,7 @@
 ---
 id: matrix-multiplication-operator-unsupported
 title: Matrix multiplication operator (@) unsupported
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

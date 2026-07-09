@@ -275,3 +275,25 @@ raise `OverflowError` rather than coercing to an imprecise `float`
 (the previous behaviour). Full bigint `Value` support is tracked separately.
 
 **Status**: Intentional until arbitrary-precision int lands.
+
+---
+
+## List matrix multiplication (`@`)
+<a id="list-matmul"></a>
+
+CPython raises `TypeError` for `list @ list`. interpretthis implements
+2-D list-of-lists matrix multiply (numpy-like) as a convenience for
+agent workloads that emit `@` without importing numpy.
+
+**Status**: Intentional extension (not CPython-identical).
+
+---
+
+## copy.copy vs copy.deepcopy
+<a id="copy-shallow-deep"></a>
+
+With shared list/instance storage, `copy.copy` preserves nested mutable
+identity (CPython-aligned shallow share) and `copy.deepcopy` allocates
+independent nested storage.
+
+**Status**: Shipped (aligned with CPython shallow/deep distinction).

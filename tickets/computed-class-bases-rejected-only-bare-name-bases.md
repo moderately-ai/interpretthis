@@ -1,7 +1,7 @@
 ---
 id: computed-class-bases-rejected-only-bare-name-bases
 title: Computed class bases rejected (only bare-name bases)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

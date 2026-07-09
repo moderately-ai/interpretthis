@@ -137,12 +137,7 @@ pub fn apply_binop(left: &Value, right: &Value, op: ast::Operator) -> Result<Val
         ast::Operator::BitOr => bitor_values(left, right),
         ast::Operator::BitXor => bitxor_values(left, right),
         ast::Operator::BitAnd => bitand_values(left, right),
-        ast::Operator::MatMult => {
-            Err(InterpreterError::TypeError(
-                "matrix multiplication is not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
-            )
-            .into())
-        }
+        ast::Operator::MatMult => matmult_values(left, right),
     }
 }
 
@@ -494,6 +489,109 @@ fn mod_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
 const fn python_mod(a: i64, b: i64) -> i64 {
     let r = a % b;
     if (r != 0) && ((r ^ b) < 0) { r + b } else { r }
+}
+
+/// 2-D list matrix multiply (`@`). Rows×cols of ints/floats; result is float
+/// when either operand has a float, else int when all products fit.
+fn matmult_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
+    let (Value::List(a), Value::List(b)) = (left, right) else {
+        return Err(InterpreterError::TypeError(format!(
+            "unsupported operand type(s) for @: '{}' and '{}' (see CONFORMANCE.md#unsupported-language-features)",
+            left.type_name(),
+            right.type_name()
+        ))
+        .into());
+    };
+    let a_guard = a.lock();
+    let b_guard = b.lock();
+    if a_guard.is_empty() || b_guard.is_empty() {
+        return Ok(Value::List(shared_list(Vec::new())));
+    }
+    // Extract rows of a and columns of b as f64 for a uniform product.
+    let mut a_rows: Vec<Vec<f64>> = Vec::with_capacity(a_guard.len());
+    let mut n_cols_a = None;
+    for row in a_guard.iter() {
+        let Value::List(cells) = row else {
+            return Err(InterpreterError::TypeError(
+                "@ requires a list of lists on the left".into(),
+            )
+            .into());
+        };
+        let cells = cells.lock();
+        if let Some(n) = n_cols_a {
+            if cells.len() != n {
+                return Err(InterpreterError::ValueError(
+                    "matmul: left operand rows must have equal length".into(),
+                )
+                .into());
+            }
+        } else {
+            n_cols_a = Some(cells.len());
+        }
+        let mut r = Vec::with_capacity(cells.len());
+        for c in cells.iter() {
+            r.push(to_float(c)?);
+        }
+        a_rows.push(r);
+    }
+    let k = n_cols_a.unwrap_or(0);
+    let mut b_rows: Vec<Vec<f64>> = Vec::with_capacity(b_guard.len());
+    let mut n_cols_b = None;
+    for row in b_guard.iter() {
+        let Value::List(cells) = row else {
+            return Err(InterpreterError::TypeError(
+                "@ requires a list of lists on the right".into(),
+            )
+            .into());
+        };
+        let cells = cells.lock();
+        if let Some(n) = n_cols_b {
+            if cells.len() != n {
+                return Err(InterpreterError::ValueError(
+                    "matmul: right operand rows must have equal length".into(),
+                )
+                .into());
+            }
+        } else {
+            n_cols_b = Some(cells.len());
+        }
+        let mut r = Vec::with_capacity(cells.len());
+        for c in cells.iter() {
+            r.push(to_float(c)?);
+        }
+        b_rows.push(r);
+    }
+    if b_rows.len() != k {
+        return Err(InterpreterError::ValueError(format!(
+            "matmul: shapes ({},{}) and ({},{}) not aligned",
+            a_rows.len(),
+            k,
+            b_rows.len(),
+            n_cols_b.unwrap_or(0)
+        ))
+        .into());
+    }
+    let n = n_cols_b.unwrap_or(0);
+    let mut out = Vec::with_capacity(a_rows.len());
+    for row in &a_rows {
+        let mut out_row = Vec::with_capacity(n);
+        for j in 0..n {
+            let mut sum = 0.0;
+            for (t, &ai) in row.iter().enumerate() {
+                sum += ai * b_rows[t][j];
+            }
+            // Prefer int when the sum is an exact integer in i64 range.
+            #[allow(clippy::cast_possible_truncation, clippy::float_cmp)]
+            let cell = if sum.fract() == 0.0 && sum >= i64::MIN as f64 && sum <= i64::MAX as f64 {
+                Value::Int(sum as i64)
+            } else {
+                Value::Float(sum)
+            };
+            out_row.push(cell);
+        }
+        out.push(Value::List(shared_list(out_row)));
+    }
+    Ok(Value::List(shared_list(out)))
 }
 
 fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {

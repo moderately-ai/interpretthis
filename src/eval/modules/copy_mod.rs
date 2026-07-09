@@ -4,23 +4,19 @@
 
 //! Emulation of Python's `copy` module.
 //!
-//! Documented divergence: `Value` in this interpreter is fully owned —
-//! every clone deep-copies inner collections automatically. CPython's
-//! `copy.copy` (shallow) preserves reference identity for inner
-//! mutable members, so a `shallow[0].append(x)` mutates the original.
-//! Our model has no reference identity, so `copy.copy` and
-//! `copy.deepcopy` both produce an independent clone — semantics
-//! matching CPython's `deepcopy` behaviour. Code that relies on the
-//! shallow-share distinction will see a divergence, but the more
-//! common pattern (just "give me a clone I can mutate safely") works
-//! identically.
+//! With shared-storage variants ([`SharedList`], [`SharedFields`]), we can
+//! honour CPython's shallow vs deep distinction:
+//!
+//! - `copy.copy` — clone the outer container; nested lists/instances keep
+//!   the same Arc (mutations through either alias are shared).
+//! - `copy.deepcopy` — fully independent clone of all nested shared storage.
 
 use indexmap::IndexMap;
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
     state::InterpreterState,
-    value::{Value, shared_list},
+    value::{Value, shared_fields, shared_list},
 };
 
 pub fn has_function(name: &str) -> bool {
@@ -29,10 +25,16 @@ pub fn has_function(name: &str) -> bool {
 
 pub fn call(func: &str, args: &[Value]) -> EvalResult {
     match func {
-        "copy" | "deepcopy" => {
+        "copy" => {
+            let Some(value) = args.first() else {
+                return Err(InterpreterError::TypeError("copy() requires 1 argument".into()).into());
+            };
+            Ok(shallow_clone(value))
+        }
+        "deepcopy" => {
             let Some(value) = args.first() else {
                 return Err(
-                    InterpreterError::TypeError(format!("{func}() requires 1 argument")).into()
+                    InterpreterError::TypeError("deepcopy() requires 1 argument".into()).into()
                 );
             };
             Ok(deep_clone(value))
@@ -44,13 +46,25 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
     }
 }
 
-/// Produce an independent clone of `value`. For shared-storage variants
-/// (`Value::List`) this allocates a fresh `SharedList`; for nested
-/// collections (`Dict`, `Set`, `Tuple`, `Instance`) it recurses so the
-/// returned value shares no mutable storage with the input. Matches the
-/// documented "owned-clone" semantics referenced at the top of this
-/// module — without this we'd inherit the D2 Arc-share, which would
-/// make every `copy.copy` return an alias.
+/// Shallow clone: outer container is new; nested shared storage is shared.
+fn shallow_clone(value: &Value) -> Value {
+    match value {
+        // List / Instance: Arc clone = shared identity for inners.
+        Value::List(items) => Value::List(items.clone()),
+        Value::Instance(inst) => Value::Instance(inst.clone()),
+        // Dict / set / tuple: new outer; Values inside are cloned shallowly
+        // (nested lists still share Arc).
+        Value::Dict(map) => Value::Dict(map.clone()),
+        Value::Set(items) => Value::Set(items.clone()),
+        Value::Tuple(items) => Value::Tuple(items.clone()),
+        Value::Counter(map) => Value::Counter(map.clone()),
+        Value::DefaultDict(data) => Value::DefaultDict(data.clone()),
+        Value::Deque { items, maxlen } => Value::Deque { items: items.clone(), maxlen: *maxlen },
+        other => other.clone(),
+    }
+}
+
+/// Fully independent clone of all nested shared storage.
 fn deep_clone(value: &Value) -> Value {
     match value {
         Value::List(items) => {
@@ -66,6 +80,13 @@ fn deep_clone(value: &Value) -> Value {
             }
             Value::Dict(out)
         }
+        Value::Counter(map) => {
+            let mut out = IndexMap::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k.clone(), deep_clone(v));
+            }
+            Value::Counter(out)
+        }
         Value::Instance(inst) => {
             let mut fields = std::collections::BTreeMap::new();
             for (k, v) in inst.fields.lock().iter() {
@@ -73,8 +94,11 @@ fn deep_clone(value: &Value) -> Value {
             }
             Value::Instance(crate::value::InstanceValue {
                 class_name: inst.class_name.clone(),
-                fields: crate::value::shared_fields(fields),
+                fields: shared_fields(fields),
             })
+        }
+        Value::Deque { items, maxlen } => {
+            Value::Deque { items: items.iter().map(deep_clone).collect(), maxlen: *maxlen }
         }
         other => other.clone(),
     }

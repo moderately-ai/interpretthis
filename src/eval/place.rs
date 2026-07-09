@@ -295,9 +295,42 @@ fn set_attr(container: &mut Value, name: &str, value: Value) -> Result<isize, Ev
     crate::types::dispatch_setattr(container, name, value)
 }
 
+/// Read `container[lower:upper:step]` as a new list (list only).
+pub(crate) fn get_slice(container: &Value, spec: &SliceSpec) -> Result<Value, EvalError> {
+    let Value::List(items) = container else {
+        return Err(InterpreterError::TypeError(format!(
+            "'{}' object is not subscriptable",
+            container.type_name()
+        ))
+        .into());
+    };
+    let stride = resolve_step(spec.step.as_ref())?;
+    let guard = items.lock();
+    let len = i64::try_from(guard.len()).map_err(|_| {
+        EvalError::from(InterpreterError::Runtime("sequence length overflows i64".into()))
+    })?;
+    let mut out = Vec::new();
+    if stride == 1 {
+        let start = clamp_index(resolve_bound(spec.lower.as_ref(), 0)?, len);
+        let stop = clamp_index(resolve_bound(spec.upper.as_ref(), len)?, len).max(start);
+        let lo = to_index(start)?;
+        let hi = to_index(stop)?;
+        out.extend(guard[lo..hi].iter().cloned());
+    } else {
+        for idx in extended_indices(len, spec, stride)? {
+            out.push(guard[idx].clone());
+        }
+    }
+    Ok(Value::List(crate::value::shared_list(out)))
+}
+
 /// `container[lower:upper:step] = iterable`. List is the only container
 /// that supports slice assignment in CPython.
-fn set_slice(container: &mut Value, spec: &SliceSpec, value: Value) -> Result<isize, EvalError> {
+pub(crate) fn set_slice(
+    container: &mut Value,
+    spec: &SliceSpec,
+    value: Value,
+) -> Result<isize, EvalError> {
     let Value::List(items) = container else {
         return Err(InterpreterError::TypeError(format!(
             "'{}' object does not support slice assignment",
