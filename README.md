@@ -86,7 +86,7 @@ Requires Rust 1.85+ and Tokio.
 ## Development
 
 ```bash
-cargo test
+cargo nextest run --all-targets   # preferred; cargo test also works
 cargo clippy --all-targets -- -D warnings
 scripts/license-headers.sh check
 ```

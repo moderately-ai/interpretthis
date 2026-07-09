@@ -13,7 +13,7 @@ Short checklist for a crates.io release. Always cut from `main`.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
+cargo nextest run --all-targets
 cargo package --list    # review contents
 cargo package           # build + verify the tarball
 ```

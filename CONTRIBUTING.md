@@ -72,11 +72,13 @@ The `commit-msg` pre-commit hook rejects non-conforming messages (`--strict`).
 ```bash
 pre-commit run --all-files
 cargo check
-cargo test
+cargo nextest run --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 scripts/license-headers.sh check   # if addlicense is installed
 ```
+
+Prefer **`cargo nextest run`** over `cargo test` for day-to-day and agent work.
 
 Guidelines:
 
