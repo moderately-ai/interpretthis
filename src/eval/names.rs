@@ -34,6 +34,9 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
 
     // Python builtins that are always available as names:
     // True, False, None are handled as constants by the parser.
+    if name == "NotImplemented" {
+        return Ok(Value::NotImplemented);
+    }
 
     // Builtin function names — these are handled by the call evaluator,
     // but we need to make them resolvable as names (for isinstance, callable checks etc.)

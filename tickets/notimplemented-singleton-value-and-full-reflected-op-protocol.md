@@ -1,7 +1,7 @@
 ---
 id: notimplemented-singleton-value-and-full-reflected-op-protocol
 title: NotImplemented singleton value and full reflected-op protocol
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

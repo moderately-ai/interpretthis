@@ -293,12 +293,17 @@ pub async fn binop(
     if let Some(method) = instance_slot(state, left, arith_slot(op)) {
         let (returned, _self) =
             invoke_slot(state, left, &method, std::slice::from_ref(right), tools).await?;
-        return Ok(returned);
+        // Returning NotImplemented tries the reflected slot / builtins.
+        if !matches!(returned, Value::NotImplemented) {
+            return Ok(returned);
+        }
     }
     if let Some(method) = instance_slot(state, right, reflected_arith_slot(op)) {
         let (returned, _self) =
             invoke_slot(state, right, &method, std::slice::from_ref(left), tools).await?;
-        return Ok(returned);
+        if !matches!(returned, Value::NotImplemented) {
+            return Ok(returned);
+        }
     }
     crate::eval::operations::apply_binop(left, right, op)
 }
@@ -369,18 +374,23 @@ pub async fn compare(
         if let Some(method) = instance_slot(state, left, slot) {
             let (returned, post_self) =
                 invoke_slot(state, left, &method, std::slice::from_ref(right), tools).await?;
-            let result = if matches!(op, CmpOp::NotEq) {
-                !returned.is_truthy()
-            } else {
-                returned.is_truthy()
-            };
-            return Ok((result, Some(post_self), None));
+            if !matches!(returned, Value::NotImplemented) {
+                let result = if matches!(op, CmpOp::NotEq) {
+                    !returned.is_truthy()
+                } else {
+                    returned.is_truthy()
+                };
+                return Ok((result, Some(post_self), None));
+            }
+            // NotImplemented → try reflected / builtins below.
         }
         if let Some(reflected) = reflected_compare_slot(op) {
             if let Some(method) = instance_slot(state, right, reflected) {
                 let (returned, post_self) =
                     invoke_slot(state, right, &method, std::slice::from_ref(left), tools).await?;
-                return Ok((returned.is_truthy(), None, Some(post_self)));
+                if !matches!(returned, Value::NotImplemented) {
+                    return Ok((returned.is_truthy(), None, Some(post_self)));
+                }
             }
         }
     }

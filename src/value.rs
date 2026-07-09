@@ -120,6 +120,9 @@ fn deserialize_dict<'de, D: serde::Deserializer<'de>>(
 pub enum Value {
     /// Python `None`.
     None,
+    /// Python `NotImplemented` singleton — dunder methods return this to
+    /// signal "try the reflected operand / other protocol path".
+    NotImplemented,
     /// Python `bool`.
     Bool(bool),
     /// Python `int` (represented as i64; overflows are detected at runtime).
@@ -1052,7 +1055,7 @@ impl Value {
     #[must_use]
     pub fn is_truthy(&self) -> bool {
         match self {
-            Self::None => false,
+            Self::None | Self::NotImplemented => false,
             Self::Bool(b) => *b,
             Self::Int(i) => *i != 0,
             Self::Float(f) => *f != 0.0,
@@ -1118,6 +1121,7 @@ impl Value {
     pub const fn type_name(&self) -> &'static str {
         match self {
             Self::None => "NoneType",
+            Self::NotImplemented => "NotImplementedType",
             Self::Bool(_) => "bool",
             Self::Int(_) => "int",
             Self::Float(_) => "float",
@@ -1274,6 +1278,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => write!(f, "None"),
+            Self::NotImplemented => write!(f, "NotImplemented"),
             Self::Bool(true) => write!(f, "True"),
             Self::Bool(false) => write!(f, "False"),
             Self::Int(i) => write!(f, "{i}"),
@@ -1508,6 +1513,7 @@ impl fmt::Display for Value {
             Self::Lazy { .. } => write!(f, "<generator object>"),
             Self::Partial(data) => write!(f, "functools.partial({})", data.func),
             Self::LruCache(_) => write!(f, "<functools._lru_cache_wrapper>"),
+            Self::NotImplemented => write!(f, "NotImplemented"),
         }
     }
 }
