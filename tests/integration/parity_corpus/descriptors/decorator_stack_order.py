@@ -4,9 +4,8 @@
 #
 # Uses distinct inner-wrapper names (add_wrap / upper_wrap) rather
 # than CPython's idiomatic re-use of `wrapper`, because the body
-# cache currently keys by function name and would collide. See
-# the inner-function name-collision follow-up gated on a future
-# refactor of the function-body cache key.
+# cache currently keys by function name and would collide. Tracked by
+# gap-function-body-cache-name-collision.
 def add_str(fn):
     def add_wrap(x):
         return "add:" + fn(x)

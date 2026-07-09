@@ -157,12 +157,10 @@ pub async fn eval_function_def(
 /// Cell-seed model: the cell is seeded with the enclosing scope's
 /// value at inner-def time and updated by inner's writeback on each
 /// call. Cell always wins over closure overlay (the cell is the
-/// source of truth for nonlocal-bound names). Pending: write-through
-/// from outer's runtime assignments to the cell — without it, a
-/// reassignment to the nonlocal-bound name in outer between def and
-/// call is invisible to inner. Tracked as open work; the proper fix
-/// adds a per-frame "cells I own" map and writes to it from
-/// `set_variable`.
+/// source of truth for nonlocal-bound names). Runtime assignments in
+/// the owning outer frame write through via `frame_cell_owners` in
+/// `InterpreterState::set_variable`, approximating CPython's shared
+/// cell identity.
 pub(super) fn apply_nonlocal_cell(
     state: &mut InterpreterState,
     func_def: &FunctionDef,
@@ -195,9 +193,9 @@ pub(super) fn apply_nonlocal_cell(
 /// - For a nested def (`is_module_level == false`), the closure overlay is unconditional (except
 ///   for the `global` filter). This is load-bearing for decorator stacks: `@a @b def f` has both
 ///   `a`'s and `b`'s returned wrappers binding `fn` as a parameter; each inner frame MUST see its
-///   own captured `fn`, not the surrounding frame's `fn`. The nested-cell case still has open edges
-///   (it captures a snapshot rather than a live cell ref) — those land in follow-up commits that
-///   add real cell identity.
+///   own captured `fn`, not the surrounding frame's `fn`. Nonlocal cells use the
+///   `frame_cell_owners` write-through model rather than first-class cell objects; add a ticket
+///   before widening that model further.
 ///
 /// `global`-declared names are deliberately skipped: their def-time
 /// value would otherwise stomp on the live module value at every call.
@@ -674,10 +672,9 @@ fn collect_assigned_names_inner(
             }
             // `from foo import x[, y as z]` binds `x` and `z`. The
             // `from foo import *` form would introduce unknown names;
-            // we ignore it here, which means star-imported names won't
-            // be checkpoint-restored. That's a pre-existing edge case
-            // (CPython itself disallows `from … import *` inside a
-            // function body in 3.x via SyntaxError).
+            // eval rejects it at module handling time, and
+            // `gap-unsupported-error-anchor-gate` tracks keeping that
+            // rejection consistently anchored.
             ast::Stmt::ImportFrom(node) => {
                 for alias in &node.names {
                     if alias.name.as_str() == "*" {
@@ -918,7 +915,8 @@ fn unparse_expr(expr: &ast::Expr) -> String {
             format!("{func}({})", arg_strs.join(", "))
         }
         // Fallback for complex expressions — use Debug format
-        // This will fail to re-parse but at least won't crash
+        // Limited fallback; complex default-source round-trip is tracked by
+        // gap-complex-default-argument-source-roundtrip.
         _ => format!("None  # unparseable: {:?}", std::mem::discriminant(expr)),
     }
 }

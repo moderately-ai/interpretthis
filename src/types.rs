@@ -73,9 +73,10 @@ pub struct TypeObject {
     /// element-consuming builtins (`sum`/`any`/`all`/`min`/`max`/`sorted`/
     /// `list`/`set`/`tuple`/`zip`). `Some(fn)` for iterables; `None`
     /// raises `TypeError("'<name>' object is not iterable")`. The slot
-    /// materializes the iterable into a `Vec<Value>` for now; lazy iter
-    /// support (with a proper `Value::Iterator` variant + state) is the
-    /// follow-up that lands `iter()`/`next()` builtins.
+    /// materializes the iterable into a `Vec<Value>` for now. Lazy iter
+    /// support (with a proper `Value::Iterator` variant + state) is
+    /// tracked by `gap-lazy-iterator-value-variant`; the public
+    /// `iter()`/`next()` builtins already exist over the eager model.
     pub iter_slot: Option<IterSlot>,
     /// Subscript read slot for `container[key]`. `Some(fn)` for indexable
     /// types; `None` raises `TypeError("'<name>' object is not
@@ -1033,8 +1034,8 @@ static OBJECT_TYPE: TypeObject = TypeObject {
     hash_slot: Some(fallback_hash_slot),
     lt_slot: noimpl_lt,
     // Anything not yet promoted (Function/Lambda/Instance/Exception/etc.)
-    // still routes contains through the legacy path. The list of variants
-    // here shrinks slice-by-slice.
+    // still routes contains through the legacy path. Tracked by
+    // refactor-typeobject-promote-remaining-variants.
     contains_slot: Some(object_contains),
     arith_slot: noimpl_arith,
     // No catch-all iter_slot: an unmigrated variant should raise the
@@ -1497,8 +1498,8 @@ fn tuple_arith(
     }
 }
 
-/// `set - set` (difference). Other set operators (`|`, `&`, `^`) are
-/// bitwise ops on the legacy `apply_binop` path until A3's follow-up.
+/// `set - set` (difference). Other set operators (`|`, `&`, `^`) stay on
+/// the direct `apply_binop` path with the int bitwise operators.
 fn set_arith(
     op: BinOp,
     lhs: &Value,
@@ -1524,9 +1525,8 @@ const fn is_numeric(v: &Value) -> bool {
 
 /// `iter(list)`/`iter(tuple)`/`iter(set)` — materialize the underlying Vec.
 /// All three variants share the same payload shape, so one slot covers
-/// them. The clone is the load-bearing cost; lazy iteration through a
-/// `Value::Iterator` variant is the follow-up that lands `iter()`/`next()`
-/// builtins.
+/// them. The clone is the load-bearing cost; lazy iterator storage is
+/// tracked by `gap-lazy-iterator-value-variant`.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "IterSlot protocol fixes the Result<Vec<Value>, EvalError> signature; same-type iter slots always succeed but keep the protocol so call sites stay homogeneous"
@@ -2392,8 +2392,8 @@ fn counter_int(value: &Value) -> i64 {
 /// Equality slot that returns `NotImplemented` for every input — the
 /// caller raises TypeError if both sides return None. Used by Deque
 /// and DefaultDict whose CPython equality is dict-like but is more
-/// involved than needed in our eager-extract workload (CPython's deque
-/// == deque compares element-wise; we keep that as a follow-up).
+/// involved than needed in our eager-extract workload. Deque element-wise
+/// equality is tracked by `gap-deque-equality-parity`.
 const fn noimpl_eq(_lhs: &Value, _rhs: &Value) -> Option<bool> {
     None
 }
@@ -2573,7 +2573,8 @@ fn decimal_arith(
             // fractional part.
             (a / b).with_scale(0)
         }
-        // Mod / Pow / others: not yet wired (rare in pipeline workloads).
+        // Decimal modulo/power parity is tracked by
+        // gap-decimal-mod-pow-operator-parity.
         _ => return None,
     };
     Some(Ok(Value::Decimal(Box::new(result))))
@@ -2658,7 +2659,7 @@ fn fraction_arith(
             }
             (a / b).floor()
         }
-        // Mod / Pow on Fraction: uncommon; leave unsupported for now.
+        // Fraction modulo/power parity is tracked by gap-fraction-mod-pow-parity.
         BinOp::Mod | BinOp::Pow => return None,
     };
     Some(Ok(Value::Fraction(Box::new(result))))

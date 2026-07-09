@@ -72,7 +72,7 @@ Defaults live in `src/config.rs`; `InterpreterConfig` lets callers tighten or lo
 
 `DANGEROUS_NAMES` and `BLOCKED_ATTRIBUTES` remain the security spine for every shipped language feature (classes, decorators, match, generators, `with`, stdlib modules). New surface must re-audit those lists before merge.
 
-Open parity work (not security blockers by themselves) is tracked in [`STATUS.md`](./STATUS.md) / [`CONFORMANCE.md`](./CONFORMANCE.md): user-class dunder slot dispatch, generator iterator methods, full exception MRO, and selected stdlib follow-ups (`strptime`, richer `functools`, …). `contextlib` is not shipped; user-defined context managers via `with` are.
+Open parity work (not security blockers by themselves) is tracked in tickets and summarized in [`STATUS.md`](./STATUS.md) / [`CONFORMANCE.md`](./CONFORMANCE.md). Current known gaps include while-loop generator suspension, lazy iterator storage, selected stdlib method parity, class-pattern keywords, and clean perf-baseline recapture. `contextlib.nullcontext` / `suppress` ship; `contextlib.contextmanager` remains tracked separately.
 
 ## Cross-reference: `CONFORMANCE.md`
 

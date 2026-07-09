@@ -161,29 +161,25 @@ Cross-link: `THREAT_MODEL.md` enumerates the attack patterns these blocks defeat
 The following language features are not supported and produce a clear error referencing this section:
 
 - **`async` / `await`** — no coroutines, no `async def`, no `async for`, no `async with`. The evaluator is synchronous (modulo Tokio at the tool-call boundary).
-- **Metaclasses** — `class Foo(metaclass=Meta):` is rejected. Metaclass-based DSLs are not a target use case.
-- **Full descriptor protocol beyond `property`** — `@property` is supported (Track B2). User-defined data descriptors with arbitrary `__get__` / `__set__` / `__delete__` are not. Non-data descriptors beyond `@staticmethod` and `@classmethod` are not.
-- **`__slots__`** — when written as `__slots__ = [...]` (`Stmt::Assign`) or `__slots__: list = [...]` (`Stmt::AnnAssign`), it is parsed and stored as a regular class attribute by `eval_class_def`; other statement forms in the class body fall through the catch-all and are silently dropped. In every case it has no effect on field storage (every instance still uses its own `BTreeMap` of fields). The performance benefit (no per-instance `__dict__`) does not apply to our object representation.
-- **`__init_subclass__`** — not invoked on subclass creation.
-- **`__set_name__`** — not invoked on attribute binding.
+- **Arbitrary class-definition keywords beyond the supported `metaclass=` path** — CPython forwards these through metaclass / `__init_subclass__` machinery. Remaining parity work is tracked by `gap-class-keyword-arguments-init-subclass`.
+- **Some class-pattern keyword / `__match_args__` shapes** — pattern matching supports the core cases used by the parity corpus, but keyword-pattern parity is tracked by `gap-pattern-matching-class-keyword-patterns`.
 
-Most rejections produce an error of the form `<feature> is not supported (see CONFORMANCE.md#unsupported-language-features)`; `await` and the import gates follow that template. Some constructs still land on the generic `eval_stmt` catch-all (`InterpreterError::Runtime("unsupported statement: ...")`) without an anchor (`async def` / `async for` / `async with` / `except*`) — a documentation gap, not a security gap.
+Most rejections produce an error of the form `<feature> is not supported (see CONFORMANCE.md#unsupported-language-features)`; `await` and the import gates follow that template. The missing automated cross-link gate is tracked by `gap-unsupported-error-anchor-gate`.
 
 **Rationale**: these features add protocol surface that must be threat-modelled and benchmarked; they are out of scope until a concrete consumer needs them.
 
-**Status**: Out of scope for now. A real consumer needing one of these files a follow-on issue with the specific use case; the line moves on evidence, not on principle.
+**Status**: Partial by design; each remaining gap has a ticket ID above.
 
 ---
 
 ## Exception groups (PEP 654)
 <a id="exception-groups"></a>
 
-`ExceptionGroup` / `BaseExceptionGroup` constructors and `try`/`except*` leaf
-splitting shipped in 0.2.0. Nested groups, `.subgroup()` / `.split()`, and full
-BaseExceptionGroup matching rules are incomplete — see open tickets under
-`epic-post-0-2-hardening-and-parity`.
+`ExceptionGroup` / `BaseExceptionGroup` constructors, `try`/`except*` leaf
+splitting, and `.subgroup()` / `.split()` shipped in the 0.2.x/0.3.x line.
+Nested groups are flattened for matching APIs.
 
-**Status**: Partial (constructor + except* leaf split). Follow-ons tracked.
+**Status**: Shipped for the documented surface; new edge-case parity gaps should get a dedicated ticket.
 
 
 ## chrono strftime directive coverage
@@ -214,16 +210,12 @@ The currently supported subset on `strftime` / `strptime` covers what `chrono::N
 
 ---
 
-## `Fraction` rejects `float`
+## `Fraction` float conversion and arithmetic
 <a id="fraction-float-rejection"></a>
 
-`Fraction(0.1)` raises `TypeError`. CPython accepts a `float` here (constructing the exact rational that backs the binary-float value); we deliberately reject because the conversion's behaviour (`Fraction(0.1) == Fraction(3602879701896397, 36028797018963968)`) surprises users in the same way `Decimal(0.1)` does. Pass a string: `Fraction("1/10")`.
+`Fraction(float)` and mixed Fraction/float arithmetic are supported for the common CPython-aligned cases. Remaining arithmetic parity gaps are `%` and `**`, tracked by `gap-fraction-mod-pow-parity`.
 
-`Fraction` arithmetic with a `float` also raises `TypeError` (no float coercion). The `fraction_arith` slot in `src/types.rs` returns `None` on float operands intending to defer to the float side, but the float `numeric_arith` slot's `is_numeric` guard only matches `Int`/`Float`/`Bool` — not `Fraction` — so the dispatcher falls through to the "unsupported operand type(s)" TypeError. CPython produces a `float` result for `Fraction(1, 3) + 0.5`; we do not.
-
-**Rationale**: avoids a known surprise on the constructor. The arithmetic divergence is a side-effect of how the dispatch slot tables are populated today — closing it requires teaching `numeric_arith` to lift `Fraction` to `float` on mixed-type operations.
-
-**Status**: `Fraction(float)` and Fraction±float→float shipped (CPython-aligned).
+**Status**: Constructor and mixed float arithmetic shipped; modulo/power follow-up tracked.
 
 ---
 

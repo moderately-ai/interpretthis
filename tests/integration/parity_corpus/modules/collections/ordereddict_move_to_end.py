@@ -12,9 +12,8 @@ print(list(d.keys()))
 d.move_to_end("a")
 print(list(d.keys()))
 
-# Positional False: move to front. (Method-call kwargs are not yet
-# threaded through our dispatch; positional form behaves identically
-# in CPython here so the test stays representative.)
+# Positional False: move to front. (Keyword dispatch is covered
+# elsewhere; positional form behaves identically in CPython here.)
 d.move_to_end("c", False)
 print(list(d.keys()))
 

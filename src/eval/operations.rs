@@ -685,8 +685,8 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
                     "exponent too large for integer power",
                 )));
             }
-            // Default max_int_bits; hosts that set a lower config limit still
-            // gate shifts (and can lower this via future ArithContext wiring).
+            // Default max_int_bits; wiring this to InterpreterConfig is tracked by
+            // gap-pow-max-int-bits-config-wiring.
             crate::value::int_from_bigint_limited(l.pow(exp), 1_048_576)
         }
     }
@@ -1037,7 +1037,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         // (the async __eq__ slot can't run here). Classes whose __eq__
         // diverges from structural equality (e.g. case-insensitive
         // string wrappers) will see dict/set semantics drift from
-        // CPython here — a tracked limitation.
+        // CPython here — tracked by gap-instance-dict-key-equality-dunder-parity.
         (Value::Instance(a), Value::Instance(b)) => {
             if a.class_name != b.class_name {
                 return false;

@@ -55,9 +55,9 @@ pub fn call(
         // a sentinel that the decorator path recognises and applies to
         // the class. We model this as a ModuleFunction pointing back at
         // `dataclass` — calling it on a class is identical to bare
-        // `@dataclass`. Keyword arguments are validated but currently
-        // accepted as defaults (eq=True, repr=True, init=True) since we
-        // do not yet support frozen/order in this slice.
+        // `@dataclass`. Keyword arguments are carried through the Partial
+        // wrapper so `frozen=`, `order=`, `slots=`, etc. apply in the
+        // decorator path.
         "dataclass" => {
             // The call form may receive the class directly (`dataclass(C)`
             // is equivalent to `@dataclass class C`). Detect that and

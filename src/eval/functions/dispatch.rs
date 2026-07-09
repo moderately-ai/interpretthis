@@ -188,13 +188,11 @@ pub(crate) async fn call_user_function(
     // source. Popped unconditionally below after the body runs.
     state.body_source_stack.push(func_def.source.clone());
 
-    // Track C: if the body contains a `yield` or `yield from`, the
-    // function is a generator. Run it eagerly to completion, collecting
-    // yielded values into a buffer; return the buffer as a list so the
-    // caller can iterate it. This is the pragmatic shape that handles
-    // `for x in gen()`, `list(gen())`, `sum(gen())`, and `yield from`
-    // delegation. `next/send/throw/close` need a real coroutine and
-    // are reserved for a follow-up.
+    // If the body contains `yield` / `yield from`, return a suspended
+    // generator frame when the body shape is supported. Bodies with
+    // while-loop suspension still fall back to an eager Lazy buffer;
+    // true while-state resume is tracked by
+    // gap-generator-while-loop-suspend-state.
     // Generator flag was set at function-def time; for state imports
     // that predate the cached field (default = false) the body may
     // still carry a yield — fall back to the walk in that case.
@@ -204,7 +202,7 @@ pub(crate) async fn call_user_function(
     let exec_result = if let Some(body_stmts) = body {
         if is_generator {
             // Prefer true suspend frames; fall back to eager Lazy buffer when
-            // the body uses `while` (suspend state for while not yet modelled).
+            // the body uses `while` (gap-generator-while-loop-suspend-state).
             let use_suspend = !super::generators::body_has_while(body_stmts.as_slice());
             if use_suspend {
                 let mut locals = rustc_hash::FxHashMap::default();
@@ -613,7 +611,8 @@ pub(crate) async fn call_value_as_function(
             return Box::pin(call_value_as_function(state, target, &combined, tools)).await;
         }
         Value::LruCache(data) => {
-            // Memoize by positional ValueKeys only (kwargs unsupported).
+            // Memoize by positional ValueKeys only; keyword keying is tracked by
+            // gap-lru-cache-kwargs-memoization.
             use crate::eval::literals::value_to_key;
             let key: Result<Vec<_>, _> = args.iter().map(value_to_key).collect();
             let key = key.map_err(|_| {

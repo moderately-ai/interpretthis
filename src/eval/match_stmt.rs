@@ -156,9 +156,10 @@ async fn match_class(
     }
 
     // Builtins: single positional pattern binds the whole subject;
-    // keyword patterns are not supported (CPython's `int.__match_args__`
-    // is empty, so this catches that case explicitly with a clearer
-    // error than "no match" would give).
+    // keyword-pattern / __match_args__ parity is tracked by
+    // gap-pattern-matching-class-keyword-patterns. CPython's
+    // `int.__match_args__` is empty, so this catches that case
+    // explicitly with a clearer error than "no match" would give.
     let builtin_single_positional = matches!(
         cls_name.as_str(),
         "int"

@@ -7,7 +7,8 @@
 //! - [`nullcontext`](https://docs.python.org/3/library/contextlib.html#contextlib.nullcontext)
 //! - [`suppress`](https://docs.python.org/3/library/contextlib.html#contextlib.suppress)
 //!
-//! `@contextmanager` is **not** implemented: it requires suspending a
+//! `@contextmanager` is **not** implemented yet (tracked by
+//! `gap-contextlib-contextmanager-decorator`): it requires suspending a
 //! generator between `__enter__` and `__exit__`, which our eager-yield
 //! model cannot do. User classes with `__enter__`/`__exit__` remain the
 //! supported path for custom context managers.

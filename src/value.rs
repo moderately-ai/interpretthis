@@ -840,7 +840,8 @@ pub enum ValueKey {
     /// time at the async eval-layer boundary); `value` carries the
     /// original Instance so equality comparisons can run structurally.
     /// Equality on this variant uses `values_equal`, which works for
-    /// classes whose `__eq__` is field-by-field — a tracked limitation
+    /// classes whose `__eq__` is field-by-field — tracked by
+    /// `gap-instance-dict-key-equality-dunder-parity`
     /// for classes whose `__eq__` diverges from structural equality
     /// (e.g. case-insensitive string wrappers).
     Instance {
@@ -1701,9 +1702,8 @@ impl fmt::Display for Value {
 /// (`Decimal("5")` is "5", `Decimal("5.0")` is "5.0"). BigDecimal's
 /// `to_plain_string` emits the canonical positional form without
 /// scientific notation, matching CPython's `str(Decimal)` output for
-/// the common ranges (small magnitudes; CPython itself switches to
-/// scientific for very large/small magnitudes, which is a future
-/// follow-on — see CONFORMANCE.md#decimal-scientific).
+/// the common ranges. CPython's scientific notation thresholds for
+/// extreme magnitudes are tracked by `gap-decimal-scientific-formatting`.
 fn format_decimal_str(f: &mut fmt::Formatter<'_>, d: &bigdecimal::BigDecimal) -> fmt::Result {
     write!(f, "{}", d.to_plain_string())
 }

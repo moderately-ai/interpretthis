@@ -63,13 +63,14 @@ pub async fn eval_class_def(
         class_name,
     )?;
 
-    // Optional `metaclass=` (other class keywords still rejected).
+    // Optional `metaclass=`. Other class keywords remain rejected;
+    // parity is tracked by gap-class-keyword-arguments-init-subclass.
     let mut metaclass_name: Option<String> = None;
     for kw in &node.keywords {
         let key = kw.arg.as_ref().map(|a| a.as_str());
         if key != Some("metaclass") {
             return Err(InterpreterError::TypeError(format!(
-                "class keyword argument '{}' is not supported",
+                "class keyword argument '{}' is not supported (see CONFORMANCE.md#unsupported-language-features)",
                 key.unwrap_or("<unknown>")
             ))
             .into());
