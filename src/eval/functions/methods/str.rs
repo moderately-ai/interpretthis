@@ -225,9 +225,31 @@ pub(crate) fn dispatch_string_method(
                     .into());
                 }
             };
-            match encoding {
-                "utf-8" | "utf_8" | "UTF-8" | "UTF_8" | "ascii" | "ASCII" => {
-                    Ok(Value::Bytes(s.as_bytes().to_vec()))
+            match encoding.to_ascii_lowercase().as_str() {
+                "utf-8" | "utf_8" | "u8" => Ok(Value::Bytes(s.as_bytes().to_vec())),
+                "ascii" | "us-ascii" => {
+                    if s.is_ascii() {
+                        Ok(Value::Bytes(s.as_bytes().to_vec()))
+                    } else {
+                        Err(EvalError::Exception(ExceptionValue::new(
+                            "UnicodeEncodeError",
+                            "'ascii' codec can't encode character",
+                        )))
+                    }
+                }
+                "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" => {
+                    let mut out = Vec::with_capacity(s.len());
+                    for ch in s.chars() {
+                        let u = ch as u32;
+                        if u > 0xff {
+                            return Err(EvalError::Exception(ExceptionValue::new(
+                                "UnicodeEncodeError",
+                                "'latin-1' codec can't encode character",
+                            )));
+                        }
+                        out.push(u as u8);
+                    }
+                    Ok(Value::Bytes(out))
                 }
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
