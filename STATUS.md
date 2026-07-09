@@ -21,7 +21,7 @@ what has shipped, what is partial, and what is still open.
 | B3 — Counter as `dict` subclass | `__missing__` → 0, multiset arithmetic | ✅ shipped |
 | B4 — Match class patterns | Positional + keyword via `__match_args__` | ✅ shipped |
 | C — Generators | `yield` / `yield from`; iterator `next` / `send` / `throw` / `close` | ⚠️ partial — eager yield works; iterator methods pending |
-| D — Datetime | `date` / `datetime` / `time` / `timedelta` / `timezone` + `strftime` | ✅ shipped (`strptime` still open) |
+| D — Datetime | `date` / `datetime` / `time` / `timedelta` / `timezone` + `strftime` / `strptime` | ✅ shipped |
 | E — Stdlib expansion | hashlib, base64, textwrap, string, itertools, functools, collections, typing, enum, dataclasses, decimal, fractions, copy | ✅ shipped (follow-ups: richer `functools`, etc.) |
 | F — `with` statement | `__enter__` / `__exit__` | ✅ shipped (user-class managers; no `contextlib` module) |
 | G — Exception hierarchy | Full tree + MRO matching + `__cause__` / `__context__` | ⚠️ partial — typed exceptions + hard-coded hierarchy subsets; full user-class MRO pending |

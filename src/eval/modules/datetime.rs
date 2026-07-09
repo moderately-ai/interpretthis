@@ -20,9 +20,21 @@ use crate::{
     value::Value,
 };
 
-/// Whether `datetime` provides a function named `name`.
+/// Whether `datetime` provides a **module-level** callable named `name`.
+/// Classmethods on constructors (e.g. `datetime.strptime`) are not listed
+/// here — they resolve through [`type_classmethod`].
 pub fn has_function(name: &str) -> bool {
     matches!(name, "date" | "datetime" | "time" | "timedelta" | "timezone")
+}
+
+/// Classmethods on datetime module constructors (`datetime.datetime.strptime`).
+/// Returns the internal `call` function name when `type_name.method` is valid.
+#[must_use]
+pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
+    match (type_name, method) {
+        ("datetime", "strptime") => Some("strptime"),
+        _ => None,
+    }
 }
 
 /// Build a `NaiveDate` with CPython's exact validation order +
@@ -137,11 +149,41 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
             };
             Ok(Value::TimeZone(secs))
         }
+        // Invoked only via type_classmethod resolution (not module_member).
+        "strptime" => {
+            let s = arg_str("strptime", args, 0)?;
+            let fmt = arg_str("strptime", args, 1)?;
+            parse_strptime(s, fmt)
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'datetime' has no attribute '{func}'"
         ))
         .into()),
     }
+}
+
+/// `datetime.strptime(date_string, format)` — always returns a naive
+/// `datetime` (CPython shape). Uses chrono's format parser; unsupported
+/// directives surface as ValueError rather than locale-dependent output.
+fn parse_strptime(s: &str, fmt: &str) -> EvalResult {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+        return Ok(Value::DateTime { dt, tz_offset_secs: None });
+    }
+    // Date-only formats: CPython still returns datetime at 00:00:00.
+    if let Ok(date) = NaiveDate::parse_from_str(s, fmt) {
+        let Some(time) = NaiveTime::from_hms_opt(0, 0, 0) else {
+            return Err(value_error("internal: failed to build midnight time"));
+        };
+        return Ok(Value::DateTime { dt: NaiveDateTime::new(date, time), tz_offset_secs: None });
+    }
+    // Time-only formats: CPython uses date 1900-01-01.
+    if let Ok(time) = NaiveTime::parse_from_str(s, fmt) {
+        let Some(date) = NaiveDate::from_ymd_opt(1900, 1, 1) else {
+            return Err(value_error("internal: failed to build 1900-01-01"));
+        };
+        return Ok(Value::DateTime { dt: NaiveDateTime::new(date, time), tz_offset_secs: None });
+    }
+    Err(value_error(format!("time data '{s}' does not match format '{fmt}'")))
 }
 
 /// Read an attribute of a `date` value (`.year`, `.month`, `.day`).

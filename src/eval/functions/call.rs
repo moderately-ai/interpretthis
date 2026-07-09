@@ -207,124 +207,163 @@ pub async fn eval_call(
                         Done(Value, isize),
                         Instance(Value),
                         Module(String),
+                        /// Module constructor acting as a type
+                        /// (`from datetime import datetime` → ModuleFunction).
+                        ModuleType {
+                            module: String,
+                            type_name: String,
+                        },
                         Class(String),
                     }
-                    let dispatch = {
+                    // Place navigation only models Instance/Dict/List slots.
+                    // `module.member.method(...)` (Attr step on Module) cannot
+                    // navigate — fall through to the temp path, which evaluates
+                    // the Attribute via module_member (same as eval_attribute).
+                    let dispatch: Option<Dispatch> = {
                         let root = state.variables.get_mut(&place.root).ok_or_else(|| {
                             EvalError::from(InterpreterError::name_not_defined(&place.root))
                         })?;
-                        let result: Result<Dispatch, EvalError> =
-                            place::with_navigate_mut(root, &place.steps, |target| match target {
-                                Value::Instance(_) => Ok(Dispatch::Instance(target.clone())),
-                                Value::Module(module) => Ok(Dispatch::Module(module.clone())),
-                                Value::Class(class_name) => Ok(Dispatch::Class(class_name.clone())),
-                                _ => {
-                                    let outcome = dispatch_method(
-                                        target,
-                                        method_name,
-                                        &resolved_args,
-                                        &kwargs,
-                                    )?;
-                                    Ok(Dispatch::Done(outcome.value, outcome.mem_delta))
-                                }
-                            })?;
-                        result?
+                        match place::with_navigate_mut(root, &place.steps, |target| match target {
+                            Value::Instance(_) => {
+                                Ok::<Dispatch, EvalError>(Dispatch::Instance(target.clone()))
+                            }
+                            Value::Module(module) => Ok(Dispatch::Module(module.clone())),
+                            Value::ModuleFunction { module, name } => Ok(Dispatch::ModuleType {
+                                module: module.clone(),
+                                type_name: name.clone(),
+                            }),
+                            Value::Class(class_name) => Ok(Dispatch::Class(class_name.clone())),
+                            _ => {
+                                let outcome =
+                                    dispatch_method(target, method_name, &resolved_args, &kwargs)?;
+                                Ok(Dispatch::Done(outcome.value, outcome.mem_delta))
+                            }
+                        }) {
+                            Ok(inner) => Some(inner?),
+                            Err(_) => None,
+                        }
                     };
-                    match dispatch {
-                        Dispatch::Done(value, mem_delta) => {
-                            place::apply_mem_delta(state, mem_delta)?;
-                            return Ok(value);
-                        }
-                        Dispatch::Module(module) => {
-                            return crate::eval::modules::call_function(
-                                state,
-                                &module,
-                                method_name,
-                                &resolved_args,
-                                &kwargs,
-                                tools,
-                            )
-                            .await;
-                        }
-                        Dispatch::Class(class_name) => {
-                            // Class.method(...) — Track B2:
-                            //   * staticmethod: call without receiver
-                            //   * classmethod: call with the class as first arg (bound by
-                            //     call_method)
-                            // Regular instance methods cannot be called
-                            // unbound through the class (CPython raises
-                            // TypeError "missing 1 required positional
-                            // argument: 'self'" when the user forgets).
-                            // We surface the same error shape by
-                            // falling through to the unbound-call attempt
-                            // and letting param binding fail.
-                            if let Some(def) = crate::eval::classes::lookup_static_method(
-                                state,
-                                &class_name,
-                                method_name,
-                            ) {
-                                return call_user_function(
+                    if let Some(dispatch) = dispatch {
+                        match dispatch {
+                            Dispatch::Done(value, mem_delta) => {
+                                place::apply_mem_delta(state, mem_delta)?;
+                                return Ok(value);
+                            }
+                            Dispatch::Module(module) => {
+                                return crate::eval::modules::call_function(
                                     state,
-                                    &def,
+                                    &module,
+                                    method_name,
                                     &resolved_args,
                                     &kwargs,
                                     tools,
                                 )
                                 .await;
                             }
-                            if let Some(def) = crate::eval::classes::lookup_class_method(
-                                state,
-                                &class_name,
-                                method_name,
-                            ) {
+                            Dispatch::ModuleType { module, type_name } => {
+                                // `datetime.strptime(...)` after
+                                // `from datetime import datetime`.
+                                let Some(func) = crate::eval::modules::type_classmethod(
+                                    &module,
+                                    &type_name,
+                                    method_name,
+                                ) else {
+                                    return Err(InterpreterError::AttributeError(format!(
+                                        "type object '{type_name}' has no attribute '{method_name}'"
+                                    ))
+                                    .into());
+                                };
+                                return crate::eval::modules::call_function(
+                                    state,
+                                    &module,
+                                    func,
+                                    &resolved_args,
+                                    &kwargs,
+                                    tools,
+                                )
+                                .await;
+                            }
+                            Dispatch::Class(class_name) => {
+                                // Class.method(...) — Track B2:
+                                //   * staticmethod: call without receiver
+                                //   * classmethod: call with the class as first arg (bound by
+                                //     call_method)
+                                // Regular instance methods cannot be called
+                                // unbound through the class (CPython raises
+                                // TypeError "missing 1 required positional
+                                // argument: 'self'" when the user forgets).
+                                // We surface the same error shape by
+                                // falling through to the unbound-call attempt
+                                // and letting param binding fail.
+                                if let Some(def) = crate::eval::classes::lookup_static_method(
+                                    state,
+                                    &class_name,
+                                    method_name,
+                                ) {
+                                    return call_user_function(
+                                        state,
+                                        &def,
+                                        &resolved_args,
+                                        &kwargs,
+                                        tools,
+                                    )
+                                    .await;
+                                }
+                                if let Some(def) = crate::eval::classes::lookup_class_method(
+                                    state,
+                                    &class_name,
+                                    method_name,
+                                ) {
+                                    let call =
+                                        CallArgs { positional: &resolved_args, keyword: &kwargs };
+                                    let (returned, _self) = crate::eval::classes::call_method(
+                                        state,
+                                        &def,
+                                        Value::Class(class_name.clone()),
+                                        call,
+                                        tools,
+                                    )
+                                    .await?;
+                                    return Ok(returned);
+                                }
+                                return Err(InterpreterError::AttributeError(format!(
+                                    "type object '{class_name}' has no attribute '{method_name}'"
+                                ))
+                                .into());
+                            }
+                            Dispatch::Instance(instance) => {
                                 let call =
                                     CallArgs { positional: &resolved_args, keyword: &kwargs };
-                                let (returned, _self) = crate::eval::classes::call_method(
-                                    state,
-                                    &def,
-                                    Value::Class(class_name.clone()),
-                                    call,
-                                    tools,
-                                )
-                                .await?;
+                                let (returned, configured_self) =
+                                    crate::eval::classes::instance_method_call(
+                                        state,
+                                        instance,
+                                        method_name,
+                                        call,
+                                        tools,
+                                    )
+                                    .await?;
+                                let delta = {
+                                    let root =
+                                        state.variables.get_mut(&place.root).ok_or_else(|| {
+                                            EvalError::from(InterpreterError::name_not_defined(
+                                                &place.root,
+                                            ))
+                                        })?;
+                                    place::with_navigate_mut(root, &place.steps, |slot| {
+                                        let delta = place::size_delta(
+                                            estimate_value_size(slot),
+                                            estimate_value_size(&configured_self),
+                                        );
+                                        *slot = configured_self;
+                                        delta
+                                    })?
+                                };
+                                place::apply_mem_delta(state, delta)?;
                                 return Ok(returned);
                             }
-                            return Err(InterpreterError::AttributeError(format!(
-                                "type object '{class_name}' has no attribute '{method_name}'"
-                            ))
-                            .into());
                         }
-                        Dispatch::Instance(instance) => {
-                            let call = CallArgs { positional: &resolved_args, keyword: &kwargs };
-                            let (returned, configured_self) =
-                                crate::eval::classes::instance_method_call(
-                                    state,
-                                    instance,
-                                    method_name,
-                                    call,
-                                    tools,
-                                )
-                                .await?;
-                            let delta = {
-                                let root =
-                                    state.variables.get_mut(&place.root).ok_or_else(|| {
-                                        EvalError::from(InterpreterError::name_not_defined(
-                                            &place.root,
-                                        ))
-                                    })?;
-                                place::with_navigate_mut(root, &place.steps, |slot| {
-                                    let delta = place::size_delta(
-                                        estimate_value_size(slot),
-                                        estimate_value_size(&configured_self),
-                                    );
-                                    *slot = configured_self;
-                                    delta
-                                })?
-                            };
-                            place::apply_mem_delta(state, delta)?;
-                            return Ok(returned);
-                        }
-                    }
+                    } // if let Some(dispatch)
                 }
             }
 
@@ -366,6 +405,28 @@ pub async fn eval_call(
                     state,
                     &module_name,
                     method_name,
+                    &resolved_args,
+                    &kwargs,
+                    tools,
+                )
+                .await;
+            }
+            // Module constructor as type: `datetime.datetime.strptime(...)`
+            // or `(from datetime import datetime); datetime.strptime(...)`.
+            if let Value::ModuleFunction { module, name: type_name } = &temp {
+                let Some(func) =
+                    crate::eval::modules::type_classmethod(module, type_name, method_name)
+                else {
+                    return Err(InterpreterError::AttributeError(format!(
+                        "type object '{type_name}' has no attribute '{method_name}'"
+                    ))
+                    .into());
+                };
+                let module_name = module.clone();
+                return crate::eval::modules::call_function(
+                    state,
+                    &module_name,
+                    func,
                     &resolved_args,
                     &kwargs,
                     tools,

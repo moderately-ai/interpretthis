@@ -228,6 +228,24 @@ fn has_function(module: &str, name: &str) -> bool {
     MODULES.get(module).is_some_and(|m| m.has_function(name))
 }
 
+/// Resolve `Constructor.classmethod` when `Constructor` is a
+/// [`Value::ModuleFunction`] (e.g. after `from datetime import datetime`).
+///
+/// CPython models these as type classmethods. Our constructors are flat
+/// module functions, so `datetime.strptime(...)` arrives as a method-call
+/// on a ModuleFunction receiver — see `eval_call` — and must be re-routed
+/// to the underlying module function name returned here.
+///
+/// Returns `None` when the pair is not a known classmethod (caller raises
+/// AttributeError).
+#[must_use]
+pub fn type_classmethod(module: &str, type_name: &str, method: &str) -> Option<&'static str> {
+    match module {
+        "datetime" => datetime::type_classmethod(type_name, method),
+        _ => None,
+    }
+}
+
 fn module_not_found(module: &str) -> EvalError {
     EvalError::Exception(ExceptionValue::new(
         "ModuleNotFoundError",

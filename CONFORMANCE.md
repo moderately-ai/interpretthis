@@ -193,13 +193,13 @@ The standard exception hierarchy (`BaseException` → `Exception` → `LookupErr
 
 `datetime.strftime` (date / datetime / time variants) is implemented over `chrono`'s format strings, which are a superset of POSIX but **not** a strict superset of CPython's directive table. Locale-sensitive directives (`%c`, `%x`, `%X`) and IANA timezone-name directives (`%Z` for non-fixed offsets) are the principal gaps; CPython resolves these against the host locale and `tzdata`, which the interpreter deliberately does not expose.
 
-`strptime` is not yet implemented; tracked as a Track E follow-up.
+`strptime` is implemented via chrono's format parser (`datetime.datetime.strptime` and module-level `datetime.strptime`). It always returns a naive `datetime` (date-only formats get `00:00:00`; time-only formats use date `1900-01-01` per CPython).
 
-The currently supported subset on `strftime` covers what `chrono::NaiveDate` / `NaiveDateTime` / `NaiveTime` accept in their format strings. Common safe-on-all-locales directives: `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%f` (microseconds), `%A` / `%a` (weekday name — English), `%B` / `%b` (month name — English), `%j` (day-of-year), `%U` / `%W` (week number), `%z` (numeric UTC offset for aware datetimes), `%%` literal. Locale-sensitive `%c` / `%x` / `%X` / `%Z` (named timezone) raise a chrono error rather than producing locale-dependent output.
+The currently supported subset on `strftime` / `strptime` covers what `chrono::NaiveDate` / `NaiveDateTime` / `NaiveTime` accept in their format strings. Common safe-on-all-locales directives: `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%f` (microseconds), `%A` / `%a` (weekday name — English), `%B` / `%b` (month name — English), `%j` (day-of-year), `%U` / `%W` (week number), `%z` (numeric UTC offset for aware datetimes), `%%` literal. Locale-sensitive `%c` / `%x` / `%X` / `%Z` (named timezone) raise a chrono error rather than producing locale-dependent output.
 
 **Rationale**: strftime divergence is the single most common source of "looks right, is wrong" bugs in a date-formatting layer. Making the supported set explicit and unsupported directives loud-fail is cheaper than auditing every output.
 
-**Status**: `strftime` shipped (Track D). `strptime` planned. Locale-sensitive directives permanently out of scope.
+**Status**: `strftime` and `strptime` shipped (Track D). Locale-sensitive directives permanently out of scope.
 
 ---
 

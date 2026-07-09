@@ -341,6 +341,16 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
             }
         }
         Value::Module(module) => crate::eval::modules::module_member(module, attr_name),
+        // Constructor classmethods: `f = datetime.strptime` (no call yet).
+        // Live calls `datetime.strptime(...)` are handled in eval_call's
+        // method path via the same registry — keep both in sync.
+        Value::ModuleFunction { module, name } => {
+            if let Some(func) = crate::eval::modules::type_classmethod(module, name, attr_name) {
+                Ok(Value::ModuleFunction { module: module.clone(), name: func.into() })
+            } else {
+                Err(attribute_error(obj.type_name(), attr_name))
+            }
+        }
         _ => Err(attribute_error(obj.type_name(), attr_name)),
     }
 }
