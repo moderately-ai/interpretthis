@@ -1,0 +1,1 @@
+`re` module: `match`/`search`/`findall`/`sub`/`split`, groups, flags. Note: regex backtracking is intentionally absent in the interpreter (see `CONFORMANCE.md`); snippets target the non-backtracking subset.

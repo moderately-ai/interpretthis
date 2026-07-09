@@ -1,0 +1,1 @@
+Comparison and equality semantics: cross-type numeric comparisons, comparison chains (`a < b < c`), reflected operators, hash/eq invariant (`a == b` implies `hash(a) == hash(b)`), `NotImplemented` sentinel.

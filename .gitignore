@@ -1,0 +1,30 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Criterion / profiling
+/criterion/
+/perf.data*
+/flamegraph.svg
+*.profraw
+*.profdata
+/pgo-data/
+
+# Generated / local
+/out/
+*.log
+.env
+.env.*
+.claude/skills/ticketsplease
+
+# Coding harness
+.pi-subagents/

@@ -1,0 +1,93 @@
+{
+  "_comment": "Perf baseline for interpretthis. Numbers are criterion's reported median / mean / std-dev for each bench (nanoseconds per iteration), captured at base_sha against an empty Tools registry. Future slices run `cargo bench` and assert median is within the per-workload envelope vs the median below: eval <=1.2x, workloads <=1.15x, containers <=1.1x. The criterion_id matches the criterion bench id printed in the cargo-bench output and identifies the corresponding target/criterion/<id>/ directory.",
+  "_format": {
+    "version": 1,
+    "units": "nanoseconds",
+    "fields": ["criterion_id", "median_ns", "mean_ns", "std_dev_ns"]
+  },
+  "_capture": {
+    "base_sha": "bdd8c9d3d852d7a752865dbf84d4de630aec6ec9",
+    "captured_at": "2026-05-29",
+    "rust_toolchain": "see rust-toolchain.toml",
+    "profile": "bench (release)",
+    "criterion_version": "0.7.0",
+    "tools_registry": "empty (interpreter loop only, no host-tool dispatch)",
+    "_rename_note": "2026-06-07: bench files reorganised by interpreter layer; groups renamed (arithmetic->eval, comprehension_10k->containers, pipeline_realistic->workloads). Workloads are byte-identical; numbers were NOT re-captured. Old target/criterion/<old-group>/ directories are stale and can be deleted on developer machines."
+  },
+  "_envelopes": {
+    "eval": {
+      "max_ratio_vs_baseline_median": 1.2,
+      "rationale": "Pure interpreter dispatch is the hottest path; Track A dispatch refactor must stay within 1.2x or the gate trips."
+    },
+    "workloads": {
+      "max_ratio_vs_baseline_median": 1.15,
+      "rationale": "Realistic LLM-extraction shape mined from code_interpreter integration tests; tighter envelope reflects production-cost sensitivity."
+    },
+    "containers": {
+      "max_ratio_vs_baseline_median": 1.1,
+      "rationale": "Comprehensions are iteration-protocol dominant; Track A4 must preserve container-build cost within 1.1x."
+    }
+  },
+  "groups": {
+    "eval": {
+      "int_loop_2k": {
+        "criterion_id": "eval/int_loop_2k",
+        "median_ns": 4074107,
+        "mean_ns": 4099465,
+        "std_dev_ns": 132808
+      },
+      "float_loop_1500": {
+        "criterion_id": "eval/float_loop_1500",
+        "median_ns": 3698786,
+        "mean_ns": 3680123,
+        "std_dev_ns": 94845
+      },
+      "branch_loop_1500": {
+        "criterion_id": "eval/branch_loop_1500",
+        "median_ns": 3759447,
+        "mean_ns": 3766433,
+        "std_dev_ns": 33792
+      }
+    },
+    "containers": {
+      "list_comp": {
+        "criterion_id": "containers/list_comp",
+        "median_ns": 4739346,
+        "mean_ns": 4740933,
+        "std_dev_ns": 86385
+      },
+      "dict_comp_filter": {
+        "criterion_id": "containers/dict_comp_filter",
+        "median_ns": 7472521,
+        "mean_ns": 7474326,
+        "std_dev_ns": 59356
+      },
+      "nested_comp_100x100": {
+        "criterion_id": "containers/nested_comp_100x100",
+        "median_ns": 10368421,
+        "mean_ns": 10457204,
+        "std_dev_ns": 360185
+      }
+    },
+    "workloads": {
+      "extract_records_500": {
+        "criterion_id": "workloads/extract_records_500",
+        "median_ns": 5960124,
+        "mean_ns": 5987397,
+        "std_dev_ns": 330374
+      },
+      "format_lines_400": {
+        "criterion_id": "workloads/format_lines_400",
+        "median_ns": 1189043,
+        "mean_ns": 1193282,
+        "std_dev_ns": 16724
+      },
+      "dict_aggregate_600": {
+        "criterion_id": "workloads/dict_aggregate_600",
+        "median_ns": 7789606,
+        "mean_ns": 8812116,
+        "std_dev_ns": 2585388
+      }
+    }
+  }
+}

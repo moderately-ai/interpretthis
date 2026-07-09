@@ -1,0 +1,1181 @@
+// Copyright 2026 Thomas Santerre and Moderately AI Inc.
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! User-defined classes: `class` definition, instantiation, and method calls.
+//!
+//! A class definition registers a [`ClassValue`] (its methods and class
+//! attributes) in `InterpreterState::classes` and binds a lightweight
+//! [`Value::Class`] handle as the class-named variable. Instances carry only
+//! their class name plus their own fields; methods are looked up in the registry
+//! at call time, so an instance never copies its class's methods.
+//!
+//! Because the value model is owned (no reference aliasing), a method that
+//! mutates `self` mutates a *copy*. [`call_method`] therefore reads `self` back
+//! out of the method's scope after the body runs and returns it, and the caller
+//! writes it back into the receiver's slot — the same place-based write-back the
+//! built-in mutating methods use.
+//!
+//! Inheritance: multi-level inheritance and the `super()` family are
+//! supported via a C3-linearized MRO computed at class-definition time.
+//! Method and attribute lookups walk `ClassValue::mro` in order. The
+//! implicit `object` tail is omitted from the MRO (no registered class) —
+//! lookups fall through to a not-found / AttributeError once the explicit
+//! chain is exhausted, matching CPython's behaviour without modelling
+//! `object`'s instance methods.
+//!
+//! Scope limits (rejected with a clear error rather than silently mis-handled):
+//! metaclass / keyword arguments (out-of-scope) and inheritance cycles
+//! or C3 conflicts (raise `TypeError("Cannot create a consistent method
+//! resolution order")` matching CPython). Class-level decorators
+//! (`@property`-style + `@dataclass` + user callables) are supported;
+//! method-level decorators route through `classify_decorated_method`.
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use indexmap::IndexMap;
+use rustpython_parser::ast::{self, Expr, Stmt};
+
+use crate::{
+    error::{EvalError, EvalResult, InterpreterError},
+    eval::{
+        eval_expr,
+        functions::{
+            CallArgs, bind_params, build_function_params, call_lambda, call_user_function,
+            execute_body, extract_function_source,
+        },
+    },
+    state::InterpreterState,
+    tools::Tools,
+    value::{ClassValue, FunctionDef, InstanceValue, PropertyDef, Value, shared_list},
+};
+
+/// Evaluate a `class` definition: build the [`ClassValue`], register it, and
+/// bind the class-named variable to a [`Value::Class`] handle.
+pub async fn eval_class_def(
+    state: &mut InterpreterState,
+    node: &ast::StmtClassDef,
+    tools: &Tools,
+) -> EvalResult {
+    let class_name = node.name.as_str();
+    crate::security::validator::validate_name(
+        crate::security::validator::NameContext::Assignment,
+        class_name,
+    )?;
+
+    if !node.keywords.is_empty() {
+        return Err(InterpreterError::Security(
+            "class keyword arguments (e.g. metaclass=) are not supported \
+             (see CONFORMANCE.md#unsupported-language-features)"
+                .into(),
+        )
+        .into());
+    }
+
+    // Collect declared bases (excluding the implicit `object`, which we
+    // don't materialize as a registered class). typing.* and enum.*
+    // aliases (`Enum`, `IntEnum`, `NamedTuple`, etc.) resolve to
+    // Value::Type / Value::ModuleFunction sentinels and are
+    // recognised here for enum-kind detection.
+    let mut bases: Vec<String> = Vec::new();
+    let mut enum_kind: Option<crate::value::EnumKind> = None;
+    for base in &node.bases {
+        let Expr::Name(name_node) = base else {
+            return Err(InterpreterError::Security(
+                "class base must be a bare class name; computed bases are not supported".into(),
+            )
+            .into());
+        };
+        let base_name = name_node.id.as_str();
+        if base_name == "object" {
+            continue;
+        }
+        // Check resolved value for the enum sentinels (`enum.Enum`,
+        // `enum.IntEnum`, `enum.StrEnum`, etc.) so aliased imports
+        // (`from enum import Enum as MyBase`) work too.
+        let resolved = state.variables.get(base_name);
+        if let Some(Value::Type(type_name)) = resolved {
+            match type_name.as_str() {
+                "enum.Enum" | "enum.Flag" => enum_kind = Some(crate::value::EnumKind::Plain),
+                "enum.IntEnum" | "enum.IntFlag" => {
+                    enum_kind = Some(crate::value::EnumKind::Int);
+                }
+                "enum.StrEnum" => enum_kind = Some(crate::value::EnumKind::Str),
+                _ => {}
+            }
+            continue;
+        }
+        if matches!(resolved, Some(Value::ModuleFunction { .. })) {
+            continue;
+        }
+        if !state.classes.contains_key(base_name) {
+            return Err(InterpreterError::name_not_defined(base_name).into());
+        }
+        bases.push(base_name.to_string());
+    }
+
+    let mut methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
+    let mut class_attrs: BTreeMap<String, Value> = BTreeMap::new();
+    let mut properties: BTreeMap<String, PropertyDef> = BTreeMap::new();
+    let mut static_methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
+    let mut class_methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
+    // Annotated attribute names in declaration order. `@dataclass` consumes
+    // this to compute its field list — class_attrs (BTreeMap) would
+    // re-order them alphabetically and break the synthesized `__init__`
+    // parameter order.
+    let mut annotations: Vec<String> = Vec::new();
+
+    for stmt in &node.body {
+        match stmt {
+            Stmt::FunctionDef(method) => {
+                let mut params = build_function_params(&method.args);
+                // Evaluate the method's default args at def time in
+                // the class body scope — same CPython semantics as
+                // top-level `def` (the `i=i` capture idiom + mutable
+                // default sharing).
+                crate::eval::functions::evaluate_param_defaults(state, &mut params, tools).await?;
+                let source = extract_function_source(&state.current_source, method);
+                let method_name = method.name.as_str().to_string();
+                // The body cache key gets a per-decorator suffix so
+                // `@property def x` / `@x.setter def x` / `@x.deleter
+                // def x` don't collide. Regular methods use the plain
+                // `Class.name` key.
+                classify_decorated_method(
+                    state,
+                    &method.decorator_list,
+                    class_name,
+                    method_name,
+                    params,
+                    method.body.clone(),
+                    source,
+                    &mut methods,
+                    &mut properties,
+                    &mut static_methods,
+                    &mut class_methods,
+                )?;
+            }
+            Stmt::Assign(assign) => {
+                if let [Expr::Name(target)] = assign.targets.as_slice() {
+                    let value = eval_expr(state, &assign.value, tools).await?;
+                    let attr_name = target.id.as_str().to_string();
+                    let wrapped = wrap_enum_member(enum_kind, class_name, &attr_name, value);
+                    class_attrs.insert(attr_name, wrapped);
+                }
+            }
+            Stmt::AnnAssign(ann) => {
+                if let Expr::Name(target) = ann.target.as_ref() {
+                    let attr_name = target.id.as_str().to_string();
+                    // Record every annotated name, with or without a value,
+                    // in declaration order so `@dataclass` can read fields.
+                    if !annotations.contains(&attr_name) {
+                        annotations.push(attr_name.clone());
+                    }
+                    if let Some(value_expr) = &ann.value {
+                        let value = eval_expr(state, value_expr, tools).await?;
+                        let wrapped = wrap_enum_member(enum_kind, class_name, &attr_name, value);
+                        class_attrs.insert(attr_name, wrapped);
+                    }
+                }
+            }
+            // Docstrings and `pass` carry no class state; other statements in a
+            // class body (nested classes, etc.) are not modelled and ignored.
+            _ => {}
+        }
+    }
+
+    // C3 linearization gives the method resolution order for this
+    // class. Each base's MRO is in the registry already (because B1's
+    // single-pass eval registers bases before their derivatives).
+    let mro = build_mro(class_name, &bases, &state.classes)?;
+
+    state.classes.insert(
+        class_name.to_string(),
+        ClassValue {
+            name: class_name.to_string(),
+            methods,
+            class_attrs,
+            bases,
+            mro,
+            properties,
+            static_methods,
+            class_methods,
+            enum_kind,
+            annotations,
+            dataclass_fields: None,
+        },
+    );
+    state
+        .set_variable(class_name, Value::Class(class_name.to_string()))
+        .map_err(EvalError::Interpreter)?;
+
+    // Apply class-level decorators in REVERSE order (bottom-up,
+    // matching CPython): the innermost decorator wraps the class
+    // first. Class decorators take the class and return a value
+    // — usually the same class transformed, but anything callable is
+    // accepted. The result is rebound to the class name in scope.
+    if !node.decorator_list.is_empty() {
+        let mut result = Value::Class(class_name.to_string());
+        for decorator in node.decorator_list.iter().rev() {
+            let dec_val = eval_expr(state, decorator, tools).await?;
+            result = apply_decorator(state, &dec_val, result, tools).await?;
+        }
+        state.set_variable(class_name, result).map_err(EvalError::Interpreter)?;
+    }
+
+    Ok(Value::None)
+}
+
+/// Dispatch a method's decorator list to the right ClassValue bucket
+/// and insert its body into `state.function_bodies` under a key that
+/// stays unique across the three property accessors. Regular methods
+/// use the plain `Class.name` key; property accessors disambiguate
+/// with a `__get` / `__set` / `__del` suffix so a `@balance.setter`
+/// doesn't overwrite the getter's body.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the buckets travel as four separate `&mut BTreeMap`s by design; bundling them into a struct would just reify the same fan-out at the call site"
+)]
+fn classify_decorated_method(
+    state: &mut InterpreterState,
+    decorators: &[Expr],
+    class_name: &str,
+    method_name: String,
+    params: crate::value::FunctionParams,
+    body: Vec<Stmt>,
+    source: String,
+    methods: &mut BTreeMap<String, FunctionDef>,
+    properties: &mut BTreeMap<String, PropertyDef>,
+    static_methods: &mut BTreeMap<String, FunctionDef>,
+    class_methods: &mut BTreeMap<String, FunctionDef>,
+) -> Result<(), EvalError> {
+    let mut register = |key: String, body: Vec<Stmt>, source: String| -> FunctionDef {
+        // Walk the method body for `assigned_names` / `global_names`
+        // so `VariableCheckpoint` can snapshot only the names this
+        // frame can touch instead of cloning all of `state.variables`
+        // per call. `nonlocal` isn't supported inside class methods
+        // today (it would route through a cell at the enclosing
+        // function scope, not the class), so nonlocal_names stays
+        // empty.
+        let (mut assigned_names, global_names) =
+            crate::eval::functions::collect_assigned_names(&body);
+        assigned_names.retain(|n| !global_names.contains(n));
+        let is_generator = crate::eval::functions::contains_yield_stmts(&body);
+        state.function_bodies.insert(key.clone(), Arc::new(body));
+        FunctionDef {
+            name: key,
+            params: params.clone(),
+            closure: BTreeMap::new(),
+            source,
+            nonlocal_names: Vec::new(),
+            is_generator,
+            nonlocal_cell_id: None,
+            assigned_names,
+            global_names,
+            // Methods have an empty closure, so overlay suppression
+            // is moot here. The flag is kept consistent with how
+            // top-level `def` would have been classified.
+            is_module_level: false,
+        }
+    };
+    // No decorators: regular method.
+    if decorators.is_empty() {
+        let key = format!("{class_name}.{method_name}");
+        let func = register(key, body, source);
+        methods.insert(method_name, func);
+        return Ok(());
+    }
+    // Single decorator is the common case for the four builtin shapes.
+    if decorators.len() == 1 {
+        match &decorators[0] {
+            Expr::Name(n) if n.id.as_str() == "property" => {
+                let key = format!("{class_name}.{method_name}__get");
+                let func = register(key, body, source);
+                properties
+                    .insert(method_name, PropertyDef { getter: func, setter: None, deleter: None });
+                return Ok(());
+            }
+            Expr::Name(n) if n.id.as_str() == "staticmethod" => {
+                let key = format!("{class_name}.{method_name}__static");
+                let func = register(key, body, source);
+                static_methods.insert(method_name, func);
+                return Ok(());
+            }
+            Expr::Name(n) if n.id.as_str() == "classmethod" => {
+                let key = format!("{class_name}.{method_name}__class");
+                let func = register(key, body, source);
+                class_methods.insert(method_name, func);
+                return Ok(());
+            }
+            // `@x.setter` / `@x.deleter`: attribute access on an
+            // existing property. We resolve x by name in the current
+            // class scope (the method_name must equal x.attr — Python
+            // requires the property and accessor share the same name).
+            Expr::Attribute(attr) => {
+                if let Expr::Name(prop_name) = attr.value.as_ref() {
+                    let prop_key = prop_name.id.as_str().to_string();
+                    let kind = attr.attr.as_str();
+                    if properties.contains_key(&prop_key) {
+                        let suffix = match kind {
+                            "setter" => "__set",
+                            "deleter" => "__del",
+                            _ => "",
+                        };
+                        if !suffix.is_empty() {
+                            let key = format!("{class_name}.{prop_key}{suffix}");
+                            let func = register(key, body, source);
+                            if let Some(prop) = properties.get_mut(&prop_key) {
+                                match kind {
+                                    "setter" => {
+                                        prop.setter = Some(func);
+                                        return Ok(());
+                                    }
+                                    "deleter" => {
+                                        prop.deleter = Some(func);
+                                        return Ok(());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(InterpreterError::Security(format!(
+        "method-level decorator stack on '{method_name}' is not one of the supported \
+         shapes (@property, @<name>.setter, @<name>.deleter, @staticmethod, @classmethod). \
+         See CONFORMANCE.md#unsupported-language-features.",
+    ))
+    .into())
+}
+
+/// Apply a single decorator (any callable Value) to a target Value.
+/// Used by class-decorator and function-decorator paths. Only
+/// Function / Lambda values are accepted as callables; other forms
+/// (Class instances with __call__, builtin sentinels) are out of scope
+/// for B2 and rejected with a clear error.
+pub(crate) async fn apply_decorator(
+    state: &mut InterpreterState,
+    decorator: &Value,
+    target: Value,
+    tools: &Tools,
+) -> EvalResult {
+    let kwargs: IndexMap<String, Value> = IndexMap::new();
+    match decorator {
+        Value::Function(def) => {
+            let positional = [target];
+            call_user_function(state, def, &positional, &kwargs, tools).await
+        }
+        Value::Lambda(def) => {
+            let positional = [target];
+            call_lambda(state, def, &positional, &kwargs, tools).await
+        }
+        // `@dataclasses.dataclass` (bare form): rewrites the target
+        // class in-place to record its [`DataclassField`] list. The
+        // class identity does not change — the same `Value::Class`
+        // handle is returned. The same path handles
+        // `dataclasses.dataclass(C)` (call form), which is
+        // `@dataclass`-equivalent per CPython.
+        Value::ModuleFunction { module, name }
+            if module == "dataclasses" && name == "dataclass" =>
+        {
+            let class_name = match &target {
+                Value::Class(n) => n.clone(),
+                other => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "@dataclass requires a class target (got '{}')",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            crate::eval::modules::dataclasses::apply_dataclass(state, &class_name, &kwargs)?;
+            Ok(Value::Class(class_name))
+        }
+        other => Err(InterpreterError::TypeError(format!(
+            "decorator is not callable (got '{}')",
+            other.type_name()
+        ))
+        .into()),
+    }
+}
+
+/// Wrap a class-body assignment as an EnumMember when the class is
+/// an enum subclass. Methods (FunctionDef / Lambda) inside an enum
+/// body stay unwrapped so they can be invoked. Non-method values
+/// (the typical case: `RED = 1`) become EnumMember.
+fn wrap_enum_member(
+    enum_kind: Option<crate::value::EnumKind>,
+    class_name: &str,
+    member_name: &str,
+    value: Value,
+) -> Value {
+    let Some(kind) = enum_kind else { return value };
+    // Don't wrap methods / lambdas — they're enum methods.
+    if matches!(value, Value::Function(_) | Value::Lambda(_)) {
+        return value;
+    }
+    // Don't double-wrap. Don't wrap dunders (_value_ etc.) — they're
+    // metadata.
+    if matches!(value, Value::EnumMember { .. }) || member_name.starts_with('_') {
+        return value;
+    }
+    Value::EnumMember {
+        class_name: class_name.to_string(),
+        member_name: member_name.to_string(),
+        value: Box::new(value),
+        kind,
+    }
+}
+
+/// Compute the C3-linearized MRO for `class_name` over `bases`. The
+/// algorithm is CPython's: the MRO of a class is itself, followed by the
+/// merge of (a) the MROs of each base in declaration order and (b) the
+/// list of bases themselves. The merge picks the head of the first list
+/// whose head does not appear in the tail of any other list; if no such
+/// head exists, raise `TypeError` matching CPython's exact wording.
+/// Source: <https://en.wikipedia.org/wiki/C3_linearization>.
+fn build_mro(
+    class_name: &str,
+    bases: &[String],
+    registry: &rustc_hash::FxHashMap<String, ClassValue>,
+) -> Result<Vec<String>, EvalError> {
+    let mut sequences: Vec<Vec<String>> = bases
+        .iter()
+        .map(|b| registry.get(b).map_or_else(|| vec![b.clone()], |cls| cls.mro.clone()))
+        .collect();
+    sequences.push(bases.to_vec());
+
+    let mut result: Vec<String> = vec![class_name.to_string()];
+
+    while !sequences.iter().all(Vec::is_empty) {
+        // Find a "good head" — a class that appears at the head of some
+        // non-empty sequence and nowhere in the tail of any other.
+        let candidate = sequences
+            .iter()
+            .filter_map(|seq| seq.first())
+            .find(|head| sequences.iter().all(|seq| !seq.iter().skip(1).any(|n| n == *head)))
+            .cloned();
+
+        let Some(head) = candidate else {
+            // CPython 3.12 includes a literal newline between
+            // "resolution" and "order" in the format string. The
+            // surrounding character-for-character match is what lets a
+            // planner LLM trained on cpython tracebacks recognise the
+            // error precisely.
+            return Err(InterpreterError::TypeError(format!(
+                "Cannot create a consistent method resolution\norder (MRO) for bases of class '{class_name}'"
+            ))
+            .into());
+        };
+
+        result.push(head.clone());
+
+        // Strip `head` from the front of every sequence where it appears.
+        for seq in &mut sequences {
+            if seq.first() == Some(&head) {
+                seq.remove(0);
+            }
+        }
+        sequences.retain(|seq| !seq.is_empty());
+    }
+
+    Ok(result)
+}
+
+/// Instantiate `class_name(args, kwargs)`: allocate an empty instance and run
+/// `__init__` if the class defines one.
+pub async fn instantiate(
+    state: &mut InterpreterState,
+    class_name: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> EvalResult {
+    // Enum value-construction: `Color(1)` returns the member whose
+    // value equals the arg. Customer pattern is
+    // `Color.from_value = Color(value)`; matching CPython's
+    // `Enum(value)` constructor.
+    if let Some(class) = state.classes.get(class_name) {
+        if class.enum_kind.is_some() && args.len() == 1 && kwargs.is_empty() {
+            let needle = &args[0];
+            for (member_name, member_value) in &class.class_attrs {
+                if let Value::EnumMember { value, .. } = member_value {
+                    if crate::eval::operations::values_equal_pub(value, needle) {
+                        return Ok(member_value.clone());
+                    }
+                    let _ = member_name;
+                }
+            }
+            return Err(crate::error::EvalError::Exception(crate::value::ExceptionValue::new(
+                "ValueError",
+                format!("{needle} is not a valid {class_name}"),
+            )));
+        }
+    }
+    let instance = Value::Instance(InstanceValue {
+        class_name: class_name.to_string(),
+        fields: BTreeMap::new(),
+    });
+
+    // `@dataclass`-synthesized __init__: if the class is a dataclass
+    // and no user-defined `__init__` overrides the synthesis, bind
+    // positional + keyword args onto the instance's fields per the
+    // declared field order. CPython's @dataclass produces the same
+    // mapping; doing it directly avoids generating source code for an
+    // `__init__` method just to re-parse and execute it.
+    let has_user_init =
+        state.classes.get(class_name).is_some_and(|c| c.methods.contains_key("__init__"));
+    if !has_user_init {
+        if let Some(fields) = state.classes.get(class_name).and_then(|c| c.dataclass_fields.clone())
+        {
+            return dataclass_instantiate(state, class_name, &fields, args, kwargs, tools).await;
+        }
+    }
+
+    // Walk the MRO to find an `__init__`. CPython uses
+    // `type(instance).__init__`, which after MRO resolution finds the
+    // most-derived class that defines it. A class without its own
+    // `__init__` inherits its base's.
+    let init = lookup_method_in_mro(state, class_name, "__init__");
+    let Some((_defining_class, init_def)) = init else {
+        // No `__init__` anywhere in the MRO: only a zero-argument call
+        // is valid, as in CPython.
+        if !args.is_empty() || !kwargs.is_empty() {
+            return Err(
+                InterpreterError::TypeError(format!("{class_name}() takes no arguments")).into()
+            );
+        }
+        return Ok(instance);
+    };
+    let call = CallArgs { positional: args, keyword: kwargs };
+    let (_returned, configured_self) = call_method(state, &init_def, instance, call, tools).await?;
+    Ok(configured_self)
+}
+
+/// Bind `args` / `kwargs` onto a dataclass instance's fields per the
+/// declared field order, applying defaults / default factories for
+/// missing init-fields. Fields whose `init` flag is False are seeded
+/// directly from `default` / `default_factory` without participating in
+/// the positional/keyword binding.
+///
+/// Errors match CPython:
+///   * `TypeError("'X' got multiple values for argument 'name'")` when a positional and keyword
+///     both name the same field.
+///   * `TypeError("'X' missing required argument: 'name'")` when an init field has no default and
+///     no value was supplied.
+///   * `TypeError("'X' got unexpected keyword argument 'name'")` when a keyword arg does not match
+///     any init field.
+async fn dataclass_instantiate(
+    state: &mut InterpreterState,
+    class_name: &str,
+    fields: &[crate::value::DataclassField],
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> EvalResult {
+    let init_fields: Vec<&crate::value::DataclassField> =
+        fields.iter().filter(|f| f.init).collect();
+    if args.len() > init_fields.len() {
+        return Err(InterpreterError::TypeError(format!(
+            "{class_name}() takes {} positional arguments but {} were given",
+            init_fields.len(),
+            args.len()
+        ))
+        .into());
+    }
+    // Validate keyword args against known init-field names early so a
+    // typo surfaces with the same message CPython produces.
+    for key in kwargs.keys() {
+        if !init_fields.iter().any(|f| &f.name == key) {
+            return Err(InterpreterError::TypeError(format!(
+                "{class_name}() got an unexpected keyword argument '{key}'"
+            ))
+            .into());
+        }
+    }
+
+    let mut instance_fields: BTreeMap<String, Value> = BTreeMap::new();
+
+    for (index, field) in init_fields.iter().enumerate() {
+        let positional = args.get(index).cloned();
+        let keyword = kwargs.get(&field.name).cloned();
+        let value = match (positional, keyword) {
+            (Some(_), Some(_)) => {
+                return Err(InterpreterError::TypeError(format!(
+                    "{class_name}() got multiple values for argument '{}'",
+                    field.name
+                ))
+                .into());
+            }
+            (Some(v), None) | (None, Some(v)) => v,
+            (None, None) => {
+                if let Some(default) = field.default.clone() {
+                    default
+                } else if let Some(factory) = field.default_factory.clone() {
+                    invoke_default_factory(state, &factory, tools).await?
+                } else {
+                    return Err(InterpreterError::TypeError(format!(
+                        "{class_name}() missing required argument: '{}'",
+                        field.name
+                    ))
+                    .into());
+                }
+            }
+        };
+        instance_fields.insert(field.name.clone(), value);
+    }
+
+    // Non-init fields: seed from default / default_factory unconditionally.
+    for field in fields.iter().filter(|f| !f.init) {
+        let value = if let Some(default) = field.default.clone() {
+            default
+        } else if let Some(factory) = field.default_factory.clone() {
+            invoke_default_factory(state, &factory, tools).await?
+        } else {
+            continue;
+        };
+        instance_fields.insert(field.name.clone(), value);
+    }
+
+    Ok(Value::Instance(InstanceValue {
+        class_name: class_name.to_string(),
+        fields: instance_fields,
+    }))
+}
+
+fn empty_for_builtin_factory(name: &str) -> EvalResult {
+    match name {
+        "list" => Ok(Value::List(shared_list(Vec::new()))),
+        "dict" => Ok(Value::Dict(IndexMap::new())),
+        "set" => Ok(Value::Set(Vec::new())),
+        "tuple" => Ok(Value::Tuple(Vec::new())),
+        "str" => Ok(Value::String("".into())),
+        other => {
+            Err(InterpreterError::TypeError(format!("default_factory '{other}' is not callable"))
+                .into())
+        }
+    }
+}
+
+async fn invoke_default_factory(
+    state: &mut InterpreterState,
+    factory: &Value,
+    tools: &Tools,
+) -> EvalResult {
+    let empty_kwargs: IndexMap<String, Value> = IndexMap::new();
+    match factory {
+        Value::Function(def) => call_user_function(state, def, &[], &empty_kwargs, tools).await,
+        Value::Lambda(def) => call_lambda(state, def, &[], &empty_kwargs, tools).await,
+        // Boxed: `invoke_default_factory` is called from
+        // `dataclass_instantiate`, which is itself called from
+        // `instantiate` — without the indirection the async closure
+        // type would be infinitely-sized.
+        Value::Class(name) => Box::pin(instantiate(state, name, &[], &empty_kwargs, tools)).await,
+        Value::ModuleFunction { module, name } => {
+            crate::eval::modules::call_function(state, module, name, &[], &empty_kwargs, tools)
+                .await
+        }
+        // Built-in factory names invoked directly (e.g.
+        // `default_factory=list`): `Value::Type` is the explicit-type
+        // form, `Value::BuiltinName` is what bare-name lookup produces.
+        // Both route to the same empty-container shim.
+        Value::Type(t) => empty_for_builtin_factory(t.as_str()),
+        Value::BuiltinName(name) => empty_for_builtin_factory(name.as_str()),
+        other => Err(InterpreterError::TypeError(format!(
+            "default_factory is not callable (got '{}')",
+            other.type_name()
+        ))
+        .into()),
+    }
+}
+
+/// Look up and call `instance.method(args)`, returning `(return_value, self)`
+/// where `self` reflects any mutations the method made — the caller writes it
+/// back into the receiver's slot.
+pub async fn instance_method_call(
+    state: &mut InterpreterState,
+    instance: Value,
+    method_name: &str,
+    call: CallArgs<'_>,
+    tools: &Tools,
+) -> Result<(Value, Value), EvalError> {
+    let Value::Instance(inst) = &instance else {
+        return Err(
+            InterpreterError::Runtime("instance_method_call on a non-instance".into()).into()
+        );
+    };
+    let class_name = inst.class_name.clone();
+    // staticmethod beats regular method per CPython's
+    // __getattribute__ order. A staticmethod is called without
+    // binding `self` — we route through call_user_function instead of
+    // call_method (which expects a receiver).
+    if let Some(def) = lookup_static_method(state, &class_name, method_name) {
+        let result = call_user_function(state, &def, call.positional, call.keyword, tools).await?;
+        return Ok((result, instance));
+    }
+    // classmethod beats regular method too. The first arg bound is
+    // the class (Value::Class), not the instance.
+    if let Some(def) = lookup_class_method(state, &class_name, method_name) {
+        return call_method(state, &def, Value::Class(class_name.clone()), call, tools).await;
+    }
+    // Walk the MRO: a method defined in any ancestor is callable on
+    // `instance`, with `__class__` bound to the defining class so
+    // zero-arg `super()` inside that method resumes at the next slot.
+    let method = lookup_method_in_mro(state, &class_name, method_name);
+    let Some((_defining_class, def)) = method else {
+        return Err(InterpreterError::AttributeError(format!(
+            "'{class_name}' object has no attribute '{method_name}'"
+        ))
+        .into());
+    };
+    call_method(state, &def, instance, call, tools).await
+}
+
+/// Run a method body with `self` bound to `self_value`, returning the method's
+/// return value and the post-execution `self` (carrying any mutations).
+///
+/// Unlike a free function, a method sees the *current* global scope (not a
+/// def-time closure snapshot), so no closure is applied — `self` and the
+/// parameters are layered over the live variables and removed on return.
+/// Apply a method frame's local-scope bindings (parameters including
+/// `self`) onto `state.variables`. Extracted as a sync helper so the
+/// per-step state doesn't survive across `execute_body(...).await` —
+/// see the matching helpers in `eval::functions::mod` for the
+/// stack-budget reasoning.
+fn apply_method_scope(
+    state: &mut InterpreterState,
+    local_scope: &std::collections::HashMap<String, Value>,
+) -> Result<(), EvalError> {
+    for (name, value) in local_scope {
+        state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
+    }
+    Ok(())
+}
+
+pub async fn call_method(
+    state: &mut InterpreterState,
+    method: &FunctionDef,
+    self_value: Value,
+    call: CallArgs<'_>,
+    tools: &Tools,
+) -> Result<(Value, Value), EvalError> {
+    state.enter_call().map_err(EvalError::Interpreter)?;
+    // Method frames also own a cell-owners scope; nested `def` inside
+    // a method body that declares `nonlocal` registers here.
+    state.frame_cell_owners.push(rustc_hash::FxHashMap::default());
+
+    // Push a method frame so zero-arg `super()` can read the defining
+    // class + `self` from the top of the stack. The defining class is
+    // encoded in the method's qualified name (`Class.method`).
+    let defining_class =
+        method.name.split_once('.').map_or_else(|| method.name.clone(), |(cls, _)| cls.to_string());
+    let self_local_name = method.params.args.first().map(|p| p.name.clone());
+    let frame_pushed = if let Value::Instance(_) = &self_value {
+        state.method_frame_stack.push(crate::state::MethodFrame {
+            defining_class,
+            self_value: self_value.clone(),
+            self_local_name: self_local_name.clone(),
+        });
+        true
+    } else {
+        false
+    };
+
+    // The receiver is the first positional parameter (conventionally `self`).
+    let mut full_args = Vec::with_capacity(call.positional.len() + 1);
+    full_args.push(self_value);
+    full_args.extend_from_slice(call.positional);
+
+    let local_scope =
+        match bind_params(&method.params, &full_args, call.keyword, state, tools).await {
+            Ok(scope) => scope,
+            Err(e) => {
+                if frame_pushed {
+                    state.method_frame_stack.pop();
+                }
+                state.frame_cell_owners.pop();
+                state.exit_call();
+                return Err(e);
+            }
+        };
+    let self_param = self_local_name.clone();
+
+    // Snapshot only the names this method frame can touch — its
+    // parameters (including `self`) plus the statically-collected
+    // `assigned_names` from the body walker. Methods don't capture a
+    // closure (they look up free names against the live module
+    // scope), so the closure bucket is empty here. Same rationale as
+    // call_user_function: this replaces an unconditional
+    // state.variables.clone() that previously dominated per-call cost.
+    let touched: Vec<String> = method
+        .params
+        .args
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(method.params.vararg.iter().cloned())
+        .chain(method.params.kwonlyargs.iter().map(|p| p.name.clone()))
+        .chain(method.params.kwarg.iter().cloned())
+        .chain(method.assigned_names.iter().cloned())
+        .filter(|n| !method.global_names.contains(n))
+        .collect();
+    let checkpoint = crate::eval::functions::VariableCheckpoint::capture(state, touched);
+
+    // Apply param/self bindings via a sync helper — same future-size
+    // reasoning as `call_user_function`.
+    if let Err(e) = apply_method_scope(state, &local_scope) {
+        checkpoint.restore(state);
+        if frame_pushed {
+            state.method_frame_stack.pop();
+        }
+        state.frame_cell_owners.pop();
+        state.exit_call();
+        return Err(e);
+    }
+
+    let body = state.function_bodies.get(&method.name).cloned();
+    let exec_result = match body {
+        Some(stmts) => execute_body(state, stmts.as_slice(), tools).await,
+        None => Ok(Value::None),
+    };
+
+    // Capture the possibly-mutated `self` before the frame's scope is dropped.
+    let configured_self =
+        self_param.and_then(|name| state.variables.get(&name).cloned()).unwrap_or(Value::None);
+
+    checkpoint.restore(state);
+    if frame_pushed {
+        state.method_frame_stack.pop();
+    }
+    state.frame_cell_owners.pop();
+    state.exit_call();
+
+    let returned = match exec_result {
+        Ok(val) => val,
+        Err(EvalError::Signal(crate::error::ControlFlow::Return(val))) => *val,
+        Err(e) => return Err(e),
+    };
+    Ok((returned, configured_self))
+}
+
+/// Read `instance.attr`: instance field, then walk the class's MRO
+/// for a class attribute. Property dispatch lives one level up in
+/// `eval/names.rs::eval_attribute` because invoking a getter requires
+/// async; this sync helper handles the non-descriptor cases.
+pub fn instance_attribute(
+    state: &InterpreterState,
+    inst: &InstanceValue,
+    attr: &str,
+) -> EvalResult {
+    if let Some(value) = inst.fields.get(attr) {
+        return Ok(value.clone());
+    }
+    if let Some(value) = lookup_class_attr(state, &inst.class_name, attr) {
+        return Ok(value);
+    }
+    Err(InterpreterError::AttributeError(format!(
+        "'{}' object has no attribute '{attr}'",
+        inst.class_name
+    ))
+    .into())
+}
+
+/// Walk `class_name`'s MRO looking for a `@property` descriptor named
+/// `attr`. Returns the first match.
+pub fn lookup_property(
+    state: &InterpreterState,
+    class_name: &str,
+    attr: &str,
+) -> Option<PropertyDef> {
+    let class = state.classes.get(class_name)?;
+    for ancestor_name in &class.mro {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(prop) = ancestor.properties.get(attr) {
+                return Some(prop.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Walk `class_name`'s MRO looking for a `@staticmethod`-marked entry.
+pub fn lookup_static_method(
+    state: &InterpreterState,
+    class_name: &str,
+    method_name: &str,
+) -> Option<FunctionDef> {
+    let class = state.classes.get(class_name)?;
+    for ancestor_name in &class.mro {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(def) = ancestor.static_methods.get(method_name) {
+                return Some(def.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Walk `class_name`'s MRO looking for a `@classmethod`-marked entry.
+pub fn lookup_class_method(
+    state: &InterpreterState,
+    class_name: &str,
+    method_name: &str,
+) -> Option<FunctionDef> {
+    let class = state.classes.get(class_name)?;
+    for ancestor_name in &class.mro {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(def) = ancestor.class_methods.get(method_name) {
+                return Some(def.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Invoke a `@property` getter: call_method binds `instance` as `self`
+/// and the property's body runs. The getter takes no extra arguments.
+/// Post-call self-mutation is captured by call_method but discarded
+/// here — getters that mutate `self` are a contortion CPython doesn't
+/// guarantee to support uniformly.
+pub async fn invoke_property_getter(
+    state: &mut InterpreterState,
+    getter: &FunctionDef,
+    instance: Value,
+    tools: &Tools,
+) -> EvalResult {
+    let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+    let (returned, _self) = call_method(state, getter, instance, call, tools).await?;
+    Ok(returned)
+}
+
+/// Invoke a `@property` setter: call_method binds `instance` as
+/// `self` and the value as the explicit setter arg. The configured
+/// self is returned so the caller can write it back to the receiver
+/// slot.
+pub async fn invoke_property_setter(
+    state: &mut InterpreterState,
+    setter: &FunctionDef,
+    instance: Value,
+    value: Value,
+    tools: &Tools,
+) -> Result<Value, EvalError> {
+    let call = CallArgs { positional: &[value], keyword: &IndexMap::new() };
+    let (_returned, configured_self) = call_method(state, setter, instance, call, tools).await?;
+    Ok(configured_self)
+}
+
+/// Invoke a `@property` deleter: call_method binds `instance` as
+/// `self`. The configured self is returned for write-back.
+pub async fn invoke_property_deleter(
+    state: &mut InterpreterState,
+    deleter: &FunctionDef,
+    instance: Value,
+    tools: &Tools,
+) -> Result<Value, EvalError> {
+    let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+    let (_returned, configured_self) = call_method(state, deleter, instance, call, tools).await?;
+    Ok(configured_self)
+}
+
+/// Read `Class.attr`: `__name__`/`__qualname__`, then walk the MRO
+/// for staticmethods, classmethods, and class attributes. Returns the
+/// callable directly for static/class methods so `Math.add(...)` and
+/// `Counter.factory(...)` both work without going through the
+/// instance-method path.
+pub fn class_attribute(state: &InterpreterState, class_name: &str, attr: &str) -> EvalResult {
+    if attr == "__name__" || attr == "__qualname__" {
+        return Ok(Value::String(class_name.into()));
+    }
+    if let Some(def) = lookup_static_method(state, class_name, attr) {
+        return Ok(Value::Function(std::sync::Arc::new(def)));
+    }
+    if let Some(def) = lookup_class_method(state, class_name, attr) {
+        // Bind the class as the first arg by wrapping in a class-method
+        // marker. For now, expose the bare FunctionDef and rely on the
+        // call path to prepend Value::Class(class_name) — the
+        // dispatch fast-path for `Class.method(...)` calls `call_method`
+        // with the class as receiver, which already binds it as the
+        // first param.
+        let _ = def;
+        // Returning a method-marker sentinel so the call path handles
+        // binding. The sentinel re-uses the legacy `__method__self__`
+        // shape; the call evaluator's class-method dispatch builds the
+        // bound call.
+        return Ok(Value::UnboundClassMethod {
+            class: class_name.to_string(),
+            method: attr.to_string(),
+        });
+    }
+    if let Some(value) = lookup_class_attr(state, class_name, attr) {
+        return Ok(value);
+    }
+    Err(InterpreterError::AttributeError(format!(
+        "type object '{class_name}' has no attribute '{attr}'"
+    ))
+    .into())
+}
+
+/// Walk `class_name`'s MRO looking for `attr` in each ancestor's
+/// `class_attrs`. Returns the first match per CPython's MRO rule (most
+/// derived wins). Returns `None` if no class in the MRO defines `attr`.
+fn lookup_class_attr(state: &InterpreterState, class_name: &str, attr: &str) -> Option<Value> {
+    let class = state.classes.get(class_name)?;
+    for ancestor_name in &class.mro {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(value) = ancestor.class_attrs.get(attr) {
+                return Some(value.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Receiver context for `super_method_call`: the super proxy's defining
+/// class plus the bound instance. Bundled into a struct so the per-call
+/// surface stays under the workspace's 4-positional-arg threshold for
+/// `pub` functions (see `.claude/rules/rust.md`).
+pub struct SuperReceiver<'a> {
+    pub defining_class: &'a str,
+    pub instance: InstanceValue,
+}
+
+/// Call a method via `super()` — find the next method named
+/// `method_name` in `recv.instance.class_name`'s MRO starting at the
+/// slot AFTER `recv.defining_class`, then run it with the instance as
+/// the receiver. CPython's `super().method(...)` dispatches against the
+/// original receiver but skips the calling class's own implementation,
+/// which is how cooperative multiple inheritance composes correctly.
+pub async fn super_method_call(
+    state: &mut InterpreterState,
+    recv: SuperReceiver<'_>,
+    method_name: &str,
+    call: CallArgs<'_>,
+    tools: &Tools,
+) -> Result<(Value, Value), EvalError> {
+    let SuperReceiver { defining_class, instance } = recv;
+    let Some(class) = state.classes.get(&instance.class_name) else {
+        return Err(InterpreterError::Runtime(format!(
+            "super(): instance's class '{}' is not registered",
+            instance.class_name
+        ))
+        .into());
+    };
+    // Find `defining_class`'s position in the MRO, then scan everything
+    // after it for the method.
+    let start = class.mro.iter().position(|c| c == defining_class).ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "super(): '{defining_class}' is not in MRO of '{}'",
+            instance.class_name
+        )))
+    })?;
+    let mut found = None;
+    for ancestor_name in class.mro.iter().skip(start + 1) {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(def) = ancestor.methods.get(method_name) {
+                found = Some(def.clone());
+                break;
+            }
+        }
+    }
+    let Some(def) = found else {
+        // CPython's `object` is the implicit base when the MRO is
+        // exhausted. We don't model `object` as a registered class,
+        // but the default impls of `__setattr__` / `__delattr__` /
+        // `__getattribute__` need to do real work — without them the
+        // common idiom `super().__setattr__(name, value)` from a
+        // user `__setattr__` has nowhere to land. Implement those
+        // three slots inline as the object-level defaults.
+        return match method_name {
+            "__setattr__" => {
+                let attr_name = call
+                    .positional
+                    .first()
+                    .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                    .ok_or_else(|| {
+                        EvalError::from(InterpreterError::TypeError(
+                            "object.__setattr__: first argument must be str".into(),
+                        ))
+                    })?;
+                let value = call.positional.get(1).cloned().ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(
+                        "object.__setattr__: missing value argument".into(),
+                    ))
+                })?;
+                let mut inst = instance;
+                inst.fields.insert(attr_name.into(), value);
+                let updated = Value::Instance(inst);
+                if let Some(name) =
+                    state.method_frame_stack.last().and_then(|f| f.self_local_name.clone())
+                {
+                    state.set_variable(&name, updated.clone()).map_err(EvalError::Interpreter)?;
+                }
+                Ok((Value::None, updated))
+            }
+            "__delattr__" => {
+                let attr_name = call
+                    .positional
+                    .first()
+                    .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                    .ok_or_else(|| {
+                        EvalError::from(InterpreterError::TypeError(
+                            "object.__delattr__: argument must be str".into(),
+                        ))
+                    })?;
+                let mut inst = instance;
+                let class_name = inst.class_name.clone();
+                if inst.fields.remove(attr_name.as_str()).is_none() {
+                    return Err(InterpreterError::AttributeError(format!(
+                        "'{class_name}' object has no attribute '{attr_name}'"
+                    ))
+                    .into());
+                }
+                let updated = Value::Instance(inst);
+                if let Some(name) =
+                    state.method_frame_stack.last().and_then(|f| f.self_local_name.clone())
+                {
+                    state.set_variable(&name, updated.clone()).map_err(EvalError::Interpreter)?;
+                }
+                Ok((Value::None, updated))
+            }
+            _ => Err(InterpreterError::AttributeError(format!(
+                "'super' object has no attribute '{method_name}'"
+            ))
+            .into()),
+        };
+    };
+    // Capture the caller's `self` local-name BEFORE entering call_method
+    // (which pushes its own frame). After the parent method mutates its
+    // own copy of self, write the result back to the calling method's
+    // self variable so its subsequent statements see the mutation —
+    // matching CPython's reference semantics through our owned model.
+    let caller_self_name = state.method_frame_stack.last().and_then(|f| f.self_local_name.clone());
+    let (returned, configured_self) =
+        call_method(state, &def, Value::Instance(instance), call, tools).await?;
+    if let Some(name) = caller_self_name {
+        let _ = state.set_variable(&name, configured_self.clone());
+    }
+    Ok((returned, configured_self))
+}
+
+/// Walk `class_name`'s MRO looking for a method definition. Used by the
+/// call path (`instance_method_call`) and by `instantiate` for
+/// `__init__` lookup. Returns the first matching `(defining_class,
+/// FunctionDef)` so callers can build the per-frame `__class__` binding
+/// for zero-arg `super()`.
+pub fn lookup_method_in_mro(
+    state: &InterpreterState,
+    class_name: &str,
+    method_name: &str,
+) -> Option<(String, FunctionDef)> {
+    let class = state.classes.get(class_name)?;
+    for ancestor_name in &class.mro {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(def) = ancestor.methods.get(method_name) {
+                return Some((ancestor_name.clone(), def.clone()));
+            }
+        }
+    }
+    None
+}

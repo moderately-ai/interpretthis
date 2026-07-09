@@ -1,0 +1,626 @@
+// Copyright 2026 Thomas Santerre and Moderately AI Inc.
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+#![expect(
+    clippy::unwrap_used,
+    clippy::items_after_statements,
+    reason = "integration-test helper impls aren't detected as test context by clippy's \
+              in-tests allowlist, and per-test local struct definitions are the idiomatic \
+              scoping for mock ToolHandlers"
+)]
+
+//! Resource-limit boundary tests: op counter, while-iteration cap, recursion
+//! depth, wall-clock execution timeout, and concurrent-tool semaphore. Also
+//! covers proxy-related stress concerns that show up at limit boundaries —
+//! ordering, error propagation, falsy-value resolution, nested data — since
+//! those classes of bug are easiest to expose with a many-call fan-out.
+
+use std::{
+    collections::HashMap,
+    fmt::Write as _,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use interpretthis::{
+    Interpreter, InterpreterConfig, InterpreterDeps, ToolDefinition, ToolError, ToolHandler, Tools,
+    Value,
+};
+
+fn no_tools() -> Tools {
+    Tools::new()
+}
+
+fn stress_interpreter() -> Interpreter {
+    // Bigger budget than the default so the many-call stress tests run to
+    // completion without tripping the op counter — the assertions here are
+    // about concurrency/proxy correctness, not resource caps.
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_operations = 500_000;
+    cfg.max_while_iterations = 10_000;
+    Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg)
+}
+
+// --- Tool fixtures used by the stress / proxy-behaviour cases ---
+
+struct CountingTool {
+    count: Arc<Mutex<u32>>,
+}
+
+#[async_trait]
+impl ToolHandler for CountingTool {
+    async fn call(&self, kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+        let i = {
+            // MutexGuard must drop before the .await to avoid holding a sync
+            // lock across an await point.
+            let mut c = self.count.lock().unwrap();
+            *c += 1;
+            match kwargs.get("i") {
+                Some(Value::Int(v)) => *v,
+                _ => i64::from(*c) - 1,
+            }
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        Ok(Value::Int(i))
+    }
+}
+
+struct ConcurrencyCountingTool {
+    active: Arc<Mutex<u32>>,
+    peak: Arc<Mutex<u32>>,
+    total: Arc<Mutex<u32>>,
+}
+
+#[async_trait]
+impl ToolHandler for ConcurrencyCountingTool {
+    async fn call(&self, kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+        let idx = {
+            let mut t = self.total.lock().unwrap();
+            let idx = *t;
+            *t += 1;
+            idx
+        };
+        {
+            let mut a = self.active.lock().unwrap();
+            *a += 1;
+            let mut p = self.peak.lock().unwrap();
+            if *a > *p {
+                *p = *a;
+            }
+        }
+        let delay = match kwargs.get("delay") {
+            Some(Value::Float(d)) => Duration::from_secs_f64(*d),
+            _ => Duration::from_millis(20),
+        };
+        tokio::time::sleep(delay).await;
+        {
+            let mut a = self.active.lock().unwrap();
+            *a -= 1;
+        }
+        Ok(Value::Int(i64::from(idx)))
+    }
+}
+
+struct MaybeFailTool;
+
+#[async_trait]
+impl ToolHandler for MaybeFailTool {
+    async fn call(&self, kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let should_fail = matches!(kwargs.get("fail"), Some(Value::Bool(true)));
+        if should_fail {
+            Err(ToolError::new("deliberate_failure"))
+        } else {
+            Ok(Value::String("ok".into()))
+        }
+    }
+}
+
+struct FetchTool;
+
+#[async_trait]
+impl ToolHandler for FetchTool {
+    async fn call(&self, kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let v = kwargs.get("v").cloned().unwrap_or(Value::Int(0));
+        Ok(v)
+    }
+}
+
+struct BoolTool {
+    value: bool,
+}
+
+#[async_trait]
+impl ToolHandler for BoolTool {
+    async fn call(&self, _kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Ok(Value::Bool(self.value))
+    }
+}
+
+struct IntTool {
+    value: i64,
+}
+
+#[async_trait]
+impl ToolHandler for IntTool {
+    async fn call(&self, _kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Ok(Value::Int(self.value))
+    }
+}
+
+struct EmptyStringTool;
+
+#[async_trait]
+impl ToolHandler for EmptyStringTool {
+    async fn call(&self, _kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Ok(Value::String("".into()))
+    }
+}
+
+// --- Operation counter ---
+
+#[tokio::test]
+async fn resource_limits_terminate_runaway_loop_via_op_counter() {
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_operations = 100;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+x = 0
+for i in range(1000):
+    x = x + 1
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_some());
+    let err_msg = format!("{:?}", resp.error.unwrap());
+    assert!(
+        err_msg.contains("limit") || err_msg.contains("operation"),
+        "error should mention limit: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn resource_limits_normal_operations_within_default_budget() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let resp = interp
+        .execute(
+            r"
+total = 0
+for i in range(100):
+    total += i
+print(total)
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+}
+
+#[tokio::test]
+async fn resource_limits_nested_loop_within_default_budget() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let resp = interp
+        .execute(
+            r"
+total = 0
+for i in range(10):
+    for j in range(10):
+        total += i * j
+print(total)
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+}
+
+// --- While-iteration cap ---
+
+#[tokio::test]
+async fn resource_limits_terminate_while_loop_via_iteration_cap() {
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_while_iterations = 50;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+x = 0
+while True:
+    x += 1
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_some());
+}
+
+#[tokio::test]
+async fn resource_limits_while_loop_with_break_succeeds() {
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_while_iterations = 1000;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+x = 0
+while True:
+    x += 1
+    if x >= 10:
+        break
+print(x)
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+}
+
+// --- Recursion-depth cap ---
+
+/// Unbounded user-function recursion must surface as `RecursionLimitExceeded`
+/// rather than bleeding the memory budget. Prior to #401 the interpreter had
+/// no frame-depth cap; a `def f(): f()` exhausted memory and reported
+/// `LimitExceeded(memory…)`. Uses a small cap (10) in tests: the harness runs
+/// on a 2 MB-stack thread, and debug-mode async state machines inflate per
+/// frame. The production default (1000) is configured via `InterpreterConfig`.
+#[tokio::test]
+async fn resource_limits_recursion_unbounded_self_call_errors() {
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_recursion_depth = 5;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+def f():
+    return f()
+
+f()
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    let err = resp.error.expect("infinite recursion must surface an error");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("RecursionLimitExceeded") || msg.contains("maximum recursion depth"),
+        "expected RecursionLimitExceeded, got: {msg}"
+    );
+}
+
+/// Recursion that stays under the cap must succeed — confirms the counter is
+/// decremented on exit and does not leak across calls.
+#[tokio::test]
+async fn resource_limits_recursion_under_cap_resets_counter() {
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_recursion_depth = 15;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+def count(n):
+    if n == 0:
+        return 0
+    return 1 + count(n - 1)
+
+# depth 5 across two independent calls — neither alone nor in aggregate
+# should trip the 15-frame cap.
+a = count(5)
+b = count(5)
+print(a, b)
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+}
+
+/// Recursion via lambda must also be bounded.
+#[tokio::test]
+async fn resource_limits_recursion_applies_to_lambdas() {
+    let mut cfg = InterpreterConfig::default();
+    // Set the cap just below the native-stack ceiling for the lambda
+    // recursion path. Bumping requires further per-frame future-size
+    // reduction in `call_lambda`; the def-time default-evaluation
+    // landing enlarged `FunctionParams` slightly and trimmed the
+    // headroom back from 8 to 6.
+    cfg.max_recursion_depth = 6;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+f = lambda g, n: 0 if n == 0 else g(g, n - 1)
+f(f, 30)
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    let err = resp.error.expect("lambda recursion past limit must error");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("RecursionLimitExceeded") || msg.contains("maximum recursion depth"),
+        "expected RecursionLimitExceeded, got: {msg}"
+    );
+}
+
+// --- Wall-clock execution timeout ---
+
+#[tokio::test]
+async fn resource_limits_terminate_via_wallclock_timeout() {
+    let interp = {
+        let mut cfg = InterpreterConfig::default();
+        cfg.max_execution_time = Some(Duration::from_millis(50));
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg)
+    };
+
+    let resp = interp
+        .execute(
+            r"
+x = 0
+while True:
+    x += 1
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(!resp.is_ok());
+    let err = format!("{:?}", resp.error.unwrap());
+    assert!(err.contains("time") || err.contains("execution"), "error should mention time: {err}");
+}
+
+// --- Concurrent-tool semaphore cap ---
+//
+// The `test_stress.rs` original ran two semaphore tests (cap=5 and cap=2);
+// they exercise the same code path with different bounds. Keep the tighter
+// case as the canonical assertion — a cap=2 violation is the more sensitive
+// detector of a stale-counter bug.
+
+#[tokio::test]
+async fn resource_limits_semaphore_caps_concurrent_tool_calls() {
+    let active = Arc::new(Mutex::new(0u32));
+    let peak = Arc::new(Mutex::new(0u32));
+    let total = Arc::new(Mutex::new(0u32));
+
+    let mut tools = Tools::new();
+    tools.insert(
+        "track",
+        ToolDefinition {
+            handler: Arc::new(ConcurrencyCountingTool {
+                active: active.clone(),
+                peak: peak.clone(),
+                total: total.clone(),
+            }),
+            parallelizable: true,
+        },
+    );
+
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_operations = 500_000;
+    cfg.max_while_iterations = 10_000;
+    cfg.max_concurrent_tools = 2;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+
+    let assignments: String = (0..15).fold(String::new(), |mut s, i| {
+        let _ = writeln!(&mut s, "r{i} = track()");
+        s
+    });
+    let uses: String = (0..15).map(|i| format!("r{i}")).collect::<Vec<_>>().join(" + ");
+    let code = format!("{assignments}total = {uses}\nprint(total)");
+
+    let resp = interp.execute(&code, &tools, HashMap::new()).await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    let peak_val = *peak.lock().unwrap();
+    assert!(peak_val <= 2, "peak {peak_val} exceeded limit 2");
+    assert_eq!(*total.lock().unwrap(), 15);
+}
+
+// --- Proxy-resolution stress (large fan-out, error propagation, falsy values, nested) ---
+
+#[tokio::test]
+async fn resource_limits_fan_out_20_concurrent_calls_preserve_order() {
+    let count = Arc::new(Mutex::new(0u32));
+    let mut tools = Tools::new();
+    tools.insert(
+        "count",
+        ToolDefinition {
+            handler: Arc::new(CountingTool { count: count.clone() }),
+            parallelizable: true,
+        },
+    );
+
+    let interp = stress_interpreter();
+    let assignments: String = (0..20).fold(String::new(), |mut s, i| {
+        let _ = writeln!(&mut s, "r{i} = count(i={i})");
+        s
+    });
+    let checks: String = (0..20).map(|i| format!("r{i} == {i}")).collect::<Vec<_>>().join(" and ");
+    let code = format!("{assignments}all_correct = {checks}\nprint(all_correct)");
+
+    let resp = interp.execute(&code, &tools, HashMap::new()).await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "True");
+    assert_eq!(*count.lock().unwrap(), 20);
+}
+
+#[tokio::test]
+async fn resource_limits_single_failure_among_many_propagates() {
+    let mut tools = Tools::new();
+    tools.insert(
+        "maybe_fail",
+        ToolDefinition { handler: Arc::new(MaybeFailTool), parallelizable: true },
+    );
+
+    let interp = stress_interpreter();
+    let code = r#"
+results = []
+for i in range(10):
+    results.append(maybe_fail(fail=(i == 7)))
+output = []
+for r in results:
+    output.append(str(r))
+print(",".join(output))
+"#;
+    let resp = interp.execute(code, &tools, HashMap::new()).await;
+    assert!(resp.error.is_some(), "should have errored on index 7");
+}
+
+#[tokio::test]
+async fn resource_limits_error_does_not_corrupt_subsequent_execution() {
+    let mut tools = Tools::new();
+
+    struct FailTool;
+    #[async_trait]
+    impl ToolHandler for FailTool {
+        async fn call(&self, _kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+            Err(ToolError::new("boom"))
+        }
+    }
+    struct WorkTool;
+    #[async_trait]
+    impl ToolHandler for WorkTool {
+        async fn call(&self, _kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+            Ok(Value::String("works".into()))
+        }
+    }
+
+    tools.insert("failing", ToolDefinition { handler: Arc::new(FailTool), parallelizable: true });
+    tools.insert("working", ToolDefinition { handler: Arc::new(WorkTool), parallelizable: true });
+
+    let interp = stress_interpreter();
+
+    let resp1 = interp.execute("result = failing()\nprint(result)", &tools, HashMap::new()).await;
+    assert!(resp1.error.is_some());
+
+    let resp2 = interp.execute("result = working()\nprint(result)", &tools, HashMap::new()).await;
+    assert!(resp2.error.is_none(), "error: {:?}", resp2.error);
+    assert_eq!(resp2.stdout.trim(), "works");
+}
+
+#[tokio::test]
+async fn resource_limits_proxy_resolves_false_as_falsy() {
+    let mut tools = Tools::new();
+    tools.insert(
+        "get_false",
+        ToolDefinition { handler: Arc::new(BoolTool { value: false }), parallelizable: true },
+    );
+
+    let interp = stress_interpreter();
+    let resp = interp
+        .execute(
+            "val = get_false()\nif val:\n    print('truthy')\nelse:\n    print('falsy')",
+            &tools,
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "falsy");
+}
+
+#[tokio::test]
+async fn resource_limits_proxy_resolves_zero_as_falsy() {
+    let mut tools = Tools::new();
+    tools.insert(
+        "get_zero",
+        ToolDefinition { handler: Arc::new(IntTool { value: 0 }), parallelizable: true },
+    );
+
+    let interp = stress_interpreter();
+    let resp = interp
+        .execute(
+            "val = get_zero()\nif val:\n    print('truthy')\nelse:\n    print('falsy')",
+            &tools,
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "falsy");
+}
+
+#[tokio::test]
+async fn resource_limits_proxy_resolves_empty_string_as_falsy() {
+    let mut tools = Tools::new();
+    tools.insert(
+        "get_empty",
+        ToolDefinition { handler: Arc::new(EmptyStringTool), parallelizable: true },
+    );
+
+    let interp = stress_interpreter();
+    let resp = interp
+        .execute(
+            "val = get_empty()\nif val:\n    print('truthy')\nelse:\n    print('falsy')",
+            &tools,
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "falsy");
+}
+
+#[tokio::test]
+async fn resource_limits_proxy_inside_dict_values() {
+    let mut tools = Tools::new();
+    tools.insert("fetch", ToolDefinition { handler: Arc::new(FetchTool), parallelizable: true });
+
+    let interp = stress_interpreter();
+    let resp = interp
+        .execute(
+            r#"
+data = {}
+keys = ["alpha", "beta", "gamma"]
+for k in keys:
+    data[k] = fetch(v=k)
+parts = []
+for k in keys:
+    parts.append(data[k])
+print(",".join(parts))
+"#,
+            &tools,
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "alpha,beta,gamma");
+}
+
+#[tokio::test]
+async fn resource_limits_repeated_execution_does_not_leak_proxies() {
+    let mut tools = Tools::new();
+
+    struct EchoTool;
+    #[async_trait]
+    impl ToolHandler for EchoTool {
+        async fn call(&self, kwargs: HashMap<String, Value>) -> Result<Value, ToolError> {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(kwargs.get("msg").cloned().unwrap_or(Value::String("".into())))
+        }
+    }
+
+    tools.insert("echo", ToolDefinition { handler: Arc::new(EchoTool), parallelizable: true });
+
+    let interp = stress_interpreter();
+    for i in 0..5 {
+        let code = format!("result = echo(msg='iteration_{i}')\nprint(result)");
+        let resp = interp.execute(&code, &tools, HashMap::new()).await;
+        assert!(resp.error.is_none(), "failed on iteration {i}: {:?}", resp.error);
+        assert_eq!(resp.stdout.trim(), format!("iteration_{i}"));
+    }
+}

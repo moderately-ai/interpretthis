@@ -1,0 +1,178 @@
+[package]
+name = "interpretthis"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = [
+    "Thomas Santerre <opensource@moderately.ai>",
+    "Moderately AI Inc. <opensource@moderately.ai>",
+]
+repository = "https://github.com/moderately-ai/interpretthis"
+homepage = "https://github.com/moderately-ai/interpretthis"
+documentation = "https://docs.rs/interpretthis"
+description = "Sandboxed Python AST interpreter for untrusted and LLM-generated code"
+readme = "README.md"
+keywords = ["python", "interpreter", "sandbox", "ast", "llm"]
+categories = ["compilers", "parser-implementations", "asynchronous"]
+exclude = [
+    "benches/baseline.json",
+    "tests/integration/cpython_vendored/**",
+    "tickets/**",
+    "ticketsplease.toml",
+    ".ticketsplease/**",
+    "scripts/**",
+    "license-header.txt",
+]
+
+# Bench tree is one consolidated `[[bench]] name = "interpreter"` target
+# rooted at `benches/main.rs`; sibling files (`eval.rs`, `frames.rs`, ...)
+# are mod-included from there. Turn off cargo's auto-discovery so it
+# doesn't try to build each sibling as a standalone bench too.
+autobenches = false
+
+[dependencies]
+rustpython-parser = "=0.4.0"
+tokio = { version = "=1.50.0", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+] }
+# `rc` feature provides Serialize/Deserialize impls for Arc<T>.
+# Value::Function and Value::Lambda hold their inner def via Arc so
+# closure-capture is reference-share (O(N) storage) instead of
+# deep-clone (O(2^N)).
+serde = { version = "=1.0.228", features = ["derive", "rc"] }
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+thiserror = "=2.0.18"
+indexmap = { version = "=2.13.0", features = ["serde"] }
+async-trait = "=0.1.89"
+# Interior mutability for interpreter state — execute(&self, ...)
+# serializes concurrent calls without forcing &mut self on callers.
+parking_lot = { version = "=0.12.3", features = ["send_guard"] }
+# Stdlib module emulation: `re` (regex), `datetime` (chrono),
+# `hashlib` (sha2), `base64`, `hex` for digest output.
+regex = "=1.12.3"
+chrono = { version = "=0.4.44", features = ["serde"] }
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+hex = "=0.4.3"
+# Stdlib `decimal` + `fractions` module emulation: arbitrary-precision
+# Decimal (matches CPython's contract) and auto-simplifying Fraction.
+bigdecimal = { version = "=0.4.10", features = ["serde"] }
+num-rational = { version = "=0.4.2", features = ["serde"] }
+num-bigint = { version = "=0.4.6", features = ["serde"] }
+num-traits = "=0.2.19"
+# Drop-in `HashMap`/`HashSet` swap that uses FxHash instead of SipHash.
+# The interpreter runs sandboxed user code; per-lookup hash cost is what
+# shows up in benches. Public API surfaces keep std HashMap for
+# downstream-caller compatibility.
+rustc-hash = "=2.1.1"
+# Inline-storage `String` replacement. CompactString fits up to 24 bytes
+# of UTF-8 in the same 24-byte footprint as a plain `String` header
+# without allocating — small strings (dict keys like "id", "name", short
+# identifiers) stay on the stack.
+compact_str = { version = "0.8", features = ["serde"] }
+
+# Optional alternative global allocators for the bench harness.
+# Activated only via the corresponding feature flag. The crate itself
+# stays allocator-neutral for downstream consumers — only the bench
+# binaries opt in.
+tikv-jemallocator = { version = "=0.6.0", optional = true }
+tikv-jemalloc-ctl = { version = "=0.6.0", optional = true, features = ["stats"] }
+mimalloc = { version = "0.1", optional = true, default-features = false }
+
+[features]
+# Use jemalloc as the global allocator in this crate's bench binaries.
+# Recommended for published-perf runs on Linux.
+bench-alloc-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+# Alternative: mimalloc. Sometimes wins on macOS for the small-alloc
+# patterns the interpreter generates. A/B against jemalloc when in doubt.
+bench-alloc-mimalloc = ["dep:mimalloc"]
+
+[dev-dependencies]
+criterion = { version = "=0.7.0", features = ["html_reports"] }
+
+# One consolidated integration-test binary: every separate `[[test]]`
+# re-type-checks the crate's full transitive closure, so collapsing the
+# per-file targets shaves the parallel fan-out off `cargo check --tests`.
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+# One consolidated criterion bench binary. Each layer/dimension lives
+# in its own module under `benches/`, but they share a single
+# `benches/main.rs` entry point. Individual benches stay runnable via
+# criterion's filter args (e.g. `cargo bench -- 'eval/int_loop_2k'`).
+#
+# `harness = false` lets criterion install its own `main` instead of
+# the default libtest one. Baseline numbers + per-group regression
+# envelopes are recorded in `benches/baseline.json`.
+[[bench]]
+name = "interpreter"
+path = "benches/main.rs"
+harness = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+# Correctness baseline. Hard safety/error-handling rules are also
+# enforced at the crate root via `#![deny(...)]` in `src/lib.rs`.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# Production code is gated by `#![deny(clippy::unwrap_used, ...)]` in
+# `src/lib.rs`. Package-level allow lets integration tests and benches
+# use expect/unwrap for fixture setup without fighting the same lint.
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+todo = "allow"
+
+# Practical relaxations for an AST interpreter (large match arms,
+# numeric casts, private-module trees, dense evaluation codepaths).
+redundant_pub_crate = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+cognitive_complexity = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+wildcard_imports = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"
+float_cmp = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+large_enum_variant = "allow"
+type_complexity = "allow"
+result_large_err = "allow"
+multiple_crate_versions = "allow"
+significant_drop_tightening = "allow"
+await_holding_lock = "allow"
+future_not_send = "allow"
+items_after_statements = "allow"
+option_if_let_else = "allow"
+manual_let_else = "allow"
+match_same_arms = "allow"
+redundant_closure_for_method_calls = "allow"
+needless_pass_by_value = "allow"
+return_self_not_must_use = "allow"
+trivially_copy_pass_by_ref = "allow"
+implicit_hasher = "allow"
+uninlined_format_args = "allow"
+too_long_first_doc_paragraph = "allow"

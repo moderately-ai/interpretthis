@@ -1,0 +1,105 @@
+schema_version = 1
+tickets_dir = "tickets"
+default_base = "main"
+
+[language]
+# Single-crate library. File-glob scopes drive parallel dispatch; reverse-dep
+# expansion would collapse every scope into one crate-level collision, so it
+# stays off.
+backend = "rust"
+reverse_dep_expansion = false
+
+# Scopes partition the tree so `tracks` / `guard` can keep parallel work
+# conflict-free. Prefer the narrowest scope that covers the change; claim
+# multiple when a ticket truly spans subsystems.
+[scopes]
+# Public surface + orchestration
+"core" = [
+    "src/lib.rs",
+    "src/config.rs",
+    "src/error.rs",
+    "src/interpreter.rs",
+    "src/parser.rs",
+    "src/state.rs",
+    "src/serialize.rs",
+    "src/value.rs",
+    "src/types.rs",
+]
+
+# Expression / statement evaluation spine (not modules or function dispatch)
+"eval" = [
+    "src/eval/mod.rs",
+    "src/eval/classes.rs",
+    "src/eval/comprehensions.rs",
+    "src/eval/control_flow.rs",
+    "src/eval/delete.rs",
+    "src/eval/exceptions.rs",
+    "src/eval/literals.rs",
+    "src/eval/match_stmt.rs",
+    "src/eval/names.rs",
+    "src/eval/op.rs",
+    "src/eval/operations.rs",
+    "src/eval/place.rs",
+    "src/eval/render.rs",
+    "src/eval/statements.rs",
+    "src/eval/strings.rs",
+]
+
+# Call / method / builtin dispatch
+"eval/functions" = ["src/eval/functions/**"]
+
+# Stdlib module registry + implementations
+"eval/modules" = ["src/eval/modules/**"]
+
+# Sandbox blocklists + AST validation
+"security" = ["src/security/**"]
+
+# Host tool injection / lazy proxies
+"tools" = ["src/tools/**"]
+
+# Integration suite + parity corpus
+"tests" = ["tests/**", "build.rs"]
+
+# Criterion benches + baseline
+"benches" = ["benches/**"]
+
+# User-facing docs
+"docs" = [
+    "README.md",
+    "CONFORMANCE.md",
+    "STATUS.md",
+    "THREAT_MODEL.md",
+    "MODULE_TEMPLATE.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "RELEASING.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+# Build / CI / packaging metadata
+"meta" = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rustfmt.toml",
+    ".gitignore",
+    ".github/**",
+    "license-header.txt",
+    "scripts/**",
+    "ticketsplease.toml",
+    "tickets/**",
+    ".ticketsplease/**",
+]
+
+# Single crate — kept for language backend awareness; reverse-dep expansion
+# is disabled so multi-scope tickets don't all collide via the crate graph.
+[scope_crates]
+"core" = "interpretthis"
+"eval" = "interpretthis"
+"eval/functions" = "interpretthis"
+"eval/modules" = "interpretthis"
+"security" = "interpretthis"
+"tools" = "interpretthis"
+
+[external_scopes]
+# "rustpython-parser" = { repo = "RustPython/RustPython", paths = [] }

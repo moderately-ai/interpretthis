@@ -1,0 +1,234 @@
+// Copyright 2026 Thomas Santerre and Moderately AI Inc.
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! State-aware `Value` formatting — the single canonical path.
+//!
+//! `print()`, the `repr()` builtin, and the f-string `!s` / `!r` / `!a`
+//! conversion arms all route through [`render`]. The two stateless
+//! paths (`impl fmt::Display for Value`, `Value::repr()`) stay as
+//! best-effort fallbacks for sites without `&InterpreterState`
+//! access (debug output, error chains); they render `Value::Instance`
+//! as `<ClassName object>` because they cannot consult the class
+//! registry for a `@dataclass`-synthesized `__repr__` or for a
+//! user-defined `__str__` / `__repr__` slot.
+//!
+//! User-class `__str__` / `__repr__` dispatch lives here too: when an
+//! Instance arrives at [`render`] and its class defines the relevant
+//! slot, the slot runs via [`crate::eval::classes::call_method`] and
+//! its return value is rendered as the final string. That requires
+//! `&mut InterpreterState` + a `&Tools` reference, which is why
+//! `render` is async and returns `EvalResult<String>`.
+
+use indexmap::IndexMap;
+
+use crate::{
+    error::{EvalError, InterpreterError},
+    eval::{
+        classes::{call_method, lookup_method_in_mro},
+        functions::CallArgs,
+    },
+    state::InterpreterState,
+    tools::Tools,
+    value::{DataclassField, Value},
+};
+
+/// How a `Value` is being formatted. Mirrors CPython's three conversion
+/// flags: `str()`/`!s` for [`Display`], `repr()`/`!r` for [`Repr`],
+/// `ascii()`/`!a` for [`Ascii`] (Repr-shape with non-ASCII chars escaped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    Display,
+    Repr,
+    Ascii,
+}
+
+/// Render `value` to its CPython-equivalent string form, dispatching
+/// `__str__` / `__repr__` on user-class instances when defined, and
+/// falling back to the `@dataclass` synthesized `__repr__` when the
+/// class is a dataclass without an explicit slot.
+///
+/// Async because slot dispatch runs a Python method body via
+/// `call_method`, which is itself async. Stateless callers (Display
+/// impl, `Value::repr`) keep the synchronous fallback shape — they
+/// can't reach the class registry from inside a `fmt::Formatter`.
+pub fn render<'a>(
+    state: &'a mut InterpreterState,
+    value: &'a Value,
+    mode: RenderMode,
+    tools: &'a Tools,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, EvalError>> + Send + 'a>> {
+    Box::pin(async move {
+        if let Value::Instance(inst) = value {
+            // User-defined slot wins over the synthesized dataclass
+            // repr and over the default `<ClassName object>`. Mode
+            // selects which slot — `__str__` for Display/Ascii (since
+            // CPython falls back to `__str__` when `__repr__` is
+            // missing for str(), but Ascii is repr-derived… see arm
+            // ordering below).
+            let slot_name = match mode {
+                RenderMode::Display => "__str__",
+                RenderMode::Repr | RenderMode::Ascii => "__repr__",
+            };
+            if let Some((_, method)) = lookup_method_in_mro(state, &inst.class_name, slot_name) {
+                let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+                let (returned, _self_after) =
+                    call_method(state, &method, value.clone(), call, tools).await?;
+                let rendered = match &returned {
+                    Value::String(s) => s.to_string(),
+                    other => {
+                        return Err(EvalError::from(InterpreterError::TypeError(format!(
+                            "{}.{} returned non-string (type {})",
+                            inst.class_name,
+                            slot_name,
+                            other.type_name()
+                        ))));
+                    }
+                };
+                return Ok(match mode {
+                    RenderMode::Ascii => ascii_escape(&rendered),
+                    _ => rendered,
+                });
+            }
+            // CPython: str() falls back to repr() when __str__ is
+            // absent but __repr__ is present. Honour that fallback
+            // for user classes too.
+            if matches!(mode, RenderMode::Display) {
+                if let Some((_, method)) = lookup_method_in_mro(state, &inst.class_name, "__repr__")
+                {
+                    let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+                    let (returned, _self_after) =
+                        call_method(state, &method, value.clone(), call, tools).await?;
+                    if let Value::String(s) = returned {
+                        return Ok(s.into());
+                    }
+                }
+            }
+            // Dataclass synthesis — only when no explicit slot.
+            if let Some(class) = state.classes.get(&inst.class_name) {
+                if let Some(fields) = class.dataclass_fields.clone() {
+                    return Ok(render_dataclass(state, &inst.class_name, inst, &fields));
+                }
+            }
+            return Ok(format!("<{} object>", inst.class_name));
+        }
+        // Containers recurse so an Instance inside a list/tuple/dict/
+        // set picks up its __str__/__repr__ via render. CPython
+        // formats list/tuple/dict/set elements via repr() regardless
+        // of the outer mode, so we always render children as Repr.
+        match value {
+            Value::List(items) => {
+                // Snapshot the items under the lock — render_sequence
+                // is async and walks recursively, so we can't hold a
+                // parking_lot guard across awaits.
+                let snapshot = items.lock().clone();
+                Ok(render_sequence(state, &snapshot, "[", "]", tools).await?)
+            }
+            Value::Tuple(items) => {
+                let single = items.len() == 1;
+                let body = render_sequence(state, items, "(", "", tools).await?;
+                Ok(if single { format!("{},)", body.trim_end_matches(')')) } else { body + ")" })
+            }
+            Value::Set(items) => {
+                if items.is_empty() {
+                    Ok("set()".to_string())
+                } else {
+                    Ok(render_sequence(state, items, "{", "}", tools).await?)
+                }
+            }
+            Value::Dict(map) => {
+                let mut out = String::from("{");
+                let mut first = true;
+                for (k, v) in map {
+                    if !first {
+                        out.push_str(", ");
+                    }
+                    first = false;
+                    out.push_str(&render(state, &k.to_value(), RenderMode::Repr, tools).await?);
+                    out.push_str(": ");
+                    out.push_str(&render(state, v, RenderMode::Repr, tools).await?);
+                }
+                out.push('}');
+                Ok(out)
+            }
+            _ => Ok(match mode {
+                RenderMode::Repr => value.repr(),
+                RenderMode::Display => format!("{value}"),
+                RenderMode::Ascii => ascii_escape(&value.repr()),
+            }),
+        }
+    })
+}
+
+async fn render_sequence(
+    state: &mut InterpreterState,
+    items: &[Value],
+    open: &str,
+    close: &str,
+    tools: &Tools,
+) -> Result<String, EvalError> {
+    let mut out = String::from(open);
+    let mut first = true;
+    for item in items {
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        out.push_str(&render(state, item, RenderMode::Repr, tools).await?);
+    }
+    out.push_str(close);
+    Ok(out)
+}
+
+/// Render a `@dataclass` instance as `ClassName(field=value, ...)` per
+/// CPython's synthesized `__repr__`. Recurses on nested dataclass
+/// children so `Outer(name='x', inner=Inner(value=1))` formats
+/// fully — not `Outer(name='x', inner=<Inner object>)`.
+///
+/// Sync because dataclass-synthesized repr never calls user methods —
+/// it walks the static field list and uses the stateless `repr()`
+/// fallback for nested instances (which itself uses `<ClassName
+/// object>` for non-dataclass instances; the slot-dispatch async path
+/// is reserved for direct render entry).
+fn render_dataclass(
+    state: &InterpreterState,
+    class_name: &str,
+    inst: &crate::value::InstanceValue,
+    fields: &[DataclassField],
+) -> String {
+    let mut out = String::new();
+    out.push_str(class_name);
+    out.push('(');
+    let mut first = true;
+    for field in fields.iter().filter(|f| f.repr) {
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        out.push_str(&field.name);
+        out.push('=');
+        let field_value = inst.fields.get(&field.name).cloned().unwrap_or(Value::None);
+        let rendered = match &field_value {
+            Value::Instance(nested) => state
+                .classes
+                .get(&nested.class_name)
+                .and_then(|nested_class| nested_class.dataclass_fields.clone())
+                .map_or_else(
+                    || field_value.repr(),
+                    |nested_fields| {
+                        render_dataclass(state, &nested.class_name, nested, &nested_fields)
+                    },
+                ),
+            _ => field_value.repr(),
+        };
+        out.push_str(&rendered);
+    }
+    out.push(')');
+    out
+}
+
+fn ascii_escape(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii() { c.to_string() } else { format!("\\u{:04x}", c as u32) })
+        .collect()
+}
