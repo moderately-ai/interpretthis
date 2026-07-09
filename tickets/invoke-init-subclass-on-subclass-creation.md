@@ -1,7 +1,7 @@
 ---
 id: invoke-init-subclass-on-subclass-creation
 title: Invoke __init_subclass__ on subclass creation
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

@@ -195,6 +195,7 @@ pub async fn eval_class_def(
     // class. Each base's MRO is in the registry already (because B1's
     // single-pass eval registers bases before their derivatives).
     let mro = build_mro(class_name, &bases, &state.classes)?;
+    let bases_for_hook = bases.clone();
 
     state.classes.insert(
         class_name.to_string(),
@@ -217,6 +218,11 @@ pub async fn eval_class_def(
     state
         .set_variable(class_name, Value::Class(class_name.to_string()))
         .map_err(EvalError::Interpreter)?;
+
+    // PEP 487: invoke each base's `__init_subclass__` (classmethod-style)
+    // with the newly created class. Walk direct bases only; each base
+    // is responsible for chaining to its own parents if needed.
+    invoke_init_subclass(state, class_name, &bases_for_hook, tools).await?;
 
     // Apply class-level decorators in REVERSE order (bottom-up,
     // matching CPython): the innermost decorator wraps the class
@@ -444,6 +450,32 @@ pub(crate) async fn apply_decorator(
 /// an enum subclass. Methods (FunctionDef / Lambda) inside an enum
 /// body stay unwrapped so they can be invoked. Non-method values
 /// (the typical case: `RED = 1`) become EnumMember.
+/// Call `Base.__init_subclass__(cls)` for each direct base that defines it.
+/// CPython always treats `__init_subclass__` as a classmethod; the new
+/// subclass is passed as the first argument (`cls`).
+async fn invoke_init_subclass(
+    state: &mut InterpreterState,
+    class_name: &str,
+    bases: &[String],
+    tools: &Tools,
+) -> Result<(), EvalError> {
+    let empty_kwargs = IndexMap::new();
+    let new_cls = Value::Class(class_name.to_string());
+    for base in bases {
+        // Look on the base's own MRO for __init_subclass__ (classmethod or plain).
+        let method = lookup_class_method(state, base, "__init_subclass__")
+            .or_else(|| lookup_method_in_mro(state, base, "__init_subclass__").map(|(_, d)| d));
+        let Some(def) = method else {
+            continue;
+        };
+        // Receiver = new subclass so classmethod binding yields
+        // `__init_subclass__(cls=NewSubclass)`.
+        let call = CallArgs { positional: &[], keyword: &empty_kwargs };
+        let (_ret, _self) = call_method(state, &def, new_cls.clone(), call, tools).await?;
+    }
+    Ok(())
+}
+
 fn wrap_enum_member(
     enum_kind: Option<crate::value::EnumKind>,
     class_name: &str,
