@@ -1,7 +1,7 @@
 ---
 id: fix-namedtuple-instances-not-iterable
 title: "Fix: namedtuple instances not iterable"
-status: ready
+status: done
 priority: p1
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

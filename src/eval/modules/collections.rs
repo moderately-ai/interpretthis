@@ -158,11 +158,10 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
 
 /// Track E batch 3: `namedtuple(name, fields)` — synthesises a class
 /// whose `__init__` binds positional args to the named fields. Field
-/// access via attribute works. Tuple-like indexing / iteration is NOT
-/// supported (would need a dedicated Value variant or significant
-/// Instance refactoring); user code that needs those must use
-/// regular tuples. `_fields` class attribute lists the field names
-/// for introspection.
+/// access via attribute works; subscript (`nt[i]`) is handled in
+/// `eval_subscript`; iteration / `len` use the `_fields` class attr
+/// via `op::namedtuple_items` (field order). `_fields` also drives
+/// PEP 634 `__match_args__`.
 pub(crate) fn call_namedtuple_with_state(
     state: &mut crate::state::InterpreterState,
     args: &[Value],

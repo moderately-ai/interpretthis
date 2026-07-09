@@ -144,6 +144,27 @@ pub async fn delitem(
 // Iteration protocol — iter / next.
 // ---------------------------------------------------------------------------
 
+/// If `value` is a `collections.namedtuple` instance (class has a
+/// `_fields` tuple attr), return field values in declaration order.
+/// Used for iteration / `len` so namedtuples behave like tuples.
+fn namedtuple_items(state: &InterpreterState, value: &Value) -> Option<Vec<Value>> {
+    let Value::Instance(inst) = value else {
+        return None;
+    };
+    let class = state.classes.get(&inst.class_name)?;
+    let Value::Tuple(field_names) = class.class_attrs.get("_fields")? else {
+        return None;
+    };
+    let mut items = Vec::with_capacity(field_names.len());
+    for name in field_names {
+        let Value::String(fname) = name else {
+            return None;
+        };
+        items.push(inst.fields.get(fname.as_str()).cloned().unwrap_or(Value::None));
+    }
+    Some(items)
+}
+
 /// Materialise an iterable into a `Vec<Value>`. Dispatches
 /// `__iter__`/`__next__` on user-class instances (capped by the
 /// configured while-iteration budget so a runaway iterator fails
@@ -162,6 +183,12 @@ pub async fn iter(
         let remaining: Vec<Value> = items.iter().skip(cursor).cloned().collect();
         state.lazy_cursors.insert(*cursor_id, items.len());
         return Ok(remaining);
+    }
+    // namedtuple: iterate field values in `_fields` order (CPython
+    // inherits tuple iteration). Checked before generic Instance
+    // `__iter__` so a bare namedtuple without a user `__iter__` works.
+    if let Some(items) = namedtuple_items(state, value) {
+        return Ok(items);
     }
     let Some(iter_method) = instance_slot(state, value, "__iter__") else {
         return crate::types::dispatch_iter(value);
@@ -544,6 +571,9 @@ pub async fn len(
             ))
             .into()),
         };
+    }
+    if let Some(items) = namedtuple_items(state, value) {
+        return Ok(items.len());
     }
     crate::types::dispatch_len(value)
 }

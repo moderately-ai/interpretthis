@@ -259,10 +259,6 @@ Binding uses `bind_method_params` in `src/eval/functions/method_dispatch.rs`.
 ## Namedtuple iteration
 <a id="namedtuple-iteration"></a>
 
-`for x in nt` and `list(nt)` on a `collections.namedtuple` instance do not work (raises `TypeError: 'object' object is not iterable` — the doubled `object` comes from formatting the OBJECT_TYPE name through the standard "is not iterable" template). Subscript access (`nt[0]`, `nt[-1]`) does work and is the recommended way to access fields positionally. Attribute access (`nt.x`) also works as expected.
+`for x in nt`, `list(nt)`, unpacking, and `len(nt)` work on `collections.namedtuple` instances: `op::iter` / `op::len` materialise field values in `_fields` declaration order (same marker used for `nt[i]` subscript). Attribute access (`nt.x`) and subscript remain supported.
 
-The gap exists because `Instance` does not have an `iter_slot`; populating it would require either per-class slot installation at namedtuple-synthesis time or a generic Instance iter that consults `_fields`. Either fix is small but defers naturally until B1's user-class TypeObject promotion lands the per-class slot path.
-
-**Rationale**: subscript already covers the most common namedtuple-as-tuple pattern (positional unpacking via `[0]`, `[1]`, ...). The iteration gap is documented so users reach for subscript instead of stumbling on the type error.
-
-**Status**: Known gap. Tracked as a Track E follow-up; closes naturally with B1.
+**Status**: Shipped.

@@ -1,7 +1,6 @@
 # namedtuple synthesises a class with field-named attributes. Pins
-# call_namedtuple_with_state's class registration. Tuple-like
-# indexing / iteration is NOT supported and not exercised — use a
-# regular tuple if you need those.
+# call_namedtuple_with_state's class registration. Iteration/len are
+# covered in namedtuple_iteration.py; subscript in namedtuple_indexing.py.
 import collections
 Point = collections.namedtuple("Point", "x y")
 p = Point(3, 4)
