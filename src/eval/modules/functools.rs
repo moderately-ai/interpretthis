@@ -322,26 +322,7 @@ fn ensure_cmp_key_class(state: &mut InterpreterState) {
     if state.classes.contains_key(CMP_KEY_CLASS) {
         return;
     }
-    state.classes.insert(
-        CMP_KEY_CLASS.to_string(),
-        ClassValue {
-            name: CMP_KEY_CLASS.to_string(),
-            methods: Default::default(),
-            class_attrs: Default::default(),
-            bases: Vec::new(),
-            mro: vec![CMP_KEY_CLASS.to_string()],
-            properties: Default::default(),
-            static_methods: Default::default(),
-            class_methods: Default::default(),
-            enum_kind: None,
-            annotations: Vec::new(),
-            dataclass_fields: None,
-            frozen: false,
-            order: false,
-            slots: false,
-            slot_names: Vec::new(),
-        },
-    );
+    state.classes.insert(CMP_KEY_CLASS.to_string(), ClassValue::new(CMP_KEY_CLASS));
 }
 
 /// Compare two `functools.CmpKey` instances via their stored cmp callable.

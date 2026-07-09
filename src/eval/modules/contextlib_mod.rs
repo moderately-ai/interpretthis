@@ -117,26 +117,7 @@ fn ensure_marker_classes(state: &mut InterpreterState) {
         if state.classes.contains_key(name) {
             continue;
         }
-        state.classes.insert(
-            name.to_string(),
-            ClassValue {
-                name: name.to_string(),
-                methods: Default::default(),
-                class_attrs: Default::default(),
-                bases: Vec::new(),
-                mro: vec![name.to_string()],
-                properties: Default::default(),
-                static_methods: Default::default(),
-                class_methods: Default::default(),
-                enum_kind: None,
-                annotations: Vec::new(),
-                dataclass_fields: None,
-                frozen: false,
-                order: false,
-                slots: false,
-                slot_names: Vec::new(),
-            },
-        );
+        state.classes.insert(name.to_string(), ClassValue::new(name));
     }
 }
 

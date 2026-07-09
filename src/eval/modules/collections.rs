@@ -350,26 +350,12 @@ pub(crate) fn call_namedtuple_with_state(
     class_attrs.insert("_fields".to_string(), fields_tuple.clone());
     class_attrs.insert("__match_args__".to_string(), fields_tuple);
     let class_name_str = class_name.to_string();
-    state.classes.insert(
-        class_name_str.clone(),
-        ClassValue {
-            name: class_name_str.clone(),
-            methods,
-            class_attrs,
-            bases: Vec::new(),
-            mro: vec![class_name_str.clone()],
-            properties: BTreeMap::new(),
-            static_methods: BTreeMap::new(),
-            class_methods: BTreeMap::new(),
-            enum_kind: None,
-            annotations: Vec::new(),
-            dataclass_fields: None,
-            frozen: false,
-            order: false,
-            slots: false,
-            slot_names: Vec::new(),
-        },
-    );
+    state.classes.insert(class_name_str.clone(), {
+        let mut cv = ClassValue::new(class_name_str.clone());
+        cv.methods = methods;
+        cv.class_attrs = class_attrs;
+        cv
+    });
     Ok(Value::Class(class_name_str))
 }
 

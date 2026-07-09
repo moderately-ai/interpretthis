@@ -234,26 +234,21 @@ pub async fn eval_class_def(
     // Class-body `__slots__ = ('x', 'y')` / `"x"` / `["x"]`.
     let (slots, slot_names) = parse_slots_attr(class_attrs.get("__slots__"));
 
-    state.classes.insert(
-        class_name.to_string(),
-        ClassValue {
-            name: class_name.to_string(),
-            methods,
-            class_attrs,
-            bases,
-            mro,
-            properties,
-            static_methods,
-            class_methods,
-            enum_kind,
-            annotations,
-            dataclass_fields: None,
-            frozen: false,
-            order: false,
-            slots,
-            slot_names,
-        },
-    );
+    state.classes.insert(class_name.to_string(), {
+        let mut cv = ClassValue::new(class_name);
+        cv.methods = methods;
+        cv.class_attrs = class_attrs;
+        cv.bases = bases;
+        cv.mro = mro;
+        cv.properties = properties;
+        cv.static_methods = static_methods;
+        cv.class_methods = class_methods;
+        cv.enum_kind = enum_kind;
+        cv.annotations = annotations;
+        cv.slots = slots;
+        cv.slot_names = slot_names;
+        cv
+    });
     state
         .set_variable(class_name, Value::Class(class_name.to_string()))
         .map_err(EvalError::Interpreter)?;
@@ -1414,26 +1409,15 @@ pub(crate) fn dynamic_type_new(
     }
     let mro = build_mro(&class_name, &bases, &state.classes)?;
     let (slots, slot_names) = parse_slots_attr(class_attrs.get("__slots__"));
-    state.classes.insert(
-        class_name.clone(),
-        ClassValue {
-            name: class_name.clone(),
-            methods: BTreeMap::new(),
-            class_attrs,
-            bases,
-            mro,
-            properties: BTreeMap::new(),
-            static_methods: BTreeMap::new(),
-            class_methods: BTreeMap::new(),
-            enum_kind: None,
-            annotations: Vec::new(),
-            dataclass_fields: None,
-            frozen: false,
-            order: false,
-            slots,
-            slot_names,
-        },
-    );
+    state.classes.insert(class_name.clone(), {
+        let mut cv = ClassValue::new(class_name.clone());
+        cv.class_attrs = class_attrs;
+        cv.bases = bases;
+        cv.mro = mro;
+        cv.slots = slots;
+        cv.slot_names = slot_names;
+        cv
+    });
     Ok(Value::Class(class_name))
 }
 
