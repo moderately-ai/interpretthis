@@ -157,43 +157,88 @@ async fn matches_handler(
     // Handle tuple of exception types: except (ValueError, TypeError)
     if let Value::Tuple(types) = &type_val {
         for type_item in types {
-            if matches_exception_type(exc, type_item) {
+            if matches_exception_type(state, exc, type_item) {
                 return Ok(true);
             }
         }
         return Ok(false);
     }
 
-    Ok(matches_exception_type(exc, &type_val))
+    Ok(matches_exception_type(state, exc, &type_val))
 }
 
 /// Check if an exception matches a single type value.
-fn matches_exception_type(exc: &ExceptionValue, type_val: &Value) -> bool {
+///
+/// Order: universal catch-all → exact name → builtin parent tree →
+/// user-class MRO (raised class is subclass of handler class).
+fn matches_exception_type(
+    state: &InterpreterState,
+    exc: &ExceptionValue,
+    type_val: &Value,
+) -> bool {
     let type_name = match type_val {
-        Value::ExceptionType(n) | Value::Class(n) => n.clone(),
-        Value::String(s) => s.to_string(),
-        _ => format!("{type_val}"),
+        Value::ExceptionType(n) | Value::Class(n) => n.as_str(),
+        Value::String(s) => s.as_str(),
+        _ => return false,
     };
 
-    // Exception is parent of all standard exceptions
-    if type_name == "Exception" {
+    if type_name == "Exception" || type_name == "BaseException" {
         return true;
     }
-
-    // Direct type match
     if exc.type_name == type_name {
         return true;
     }
-
-    // Check hierarchy: some exceptions are subclasses of others
-    match type_name.as_str() {
-        "ArithmeticError" => {
-            matches!(exc.type_name.as_str(), "ZeroDivisionError" | "OverflowError")
-        }
-        "LookupError" => matches!(exc.type_name.as_str(), "KeyError" | "IndexError"),
-        "OSError" => matches!(exc.type_name.as_str(), "FileNotFoundError" | "IOError"),
-        _ => false,
+    if builtin_exception_issubclass(&exc.type_name, type_name) {
+        return true;
     }
+    matches_user_exception(state, exc, type_name)
+}
+
+/// Whether `exc_name` is a subclass of `parent` in the hard-coded
+/// builtin tree. Expand as we register more exception constructors.
+fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool {
+    let mut cur = exc_name;
+    for _ in 0..16 {
+        if cur == parent {
+            return true;
+        }
+        cur = match cur {
+            "ZeroDivisionError" | "OverflowError" | "FloatingPointError" => "ArithmeticError",
+            "KeyError" | "IndexError" => "LookupError",
+            "FileNotFoundError" | "PermissionError" | "TimeoutError" | "IOError" => "OSError",
+            "UnicodeDecodeError" | "UnicodeEncodeError" | "UnicodeTranslateError" => "UnicodeError",
+            "UnicodeError" => "ValueError",
+            "NotImplementedError" | "RecursionError" => "RuntimeError",
+            "AssertionError" | "AttributeError" | "NameError" | "TypeError" | "ValueError"
+            | "RuntimeError" | "OSError" | "LookupError" | "ArithmeticError" | "StopIteration" => {
+                "Exception"
+            }
+            "Exception" => "BaseException",
+            _ => return false,
+        };
+    }
+    false
+}
+
+/// `except Handler` matches when the raised type is Handler or a subclass.
+/// Walks the raised user class's MRO (and builtin bases on that MRO).
+fn matches_user_exception(
+    state: &InterpreterState,
+    exc: &ExceptionValue,
+    handler_name: &str,
+) -> bool {
+    let Some(raised_class) = state.classes.get(&exc.type_name) else {
+        return false;
+    };
+    for base in &raised_class.mro {
+        if base == handler_name {
+            return true;
+        }
+        if builtin_exception_issubclass(base, handler_name) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Public wrapper for use by the `with` statement machinery in

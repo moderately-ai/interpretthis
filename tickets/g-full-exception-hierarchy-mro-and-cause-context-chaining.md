@@ -1,7 +1,7 @@
 ---
 id: g-full-exception-hierarchy-mro-and-cause-context-chaining
 title: "G: full exception hierarchy MRO and cause/context chaining"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

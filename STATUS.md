@@ -24,6 +24,6 @@ what has shipped, what is partial, and what is still open.
 | D — Datetime | `date` / `datetime` / `time` / `timedelta` / `timezone` + `strftime` / `strptime` | ✅ shipped |
 | E — Stdlib expansion | hashlib, base64, textwrap, string, itertools, functools, collections, typing, enum, dataclasses, decimal, fractions, copy | ✅ shipped (follow-ups: richer `functools`, etc.) |
 | F — `with` statement | `__enter__` / `__exit__` | ✅ shipped (user-class managers; no `contextlib` module) |
-| G — Exception hierarchy | Full tree + MRO matching + `__cause__` / `__context__` | ⚠️ partial — typed exceptions + hard-coded hierarchy subsets; full user-class MRO pending |
+| G — Exception hierarchy | Full tree + MRO matching + `__cause__` / `__context__` | ✅ shipped — expanded builtin parent walk; user exception subclasses + MRO `except`; `__cause__`/`__context__` already present |
 
 Legend: ✅ shipped · ⚠️ partial · ⏳ pending

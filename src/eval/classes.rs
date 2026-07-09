@@ -108,7 +108,15 @@ pub async fn eval_class_def(
         if matches!(resolved, Some(Value::ModuleFunction { .. })) {
             continue;
         }
-        if !state.classes.contains_key(base_name) {
+        // Builtin exception types (`Exception`, `ValueError`, …) are
+        // not registered in `state.classes` — they resolve as
+        // ExceptionType sentinels on bare-name lookup. Allow them as
+        // bases so `class AppError(Exception)` works; MRO stores the
+        // name string and except-matching walks it via the hard-coded
+        // hierarchy + user MRO.
+        let is_exception_base = crate::eval::functions::is_exception_type_name(base_name)
+            || matches!(resolved, Some(Value::ExceptionType(_)));
+        if !state.classes.contains_key(base_name) && !is_exception_base {
             return Err(InterpreterError::name_not_defined(base_name).into());
         }
         bases.push(base_name.to_string());
@@ -513,6 +521,25 @@ pub async fn instantiate(
                 "ValueError",
                 format!("{needle} is not a valid {class_name}"),
             )));
+        }
+        // Exception subclasses: `class E(Exception): ...; raise E("msg")`
+        // constructs a Value::Exception with the class name as type_name so
+        // except-matching can walk the MRO. Mirrors ExceptionType constructors.
+        let is_exception_subclass = class.mro.iter().any(|b| {
+            b == "Exception"
+                || b == "BaseException"
+                || crate::eval::functions::is_exception_type_name(b)
+        });
+        if is_exception_subclass {
+            let message = match args.len() {
+                0 => String::new(),
+                1 => format!("{}", args[0]),
+                _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
+            };
+            return Ok(Value::Exception(
+                crate::value::ExceptionValue::new(class_name.to_string(), message)
+                    .with_args(args.to_vec()),
+            ));
         }
     }
     let instance = Value::Instance(InstanceValue {
