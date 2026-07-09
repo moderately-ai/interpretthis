@@ -310,3 +310,14 @@ CONFORMANCE anchor). Reopen only with a concrete host need, for example:
 Until then, prefer host-side async around `Interpreter::execute`.
 
 **Status**: Permanent for 0.x unless a consumer files the use case above.
+
+---
+
+## Decimal context subset
+<a id="decimal-context-subset"></a>
+
+`getcontext` / `setcontext` / `localcontext` and mutable `prec` are supported.
+`rounding` is exposed as a field (default `ROUND_HALF_EVEN`) but trap flags and
+alternate rounding modes are not fully modelled.
+
+**Status**: Partial subset; traps/full rounding open.

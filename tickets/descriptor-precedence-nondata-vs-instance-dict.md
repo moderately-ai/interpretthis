@@ -1,7 +1,7 @@
 ---
 id: descriptor-precedence-nondata-vs-instance-dict
 title: "Descriptor precedence: non-data vs data vs instance dict"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

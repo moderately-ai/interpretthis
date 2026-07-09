@@ -1,7 +1,7 @@
 ---
 id: dependabot-or-manual-dep-update-workflow-under-no-prs
 title: Dependency update workflow while GitHub PRs stay disabled
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

@@ -39,6 +39,16 @@ pub fn shared_fields(fields: BTreeMap<String, Value>) -> SharedFields {
     Arc::new(Mutex::new(fields))
 }
 
+// ---------------------------------------------------------------------------
+// Python int policy (hybrid i64 + BigInt)
+//
+// - Arithmetic promotes via [`int_from_bigint`] so results that fit i64 stay
+//   on the fast path.
+// - Indices, lengths, and other size-like uses go through [`value_as_i64`]
+//   / OverflowError when out of range (see operations::to_int).
+// - Pure-arithmetic paths prefer [`value_as_bigint`].
+// ---------------------------------------------------------------------------
+
 /// Build a Python int value, using [`Value::Int`] when it fits in i64.
 #[inline]
 #[must_use]

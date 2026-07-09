@@ -41,18 +41,6 @@ fn repeat_count(n: i64) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
 }
 
-/// Convert a shift/exponent `i64` that has been range-checked to `[0, 64)`
-/// into a `u32`. The range check guarantees the conversion succeeds; the
-/// `try_from` keeps the invariant explicit rather than a silent `as` cast.
-fn bounded_u32(n: i64) -> Result<u32, EvalError> {
-    u32::try_from(n).map_err(|_| {
-        InterpreterError::Runtime(
-            "shift/exponent count out of u32 range (internal invariant)".into(),
-        )
-        .into()
-    })
-}
-
 /// Evaluate a binary operation (`a + b`, `a * b`, etc.).
 ///
 /// Both operand expressions evaluate and lazy-resolve their proxies
@@ -702,35 +690,42 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
 }
 
 fn lshift_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
-    let l = to_int(left)?;
-    let r = to_int(right)?;
-    if r < 0 {
+    use num_traits::{Signed, ToPrimitive as _};
+    let l = to_bigint(left)?;
+    let r = to_bigint(right)?;
+    if r.is_negative() {
         return Err(InterpreterError::ValueError("negative shift count".into()).into());
     }
-    if r >= 64 {
-        return Ok(Value::Int(0));
+    // Cap absurd shifts (security / memory).
+    let shift = r.to_u32().ok_or_else(|| {
+        EvalError::Exception(crate::value::ExceptionValue::new(
+            "OverflowError",
+            "shift count too large",
+        ))
+    })?;
+    if shift > 1_000_000 {
+        return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+            "OverflowError",
+            "shift count too large",
+        )));
     }
-    let shift = bounded_u32(r)?;
-    Ok(Value::Int(
-        l.checked_shl(shift)
-            .ok_or_else(|| EvalError::from(InterpreterError::Runtime("integer overflow".into())))?,
-    ))
+    Ok(crate::value::int_from_bigint(l << shift))
 }
 
 fn rshift_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
-    let l = to_int(left)?;
-    let r = to_int(right)?;
-    if r < 0 {
+    use num_traits::{Signed, ToPrimitive as _};
+    let l = to_bigint(left)?;
+    let r = to_bigint(right)?;
+    if r.is_negative() {
         return Err(InterpreterError::ValueError("negative shift count".into()).into());
     }
-    if r >= 64 {
-        return Ok(Value::Int(if l < 0 { -1 } else { 0 }));
-    }
-    let shift = bounded_u32(r)?;
-    Ok(Value::Int(
-        l.checked_shr(shift)
-            .ok_or_else(|| EvalError::from(InterpreterError::Runtime("integer overflow".into())))?,
-    ))
+    let shift = r.to_u32().ok_or_else(|| {
+        EvalError::Exception(crate::value::ExceptionValue::new(
+            "OverflowError",
+            "shift count too large",
+        ))
+    })?;
+    Ok(crate::value::int_from_bigint(l >> shift))
 }
 
 fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {

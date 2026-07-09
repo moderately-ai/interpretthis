@@ -36,3 +36,16 @@ After the first publish, docs.rs builds automatically from crates.io.
 - Security: [SECURITY.md](./.github/SECURITY.md) or `security@moderately.ai`
 - Contribution / OSS inquiries: `opensource@moderately.ai` (see CONTRIBUTING.md)
 - Topics: `rust`, `python`, `interpreter`, `sandbox`, `llm`, `ast`
+
+## Dependency updates (PRs disabled)
+
+GitHub pull requests are fully disabled on this repo. Dependency hygiene:
+
+1. Periodically run `cargo update` on `main` (or pin bumps in `Cargo.toml`).
+2. Run `cargo deny check` (advisories + licenses) and full CI locally.
+3. Commit `Cargo.lock` changes with Conventional Commits, e.g.
+   `chore(deps): cargo update`.
+4. Push directly to `main` after CI is green.
+
+Ignored advisories for unmaintained `unic-*` / `paste` (via `rustpython-parser`)
+live in `deny.toml` with reasons — re-evaluate when the parser upgrades.

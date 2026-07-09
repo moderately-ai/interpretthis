@@ -1,7 +1,7 @@
 ---
 id: list-matmul-config-flag-or-permanent-extension-doc
 title: "list @ matrix multiply: config flag or permanent-extension CONFORMANCE"
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

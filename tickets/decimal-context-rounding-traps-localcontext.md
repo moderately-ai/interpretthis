@@ -1,7 +1,7 @@
 ---
 id: decimal-context-rounding-traps-localcontext
 title: "Decimal context: rounding modes, traps, localcontext"
-status: todo
+status: done
 priority: p2
 dependencies: [decimal-prec-per-interpreter-not-process-global]
 related: [epic-post-0-2-hardening-and-parity, decimal-prec-per-interpreter-not-process-global]

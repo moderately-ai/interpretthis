@@ -27,11 +27,13 @@ use crate::{
 };
 
 pub const CONTEXT_CLASS: &str = "decimal.Context";
+/// Marker class for `with localcontext() as ctx:`.
+pub const LOCAL_CONTEXT_CLASS: &str = "decimal.LocalContext";
 
 pub fn has_function(name: &str) -> bool {
     // from_float is a Decimal classmethod only (type_classmethod), not a
     // module-level import.
-    matches!(name, "Decimal" | "getcontext" | "setcontext")
+    matches!(name, "Decimal" | "getcontext" | "setcontext" | "localcontext")
 }
 
 /// Classmethods on `decimal.Decimal`.
@@ -46,12 +48,23 @@ pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
 pub fn call(func: &str, args: &[Value], state: &mut crate::state::InterpreterState) -> EvalResult {
     match func {
         "Decimal" => construct_decimal(args.first()),
-        "getcontext" => {
+        "getcontext" => Ok(make_context_instance(state)),
+        "localcontext" => {
             ensure_context_class(state);
+            // Optional Context arg: if provided, its prec is applied on enter.
             let mut fields = std::collections::BTreeMap::new();
-            fields.insert("prec".into(), Value::Int(state.decimal_prec));
+            fields.insert("saved_prec".into(), Value::Int(state.decimal_prec));
+            if let Some(Value::Instance(inst)) = args.first() {
+                if inst.class_name == CONTEXT_CLASS {
+                    if let Some(Value::Int(n)) = inst.fields.lock().get("prec") {
+                        fields.insert("enter_prec".into(), Value::Int(*n));
+                    }
+                }
+            }
+            // Also expose a nested Context for `as ctx` that mutates state.
+            fields.insert("ctx".into(), make_context_instance(state));
             Ok(Value::Instance(crate::value::InstanceValue {
-                class_name: CONTEXT_CLASS.into(),
+                class_name: LOCAL_CONTEXT_CLASS.into(),
                 fields: crate::value::shared_fields(fields),
             }))
         }
@@ -143,12 +156,70 @@ pub(crate) fn construct_decimal(arg: Option<&Value>) -> EvalResult {
     Ok(Value::Decimal(Box::new(big)))
 }
 
+fn make_context_instance(state: &mut crate::state::InterpreterState) -> Value {
+    ensure_context_class(state);
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("prec".into(), Value::Int(state.decimal_prec));
+    // rounding accepted for read/write; only ROUND_HALF_EVEN is effective today.
+    fields.insert("rounding".into(), Value::String("ROUND_HALF_EVEN".into()));
+    Value::Instance(crate::value::InstanceValue {
+        class_name: CONTEXT_CLASS.into(),
+        fields: crate::value::shared_fields(fields),
+    })
+}
+
+/// `with localcontext() as ctx` enter/exit special-case (saves/restores prec).
+pub(crate) fn try_localcontext_method(
+    state: &mut crate::state::InterpreterState,
+    receiver: &Value,
+    method: &str,
+    _args: &[Value],
+) -> Option<EvalResult> {
+    let Value::Instance(inst) = receiver else {
+        return None;
+    };
+    if inst.class_name != LOCAL_CONTEXT_CLASS {
+        return None;
+    }
+    match method {
+        "__enter__" => {
+            let fields = inst.fields.lock();
+            if let Some(Value::Int(n)) = fields.get("enter_prec") {
+                if *n >= 1 {
+                    state.decimal_prec = *n;
+                }
+            }
+            // Return the nested Context instance for `as ctx`.
+            let ctx = fields.get("ctx").cloned().unwrap_or(Value::None);
+            // Refresh ctx.prec to current state.
+            drop(fields);
+            if let Value::Instance(ctx_inst) = &ctx {
+                ctx_inst.fields.lock().insert("prec".into(), Value::Int(state.decimal_prec));
+            }
+            Some(Ok(ctx))
+        }
+        "__exit__" => {
+            let fields = inst.fields.lock();
+            if let Some(Value::Int(n)) = fields.get("saved_prec") {
+                state.decimal_prec = *n;
+            }
+            Some(Ok(Value::Bool(false)))
+        }
+        _ => Some(Err(InterpreterError::AttributeError(format!(
+            "'LocalContext' object has no attribute '{method}'"
+        ))
+        .into())),
+    }
+}
+
 fn ensure_context_class(state: &mut crate::state::InterpreterState) {
     use crate::value::ClassValue;
-    if state.classes.contains_key(CONTEXT_CLASS) {
-        return;
+    if !state.classes.contains_key(CONTEXT_CLASS) {
+        state.classes.insert(CONTEXT_CLASS.to_string(), ClassValue::new(CONTEXT_CLASS));
     }
-    state.classes.insert(CONTEXT_CLASS.to_string(), ClassValue::new(CONTEXT_CLASS));
+    if !state.classes.contains_key(LOCAL_CONTEXT_CLASS) {
+        state.classes.insert(LOCAL_CONTEXT_CLASS.to_string(), ClassValue::new(LOCAL_CONTEXT_CLASS));
+    }
 }
 
 /// `decimal` module registration.

@@ -245,28 +245,49 @@ pub(crate) async fn getattr_on_value(
             )
             .await;
         }
-        // User data / non-data descriptors stored as class attributes
-        // with `__get__` (beyond `@property`).
+        // User descriptors on class attrs. CPython precedence:
+        // data descriptor (__set__ or __delete__) > instance dict >
+        // non-data descriptor (__get__ only).
         if let Some(desc) =
             crate::eval::classes::lookup_class_attr_instance(state, &inst.class_name, attr_name)
         {
-            if let Some((_, get_method)) =
+            let has_get =
                 crate::eval::classes::lookup_method_in_mro(state, &desc.class_name, "__get__")
-            {
-                let owner = Value::Class(inst.class_name.clone());
-                let call = crate::eval::functions::CallArgs {
-                    positional: &[obj.clone(), owner],
-                    keyword: &indexmap::IndexMap::new(),
-                };
-                let (returned, _) = crate::eval::classes::call_method(
-                    state,
-                    &get_method,
-                    Value::Instance(desc),
-                    call,
-                    tools,
-                )
-                .await?;
-                return Ok(returned);
+                    .is_some();
+            if has_get {
+                let is_data =
+                    crate::eval::classes::lookup_method_in_mro(state, &desc.class_name, "__set__")
+                        .is_some()
+                        || crate::eval::classes::lookup_method_in_mro(
+                            state,
+                            &desc.class_name,
+                            "__delete__",
+                        )
+                        .is_some();
+                if !is_data {
+                    // Non-data: instance field wins when present.
+                    if let Some(v) = inst.fields.lock().get(attr_name) {
+                        return Ok(v.clone());
+                    }
+                }
+                if let Some((_, get_method)) =
+                    crate::eval::classes::lookup_method_in_mro(state, &desc.class_name, "__get__")
+                {
+                    let owner = Value::Class(inst.class_name.clone());
+                    let call = crate::eval::functions::CallArgs {
+                        positional: &[obj.clone(), owner],
+                        keyword: &indexmap::IndexMap::new(),
+                    };
+                    let (returned, _) = crate::eval::classes::call_method(
+                        state,
+                        &get_method,
+                        Value::Instance(desc),
+                        call,
+                        tools,
+                    )
+                    .await?;
+                    return Ok(returned);
+                }
             }
         }
     }

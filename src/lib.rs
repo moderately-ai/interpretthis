@@ -57,6 +57,13 @@
 //! - **Language surface** is intentional, not accidental. Divergences and the
 //!   stdlib allowlist live in the repo’s `CONFORMANCE.md`; the security boundary
 //!   is described in `THREAT_MODEL.md`.
+//! - **Integers** use a hybrid representation: values that fit in `i64` stay
+//!   compact; larger results promote automatically (CPython-like arbitrary
+//!   precision). Extremely large powers/shifts are resource-capped.
+//! - **ExceptionGroup** / `except*` (PEP 654 leaf split) are available; nested
+//!   group APIs are still incomplete — see CONFORMANCE.
+//! - **async/await** is not supported; host code should await around
+//!   [`Interpreter::execute`] instead.
 
 pub mod config;
 pub mod error;

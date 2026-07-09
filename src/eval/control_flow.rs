@@ -334,6 +334,11 @@ async fn call_context_method(
     {
         return result;
     }
+    if let Some(result) =
+        crate::eval::modules::decimal::try_localcontext_method(state, receiver, method, args)
+    {
+        return result;
+    }
     if !matches!(receiver, Value::Instance(_)) {
         return Err(InterpreterError::AttributeError(format!(
             "'{}' object has no attribute '{method}'",

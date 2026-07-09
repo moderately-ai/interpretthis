@@ -1,7 +1,7 @@
 ---
 id: public-api-docs-bigint-state-exceptiongroup-behavior
 title: "Public API/docs: host-visible BigInt, state format, ExceptionGroup behavior"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity, conformance-and-status-truth-pass-for-0-2-0]

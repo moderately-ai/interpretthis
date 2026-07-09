@@ -1,7 +1,7 @@
 ---
 id: bigint-op-matrix-indices-shifts-methods
 title: "BigInt op matrix: indices, shifts, methods, and overflow policy"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

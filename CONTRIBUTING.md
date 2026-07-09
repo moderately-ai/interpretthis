@@ -90,3 +90,8 @@ Guidelines:
 
 Any contribution intentionally submitted for inclusion is dual-licensed under
 MIT OR Apache-2.0, as stated in the README.
+
+## Dependencies without pull requests
+
+PRs are disabled. Dependency bumps go as direct commits to `main` after
+`cargo deny check` and the usual test/clippy gates. See `RELEASING.md`.

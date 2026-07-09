@@ -1,7 +1,7 @@
 ---
 id: python-int-helpers-centralize-policy
 title: Centralize Python-int helpers (as_bigint/as_i64/from_bigint/to_int policy)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity, bigint-op-matrix-indices-shifts-methods]

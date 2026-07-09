@@ -1,7 +1,7 @@
 ---
 id: cargo-deny-ci-advisories-and-licenses
 title: Add cargo-deny (advisories + licenses) to CI
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]
