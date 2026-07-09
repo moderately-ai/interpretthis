@@ -1,7 +1,7 @@
 ---
 id: classvalue-builder-default-boilerplate
 title: ClassValue builder/default to stop field-miss boilerplate
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

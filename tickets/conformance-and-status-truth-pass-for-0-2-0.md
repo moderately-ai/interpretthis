@@ -1,7 +1,7 @@
 ---
 id: conformance-and-status-truth-pass-for-0-2-0
 title: CONFORMANCE.md and STATUS.md truth pass for 0.2.0 shipped surface
-status: ready
+status: done
 priority: p0
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

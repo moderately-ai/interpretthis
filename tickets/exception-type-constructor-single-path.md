@@ -1,7 +1,7 @@
 ---
 id: exception-type-constructor-single-path
 title: "ExceptionType construction: single path for direct and indirect calls"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity, exception-group-nested-and-subgroup-split-api]

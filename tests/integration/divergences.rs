@@ -65,3 +65,30 @@ print(a @ b)
     assert!(resp.error.is_none(), "{:?}", resp.error);
     assert_eq!(resp.stdout.trim(), "[[19, 22], [43, 50]]");
 }
+
+/// Two interpreters must not share decimal prec (no process-global prec).
+#[tokio::test]
+async fn decimal_prec_is_per_interpreter() {
+    let a = interpreter();
+    let b = interpreter();
+    let r1 = a
+        .execute(
+            "from decimal import Decimal, getcontext\ngetcontext().prec = 6\nprint(getcontext().prec)",
+            &Tools::new(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(r1.error.is_none(), "{:?}", r1.error);
+    assert_eq!(r1.stdout.trim(), "6");
+
+    let r2 = b
+        .execute(
+            "from decimal import getcontext\nprint(getcontext().prec)",
+            &Tools::new(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(r2.error.is_none(), "{:?}", r2.error);
+    // Fresh interpreter keeps default 28.
+    assert_eq!(r2.stdout.trim(), "28");
+}

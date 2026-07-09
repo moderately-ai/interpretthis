@@ -250,3 +250,44 @@ def add(a, b):
     assert!(resp2.error.is_none(), "error: {:?}", resp2.error);
     assert_eq!(resp2.stdout.trim(), "7");
 }
+
+#[tokio::test]
+async fn state_bigint_and_exception_group_round_trip() {
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r#"
+big = 2 ** 100
+eg = ExceptionGroup("g", [ValueError("a"), TypeError("b")])
+print(big)
+print(len(eg.exceptions))
+"#,
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "1267650600228229401496703205376\n2");
+
+    let state_bytes = interp.export_state().expect("export failed");
+    let interp2 = interpreter();
+    interp2.import_state(&state_bytes).expect("import failed");
+
+    let resp2 = interp2
+        .execute(
+            r#"
+print(big)
+print(type(eg).__name__)
+print(len(eg.exceptions))
+print(type(eg.exceptions[0]).__name__)
+"#,
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp2.error.is_none(), "error: {:?}", resp2.error);
+    assert_eq!(
+        resp2.stdout.trim(),
+        "1267650600228229401496703205376\nExceptionGroup\n2\nValueError"
+    );
+}

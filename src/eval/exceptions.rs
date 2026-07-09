@@ -561,3 +561,67 @@ pub async fn eval_assert(
 
     Ok(Value::None)
 }
+
+/// Construct a builtin exception value from type name + call args.
+/// Shared by direct-name calls (`ValueError("x")`) and ExceptionType calls.
+pub(crate) fn construct_exception_type(
+    type_name: &str,
+    args: &[crate::value::Value],
+) -> crate::error::EvalResult {
+    use crate::error::InterpreterError;
+    use crate::value::{ExceptionValue, Value};
+
+    if type_name == "ExceptionGroup" || type_name == "BaseExceptionGroup" {
+        if args.len() != 2 {
+            return Err(InterpreterError::TypeError(format!(
+                "{type_name}() takes exactly 2 arguments ({})",
+                args.len()
+            ))
+            .into());
+        }
+        let message = format!("{}", args[0]);
+        let nested = match &args[1] {
+            Value::List(items) => items
+                .lock()
+                .iter()
+                .map(|v| match v {
+                    Value::Exception(e) => Ok(e.clone()),
+                    other => Err(InterpreterError::TypeError(format!(
+                        "Item in {type_name} must be an exception, not '{}'",
+                        other.type_name()
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Value::Tuple(items) => items
+                .iter()
+                .map(|v| match v {
+                    Value::Exception(e) => Ok(e.clone()),
+                    other => Err(InterpreterError::TypeError(format!(
+                        "Item in {type_name} must be an exception, not '{}'",
+                        other.type_name()
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            other => {
+                return Err(InterpreterError::TypeError(format!(
+                    "second argument (exceptions) must be a sequence (got '{}')",
+                    other.type_name()
+                ))
+                .into());
+            }
+        };
+        if nested.is_empty() {
+            return Err(InterpreterError::ValueError(
+                "second argument (exceptions) must be a non-empty sequence".into(),
+            )
+            .into());
+        }
+        return Ok(Value::Exception(ExceptionValue::group(type_name.to_string(), message, nested)));
+    }
+    let message = match args.len() {
+        0 => String::new(),
+        1 => format!("{}", args[0]),
+        _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
+    };
+    Ok(Value::Exception(ExceptionValue::new(type_name, message).with_args(args.to_vec())))
+}

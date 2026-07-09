@@ -551,15 +551,7 @@ pub async fn eval_call(
     // this arm covers the direct-call form where `name` is the raw
     // identifier from the AST. Args are preserved for `e.args`.
     if is_exception_type_name(name) {
-        // Funnel through the same ExceptionType constructor used for
-        // indirect calls so ExceptionGroup gets the PEP 654 shape.
-        return call_value_as_function(
-            state,
-            &Value::ExceptionType(name.to_string()),
-            &args,
-            tools,
-        )
-        .await;
+        return crate::eval::exceptions::construct_exception_type(name, &args);
     }
 
     // `NameError`'s Display already renders `name '{0}' is not defined`, so the

@@ -1,7 +1,7 @@
 ---
 id: async-await-consumer-driven-reopen-criteria
 title: "async/await: document reopen criteria (no implementation)"
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

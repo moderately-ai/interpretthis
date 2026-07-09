@@ -178,15 +178,13 @@ Most rejections produce an error of the form `<feature> is not supported (see CO
 ## Exception groups (PEP 654)
 <a id="exception-groups"></a>
 
-`ExceptionGroup`, `BaseExceptionGroup`, and the `except*` syntax (introduced in CPython 3.11) are not supported. `rustpython-parser` accepts `except*` syntax and produces a `Stmt::TryStar` AST node; `eval_stmt` does not have a `Stmt::TryStar` arm, so the construct falls through to the catch-all and raises `InterpreterError::Runtime("unsupported statement: ...")` at eval time. `ExceptionGroup` is not registered as a builtin type.
+`ExceptionGroup` / `BaseExceptionGroup` constructors and `try`/`except*` leaf
+splitting shipped in 0.2.0. Nested groups, `.subgroup()` / `.split()`, and full
+BaseExceptionGroup matching rules are incomplete — see open tickets under
+`epic-post-0-2-hardening-and-parity`.
 
-The standard exception hierarchy (`BaseException` → `Exception` → `LookupError` → `KeyError`, etc.) is **partially** supported today. The interpreter raises typed exceptions of the right `type_name`, supports `try` / `except ExceptionName` matching by name, treats `Exception` as a universal catch-all, and walks a hard-coded hierarchy table in `src/eval/exceptions.rs::matches_exception_type` that covers three subtrees: `LookupError` catches `KeyError` / `IndexError`; `ArithmeticError` catches `ZeroDivisionError` / `OverflowError`; `OSError` catches `FileNotFoundError` / `IOError`. Full MRO traversal for user-defined exception classes is pending (Track G). Tracked under the parity program (Track G).
+**Status**: Partial (constructor + except* leaf split). Follow-ons tracked.
 
-**Rationale**: PEP 654 is a niche feature with significant implementation surface (group splitting, exception-group exception chaining semantics, dedicated traceback presentation). No target consumer uses it today.
-
-**Status**: Exception groups (PEP 654) — out of scope. File a follow-on if a real consumer needs them. Full exception hierarchy — planned (Track G).
-
----
 
 ## chrono strftime directive coverage
 <a id="strftime-directives"></a>
@@ -210,7 +208,7 @@ The currently supported subset on `strftime` / `strptime` covers what `chrono::N
 
 `Decimal` ± / * / / / // on a `float` argument also raises `TypeError`. Our error message is `unsupported operand type(s) for arithmetic: 'Decimal' and 'float'` — CPython's message names the specific operator (`unsupported operand type(s) for +: 'decimal.Decimal' and 'float'`). The behaviour (rejection) is the same; the message wording is a minor divergence.
 
-**Rationale**: avoid the binary-float-expansion surprise. CPython's `Decimal.from_float(0.1)` is the explicit-opt-in form for users who want the expansion; we do not yet expose `from_float`.
+**Rationale**: avoid the binary-float-expansion surprise. CPython's `Decimal.from_float(0.1)` is the explicit-opt-in form for users who want the expansion; `Decimal.from_float` is the explicit opt-in (shipped).
 
 **Status**: `Decimal(float)` still rejected (use strings for literals). `Decimal.from_float` shipped for explicit binary expansion.
 
@@ -276,13 +274,6 @@ power). Extremely large exponents (`> 1_000_000`) still raise
 
 **Status**: Shipped (hybrid i64 + BigInt).
 
-_Legacy note (pre-promotion):_
-Integer power was computed exactly via `BigInt`, then **narrowed** to `i64`. Results that did not fit
-raise `OverflowError` rather than coercing to an imprecise `float`
-(the previous behaviour). Full bigint `Value` support is tracked separately.
-
-**Status**: Intentional until arbitrary-precision int lands.
-
 ---
 
 ## List matrix multiplication (`@`)
@@ -304,3 +295,18 @@ identity (CPython-aligned shallow share) and `copy.deepcopy` allocates
 independent nested storage.
 
 **Status**: Shipped (aligned with CPython shallow/deep distinction).
+
+---
+
+## async / await reopen criteria
+<a id="async-await-reopen"></a>
+
+`async`/`await` and coroutine frames remain unsupported (runtime error with
+CONFORMANCE anchor). Reopen only with a concrete host need, for example:
+
+- awaiting tool futures without blocking a worker thread
+- streaming generator-like async tools under resource limits
+
+Until then, prefer host-side async around `Interpreter::execute`.
+
+**Status**: Permanent for 0.x unless a consumer files the use case above.

@@ -1,7 +1,7 @@
 ---
 id: decimal-prec-per-interpreter-not-process-global
 title: Decimal prec must be per-InterpreterState (drop process AtomicI64)
-status: ready
+status: done
 priority: p0
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

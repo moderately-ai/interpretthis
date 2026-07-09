@@ -695,7 +695,12 @@ pub(super) async fn try_builtin(
             let start = if args.len() >= 2 { args[1].clone() } else { Value::Int(0) };
             let mut total = start;
             for item in items {
-                total = crate::eval::operations::apply_binop(&total, &item, ast::Operator::Add)?;
+                total = crate::eval::operations::apply_binop(
+                    &total,
+                    &item,
+                    ast::Operator::Add,
+                    state.decimal_prec,
+                )?;
             }
             Ok(Some(total))
         }
@@ -1174,7 +1179,15 @@ pub(super) async fn try_builtin(
             let base = &args[0];
             let exp = &args[1];
             args.get(2).map_or_else(
-                || crate::types::dispatch_binop(crate::types::BinOp::Pow, base, exp).map(Some),
+                || {
+                    crate::types::dispatch_binop(
+                        crate::types::BinOp::Pow,
+                        base,
+                        exp,
+                        state.decimal_prec,
+                    )
+                    .map(Some)
+                },
                 |modulus| pow_three_arg(base, exp, modulus).map(Some),
             )
         }
@@ -1234,10 +1247,18 @@ pub(super) async fn try_builtin(
             // tuple ordering is the load-bearing parity property — most
             // user code unpacks it as `q, r = divmod(...)`.
             check_arg_count(name, args, 2, 2)?;
-            let quotient =
-                crate::types::dispatch_binop(crate::types::BinOp::FloorDiv, &args[0], &args[1])?;
-            let remainder =
-                crate::types::dispatch_binop(crate::types::BinOp::Mod, &args[0], &args[1])?;
+            let quotient = crate::types::dispatch_binop(
+                crate::types::BinOp::FloorDiv,
+                &args[0],
+                &args[1],
+                state.decimal_prec,
+            )?;
+            let remainder = crate::types::dispatch_binop(
+                crate::types::BinOp::Mod,
+                &args[0],
+                &args[1],
+                state.decimal_prec,
+            )?;
             Ok(Some(Value::Tuple(vec![quotient, remainder])))
         }
         "id" => {

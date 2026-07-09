@@ -1,7 +1,7 @@
 ---
 id: recursion-test-stack-policy-docs-and-helpers
 title: "Recursion tests: stack policy docs and helper for safe depths"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity, eval-trampoline-shrink-pin-frame-stack]

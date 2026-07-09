@@ -125,17 +125,34 @@ pub async fn eval_binop(
 /// buy anything. `MatMult` (`@`) is intentionally unsupported on
 /// builtins; user classes override it via `__matmul__` at the
 /// `eval_binop` entry.
-pub fn apply_binop(left: &Value, right: &Value, op: ast::Operator) -> Result<Value, EvalError> {
+pub fn apply_binop(
+    left: &Value,
+    right: &Value,
+    op: ast::Operator,
+    decimal_prec: i64,
+) -> Result<Value, EvalError> {
     match op {
-        ast::Operator::Add => crate::types::dispatch_binop(crate::types::BinOp::Add, left, right),
-        ast::Operator::Sub => crate::types::dispatch_binop(crate::types::BinOp::Sub, left, right),
-        ast::Operator::Mult => crate::types::dispatch_binop(crate::types::BinOp::Mul, left, right),
-        ast::Operator::Div => crate::types::dispatch_binop(crate::types::BinOp::Div, left, right),
-        ast::Operator::FloorDiv => {
-            crate::types::dispatch_binop(crate::types::BinOp::FloorDiv, left, right)
+        ast::Operator::Add => {
+            crate::types::dispatch_binop(crate::types::BinOp::Add, left, right, decimal_prec)
         }
-        ast::Operator::Mod => crate::types::dispatch_binop(crate::types::BinOp::Mod, left, right),
-        ast::Operator::Pow => crate::types::dispatch_binop(crate::types::BinOp::Pow, left, right),
+        ast::Operator::Sub => {
+            crate::types::dispatch_binop(crate::types::BinOp::Sub, left, right, decimal_prec)
+        }
+        ast::Operator::Mult => {
+            crate::types::dispatch_binop(crate::types::BinOp::Mul, left, right, decimal_prec)
+        }
+        ast::Operator::Div => {
+            crate::types::dispatch_binop(crate::types::BinOp::Div, left, right, decimal_prec)
+        }
+        ast::Operator::FloorDiv => {
+            crate::types::dispatch_binop(crate::types::BinOp::FloorDiv, left, right, decimal_prec)
+        }
+        ast::Operator::Mod => {
+            crate::types::dispatch_binop(crate::types::BinOp::Mod, left, right, decimal_prec)
+        }
+        ast::Operator::Pow => {
+            crate::types::dispatch_binop(crate::types::BinOp::Pow, left, right, decimal_prec)
+        }
         ast::Operator::LShift => lshift_values(left, right),
         ast::Operator::RShift => rshift_values(left, right),
         ast::Operator::BitOr => bitor_values(left, right),

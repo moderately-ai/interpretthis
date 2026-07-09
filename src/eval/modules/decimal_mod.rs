@@ -19,12 +19,7 @@
 
 use std::str::FromStr as _;
 
-use std::sync::atomic::{AtomicI64, Ordering};
-
 use bigdecimal::BigDecimal;
-
-/// Active precision for Decimal division (mirrored from InterpreterState).
-static DECIMAL_PREC: AtomicI64 = AtomicI64::new(28);
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
@@ -81,7 +76,6 @@ pub fn call(func: &str, args: &[Value], state: &mut crate::state::InterpreterSta
                     .into());
                 }
                 state.decimal_prec = *n;
-                DECIMAL_PREC.store(*n, Ordering::Relaxed);
             }
             Ok(Value::None)
         }
@@ -154,36 +148,7 @@ fn ensure_context_class(state: &mut crate::state::InterpreterState) {
     if state.classes.contains_key(CONTEXT_CLASS) {
         return;
     }
-    state.classes.insert(
-        CONTEXT_CLASS.to_string(),
-        ClassValue {
-            name: CONTEXT_CLASS.to_string(),
-            methods: Default::default(),
-            class_attrs: Default::default(),
-            bases: Vec::new(),
-            mro: vec![CONTEXT_CLASS.to_string()],
-            properties: Default::default(),
-            static_methods: Default::default(),
-            class_methods: Default::default(),
-            enum_kind: None,
-            annotations: Vec::new(),
-            dataclass_fields: None,
-            frozen: false,
-            order: false,
-            slots: false,
-            slot_names: Vec::new(),
-        },
-    );
-}
-
-/// Active decimal precision for division (default 28).
-#[must_use]
-pub(crate) fn active_prec() -> i64 {
-    DECIMAL_PREC.load(Ordering::Relaxed)
-}
-
-pub(crate) fn store_prec(n: i64) {
-    DECIMAL_PREC.store(n, Ordering::Relaxed);
+    state.classes.insert(CONTEXT_CLASS.to_string(), ClassValue::new(CONTEXT_CLASS));
 }
 
 /// `decimal` module registration.

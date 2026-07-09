@@ -181,7 +181,8 @@ pub type ContainsSlot = fn(container: &Value, item: &Value) -> Result<bool, Eval
 /// Function-pointer shape for the arithmetic slot. `None` return signals
 /// `NotImplemented` (try the other operand's slot); `Some(Err(...))`
 /// reports the operation was handled but raised (e.g. `ZeroDivisionError`).
-pub type ArithSlot = fn(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>>;
+pub type ArithSlot =
+    fn(op: BinOp, lhs: &Value, rhs: &Value, decimal_prec: i64) -> Option<Result<Value, EvalError>>;
 
 /// Function-pointer shape for the iteration slot. Eagerly
 /// materializes the iterable into a `Vec<Value>` for the consumer to
@@ -338,7 +339,12 @@ pub fn dispatch_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
 /// tries `rhs`'s `arith_slot` for the reflected dunder path; on a second
 /// `NotImplemented` raises `TypeError` with CPython's exact wording
 /// ("unsupported operand type(s) for <op>: 'X' and 'Y'").
-pub fn dispatch_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value, EvalError> {
+pub fn dispatch_binop(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    decimal_prec: i64,
+) -> Result<Value, EvalError> {
     // IntEnum / StrEnum members unwrap to their underlying value for
     // arithmetic — they're functionally `int` / `str` subclasses in
     // CPython. Plain Enum keeps its type so the dispatcher raises
@@ -346,14 +352,14 @@ pub fn dispatch_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value, Eval
     let lhs_u = unwrap_enum_for_compare(lhs);
     let rhs_u = unwrap_enum_for_compare(rhs);
     if !std::ptr::eq(lhs_u, lhs) || !std::ptr::eq(rhs_u, rhs) {
-        return dispatch_binop(op, lhs_u, rhs_u);
+        return dispatch_binop(op, lhs_u, rhs_u, decimal_prec);
     }
     let lhs_type = type_of(lhs);
-    if let Some(result) = (lhs_type.arith_slot)(op, lhs, rhs) {
+    if let Some(result) = (lhs_type.arith_slot)(op, lhs, rhs, decimal_prec) {
         return result;
     }
     let rhs_type = type_of(rhs);
-    if let Some(result) = (rhs_type.arith_slot)(op, lhs, rhs) {
+    if let Some(result) = (rhs_type.arith_slot)(op, lhs, rhs, decimal_prec) {
         return result;
     }
     Err(InterpreterError::TypeError(format!(
@@ -1372,7 +1378,12 @@ fn object_contains(container: &Value, _item: &Value) -> Result<bool, EvalError> 
 /// seven arithmetic operators (None, bytes, dict, plus `OBJECT_TYPE`'s
 /// catch-all for unmigrated variants). Always returns `None` so
 /// `dispatch_binop` raises the unsupported-pair `TypeError`.
-const fn noimpl_arith(_op: BinOp, _lhs: &Value, _rhs: &Value) -> Option<Result<Value, EvalError>> {
+const fn noimpl_arith(
+    _op: BinOp,
+    _lhs: &Value,
+    _rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     None
 }
 
@@ -1382,7 +1393,12 @@ const fn noimpl_arith(_op: BinOp, _lhs: &Value, _rhs: &Value) -> Option<Result<V
 /// rule (any float operand → float result; otherwise int). String/list/
 /// tuple repetition (`5 * "abc"`) is also handled here on the int side
 /// since the rhs's str/list/tuple `arith_slot` handles the symmetric case.
-fn numeric_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn numeric_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     if !is_numeric(lhs) {
         return None;
     }
@@ -1401,7 +1417,12 @@ fn numeric_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, Ev
 
 /// `str + str` (concat), `str * int` (repetition), and `str % args`
 /// (printf-style formatting). Other ops surface as `NotImplemented`.
-fn str_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn str_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     let Value::String(_) = lhs else { return None };
     match op {
         BinOp::Add if matches!(rhs, Value::String(_)) => {
@@ -1420,7 +1441,12 @@ fn str_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalEr
 /// `bytes + bytes` (concat) and `bytes * int` (repetition). Mirrors
 /// the list/str shape — defer the actual work to `apply_binop_builtin`
 /// which routes through `add_values` / `mult_values`.
-fn bytes_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn bytes_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     let Value::Bytes(_) = lhs else { return None };
     match op {
         BinOp::Add if matches!(rhs, Value::Bytes(_)) => {
@@ -1434,7 +1460,12 @@ fn bytes_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, Eval
 }
 
 /// `list + list` (concat) and `list * int` (repetition).
-fn list_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn list_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     let Value::List(_) = lhs else { return None };
     match op {
         BinOp::Add if matches!(rhs, Value::List(_)) => {
@@ -1448,7 +1479,12 @@ fn list_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalE
 }
 
 /// `tuple + tuple` (concat) and `tuple * int` (repetition).
-fn tuple_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn tuple_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     let Value::Tuple(_) = lhs else { return None };
     match op {
         BinOp::Add if matches!(rhs, Value::Tuple(_)) => {
@@ -1463,7 +1499,12 @@ fn tuple_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, Eval
 
 /// `set - set` (difference). Other set operators (`|`, `&`, `^`) are
 /// bitwise ops on the legacy `apply_binop` path until A3's follow-up.
-fn set_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn set_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     let Value::Set(_) = lhs else { return None };
     match op {
         BinOp::Sub if matches!(rhs, Value::Set(_)) => {
@@ -2289,7 +2330,12 @@ fn counter_get_attr(value: &Value, name: &str) -> EvalResult {
 /// dict (which raises TypeError) but overrides them to mean multiset
 /// add / subtract. & is intersection (min of counts), | is union
 /// (max). All four KEEP ONLY positive results.
-fn counter_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn counter_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     let Value::Counter(a) = lhs else { return None };
     let Value::Counter(b) = rhs else { return None };
     match op {
@@ -2486,7 +2532,12 @@ fn decimal_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
     Some(decimal_to_bigdecimal(lhs)? < decimal_to_bigdecimal(rhs)?)
 }
 
-fn decimal_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn decimal_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     use num_traits::Zero as _;
     if matches!(lhs, Value::Float(_)) || matches!(rhs, Value::Float(_)) {
         return Some(Err(InterpreterError::TypeError(
@@ -2505,7 +2556,7 @@ fn decimal_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, Ev
                     InterpreterError::Runtime("Decimal division by zero".into()).into()
                 ));
             }
-            let prec = crate::eval::modules::decimal::active_prec();
+            let prec = decimal_prec;
             let digits = u64::try_from(prec).unwrap_or(28);
             // Cap significant digits at context prec without padding exact results.
             let q = a / b;
@@ -2565,7 +2616,12 @@ fn fraction_to_f64(value: &Value) -> Option<f64> {
     }
 }
 
-fn fraction_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn fraction_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     // CPython: Fraction ±/* float → float.
     if matches!(lhs, Value::Float(_)) || matches!(rhs, Value::Float(_)) {
         let a = fraction_to_f64(lhs)?;
@@ -2655,7 +2711,12 @@ const fn binop_to_sym(op: BinOp) -> &'static str {
     }
 }
 
-fn datetime_cluster_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+fn datetime_cluster_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
     let sym = binop_to_sym(op);
     if sym.is_empty() {
         return None;

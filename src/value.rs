@@ -602,6 +602,31 @@ pub struct ClassValue {
     pub slot_names: Vec<String>,
 }
 
+impl ClassValue {
+    /// Empty class shell with safe defaults (no methods/attrs/slots).
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            name: name.clone(),
+            methods: BTreeMap::new(),
+            class_attrs: BTreeMap::new(),
+            bases: Vec::new(),
+            mro: vec![name],
+            properties: BTreeMap::new(),
+            static_methods: BTreeMap::new(),
+            class_methods: BTreeMap::new(),
+            enum_kind: None,
+            annotations: Vec::new(),
+            dataclass_fields: None,
+            frozen: false,
+            order: false,
+            slots: false,
+            slot_names: Vec::new(),
+        }
+    }
+}
+
 /// A single field of an `@dataclass`-decorated class.
 ///
 /// The boolean flags mirror CPython's `dataclasses.field(...)` kwargs:

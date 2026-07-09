@@ -19,7 +19,7 @@ use crate::{
     error::{ControlFlow, EvalError, EvalResult, InterpreterError},
     state::InterpreterState,
     tools::Tools,
-    value::{ExceptionValue, FunctionDef, LambdaDef, Value},
+    value::{FunctionDef, LambdaDef, Value},
 };
 
 /// Call a user-defined function.
@@ -565,65 +565,7 @@ pub(crate) async fn call_value_as_function(
         // types) so user code that inspects `e.args[0]` sees the
         // original value, not a stringification.
         Value::ExceptionType(type_name) => {
-            if type_name == "ExceptionGroup" || type_name == "BaseExceptionGroup" {
-                if args.len() != 2 {
-                    return Err(InterpreterError::TypeError(format!(
-                        "{type_name}() takes exactly 2 arguments ({})",
-                        args.len()
-                    ))
-                    .into());
-                }
-                let message = format!("{}", args[0]);
-                let nested = match &args[1] {
-                    Value::List(items) => items
-                        .lock()
-                        .iter()
-                        .map(|v| match v {
-                            Value::Exception(e) => Ok(e.clone()),
-                            other => Err(InterpreterError::TypeError(format!(
-                                "Item in {type_name} must be an exception, not '{}'",
-                                other.type_name()
-                            ))),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    Value::Tuple(items) => items
-                        .iter()
-                        .map(|v| match v {
-                            Value::Exception(e) => Ok(e.clone()),
-                            other => Err(InterpreterError::TypeError(format!(
-                                "Item in {type_name} must be an exception, not '{}'",
-                                other.type_name()
-                            ))),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    other => {
-                        return Err(InterpreterError::TypeError(format!(
-                            "second argument (exceptions) must be a sequence (got '{}')",
-                            other.type_name()
-                        ))
-                        .into());
-                    }
-                };
-                if nested.is_empty() {
-                    return Err(InterpreterError::ValueError(
-                        "second argument (exceptions) must be a non-empty sequence".into(),
-                    )
-                    .into());
-                }
-                return Ok(Value::Exception(ExceptionValue::group(
-                    type_name.clone(),
-                    message,
-                    nested,
-                )));
-            }
-            let message = match args.len() {
-                0 => String::new(),
-                1 => format!("{}", args[0]),
-                _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
-            };
-            Ok(Value::Exception(
-                ExceptionValue::new(type_name.clone(), message).with_args(args.to_vec()),
-            ))
+            crate::eval::exceptions::construct_exception_type(type_name, args)
         }
         // `functools.partial` — prepend the bound args and forward to
         // the bound function. The indirect-call path here doesn't

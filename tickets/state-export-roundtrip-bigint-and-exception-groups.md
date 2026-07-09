@@ -1,7 +1,7 @@
 ---
 id: state-export-roundtrip-bigint-and-exception-groups
 title: "State export/import: round-trip BigInt and ExceptionGroup.exceptions"
-status: ready
+status: done
 priority: p0
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

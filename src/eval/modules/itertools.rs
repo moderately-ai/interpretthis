@@ -372,7 +372,12 @@ async fn accumulate_impl(
                     )
                     .await?
                 }
-                None => crate::types::dispatch_binop(crate::types::BinOp::Add, &prev, &item)?,
+                None => crate::types::dispatch_binop(
+                    crate::types::BinOp::Add,
+                    &prev,
+                    &item,
+                    state.decimal_prec,
+                )?,
             },
         });
         if let Some(v) = &acc {

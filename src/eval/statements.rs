@@ -371,7 +371,6 @@ pub fn assign_target<'a>(
                             if let Value::Int(n) = &value {
                                 if *n >= 1 {
                                     state.decimal_prec = *n;
-                                    crate::eval::modules::decimal::store_prec(*n);
                                 }
                             }
                         }
@@ -522,7 +521,6 @@ pub fn assign_target<'a>(
                             if let Value::Int(n) = &value {
                                 if *n >= 1 {
                                     state.decimal_prec = *n;
-                                    crate::eval::modules::decimal::store_prec(*n);
                                 }
                             }
                         }
