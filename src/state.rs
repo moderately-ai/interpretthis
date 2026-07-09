@@ -41,7 +41,7 @@ pub struct GeneratorFrame {
 /// Resume state for a `for` loop that suspended on `yield` in its body.
 #[derive(Debug, Clone)]
 pub struct GeneratorForState {
-    pub items: Vec<crate::value::Value>,
+    pub items: Arc<Vec<crate::value::Value>>,
     /// Index of the current item (the one whose body is in progress).
     pub pos: usize,
     /// Next statement index in the for-body after a yield resume.

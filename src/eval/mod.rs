@@ -379,7 +379,7 @@ pub fn eval_expr<'a>(
                     // Reuse for_stack as a synthetic loop over remaining items.
                     if !rest.is_empty() {
                         frame.for_stack.push(crate::state::GeneratorForState {
-                            items: rest,
+                            items: std::sync::Arc::new(rest),
                             pos: 0,
                             body_index: 0,
                             target: String::new(), // empty => pure yield-from drain

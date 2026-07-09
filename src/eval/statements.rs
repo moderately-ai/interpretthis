@@ -535,31 +535,20 @@ pub fn assign_target<'a>(
             // place) or through `op::setitem` for user-class instances
             // (calls `__setitem__` and writes the post-call self back).
             Expr::Subscript(sub) => {
-                let receiver = crate::eval::eval_expr(state, &sub.value, tools).await?;
-                if matches!(receiver, Value::Instance(_)) {
-                    let key = crate::eval::eval_expr(state, &sub.slice, tools).await?;
-                    if let Some(updated_self) =
-                        crate::eval::op::setitem(state, &receiver, &key, value.clone(), tools)
-                            .await?
-                    {
-                        // Writeback only handles bare-Name receivers
-                        // today (mirrors the legacy intercept). Deeper
-                        // chains drop the mutation; tracked for the
-                        // place-machinery unification pass.
-                        if let Expr::Name(name_node) = sub.value.as_ref() {
-                            state
-                                .set_variable(name_node.id.as_str(), updated_self)
-                                .map_err(EvalError::Interpreter)?;
-                        }
+                let Some(target_place) = place::eval_place(state, target, tools).await? else {
+                    // Non-place receiver (`f()[x] = v`) cannot be written back through the
+                    // place system. Preserve the old user-instance hook for this edge case.
+                    let receiver = crate::eval::eval_expr(state, &sub.value, tools).await?;
+                    if matches!(receiver, Value::Instance(_)) {
+                        let key = crate::eval::eval_expr(state, &sub.slice, tools).await?;
+                        let _ =
+                            crate::eval::op::setitem(state, &receiver, &key, value, tools).await?;
                         return Ok(());
                     }
-                }
-                let target_place =
-                    place::eval_place(state, target, tools).await?.ok_or_else(|| {
-                        EvalError::from(InterpreterError::Runtime(
-                            "cannot assign to this expression".into(),
-                        ))
-                    })?;
+                    return Err(EvalError::from(InterpreterError::Runtime(
+                        "cannot assign to this expression".into(),
+                    )));
+                };
                 // A bare `Name` is handled by the arm above, so a subscript /
                 // attribute target always carries at least one step.
                 let Some((last, prefix)) = target_place.steps.split_last() else {
@@ -568,6 +557,56 @@ pub fn assign_target<'a>(
                     )
                     .into());
                 };
+
+                // Fast path for the common builtin case: inspect the terminal
+                // receiver in place instead of cloning the whole receiver just
+                // to check whether user `__setitem__` applies. The old path made
+                // `d[i] = v` O(n²) for growing dicts because each assignment
+                // cloned the entire dict before routing back to `assign_terminal`.
+                if let place::PlaceStep::Index(key) = last {
+                    let receiver = {
+                        let root =
+                            state.variables.get_mut(&target_place.root).ok_or_else(|| {
+                                EvalError::from(InterpreterError::name_not_defined(
+                                    &target_place.root,
+                                ))
+                            })?;
+                        place::with_navigate_mut(root, prefix, |container| {
+                            if matches!(container, Value::Instance(_)) {
+                                Some(container.clone())
+                            } else {
+                                None
+                            }
+                        })?
+                    };
+                    if let Some(receiver) = receiver {
+                        if let Some(updated_self) =
+                            crate::eval::op::setitem(state, &receiver, key, value.clone(), tools)
+                                .await?
+                        {
+                            let delta = {
+                                let root = state.variables.get_mut(&target_place.root).ok_or_else(
+                                    || {
+                                        EvalError::from(InterpreterError::name_not_defined(
+                                            &target_place.root,
+                                        ))
+                                    },
+                                )?;
+                                place::with_navigate_mut(root, prefix, |container| {
+                                    let delta = place::size_delta(
+                                        estimate_value_size(container),
+                                        estimate_value_size(&updated_self),
+                                    );
+                                    *container = updated_self;
+                                    delta
+                                })?
+                            };
+                            place::apply_mem_delta(state, delta)?;
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let delta = {
                     let root = state.variables.get_mut(&target_place.root).ok_or_else(|| {
                         EvalError::from(InterpreterError::name_not_defined(&target_place.root))

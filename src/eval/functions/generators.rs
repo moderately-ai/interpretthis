@@ -367,22 +367,22 @@ async fn run_for_suspendable(
                         let iterable = eval_expr(state, &node.iter, tools).await?;
                         let iterable = resolve_proxy(&iterable).await?;
                         let items = crate::eval::op::iter(state, &iterable, tools).await?;
-                        (items, 0, 0)
+                        (Arc::new(items), 0, 0)
                     }
                 } else {
                     let iterable = eval_expr(state, &node.iter, tools).await?;
                     let iterable = resolve_proxy(&iterable).await?;
-                    (crate::eval::op::iter(state, &iterable, tools).await?, 0, 0)
+                    (Arc::new(crate::eval::op::iter(state, &iterable, tools).await?), 0, 0)
                 }
             } else {
                 let iterable = eval_expr(state, &node.iter, tools).await?;
                 let iterable = resolve_proxy(&iterable).await?;
-                (crate::eval::op::iter(state, &iterable, tools).await?, 0, 0)
+                (Arc::new(crate::eval::op::iter(state, &iterable, tools).await?), 0, 0)
             }
         } else {
             let iterable = eval_expr(state, &node.iter, tools).await?;
             let iterable = resolve_proxy(&iterable).await?;
-            (crate::eval::op::iter(state, &iterable, tools).await?, 0, 0)
+            (Arc::new(crate::eval::op::iter(state, &iterable, tools).await?), 0, 0)
         }
     };
 
