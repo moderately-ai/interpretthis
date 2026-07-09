@@ -243,6 +243,30 @@ pub(crate) async fn getattr_on_value(
             )
             .await;
         }
+        // User data / non-data descriptors stored as class attributes
+        // with `__get__` (beyond `@property`).
+        if let Some(desc) =
+            crate::eval::classes::lookup_class_attr_instance(state, &inst.class_name, attr_name)
+        {
+            if let Some((_, get_method)) =
+                crate::eval::classes::lookup_method_in_mro(state, &desc.class_name, "__get__")
+            {
+                let owner = Value::Class(inst.class_name.clone());
+                let call = crate::eval::functions::CallArgs {
+                    positional: &[obj.clone(), owner],
+                    keyword: &indexmap::IndexMap::new(),
+                };
+                let (returned, _) = crate::eval::classes::call_method(
+                    state,
+                    &get_method,
+                    Value::Instance(desc),
+                    call,
+                    tools,
+                )
+                .await?;
+                return Ok(returned);
+            }
+        }
     }
 
     // Type-as-receiver: `str.upper`, `int.bit_length`, `list.append`,

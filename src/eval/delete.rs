@@ -60,6 +60,31 @@ async fn delete_target(
                 })?;
                 if let Value::Instance(inst) = &obj {
                     let class_name = inst.class_name.clone();
+                    if let Some(desc) = crate::eval::classes::lookup_class_attr_instance(
+                        state,
+                        &class_name,
+                        &attr_name,
+                    ) {
+                        if let Some((_, del_method)) = crate::eval::classes::lookup_method_in_mro(
+                            state,
+                            &desc.class_name,
+                            "__delete__",
+                        ) {
+                            let call = crate::eval::functions::CallArgs {
+                                positional: std::slice::from_ref(&obj),
+                                keyword: &indexmap::IndexMap::new(),
+                            };
+                            let _ = crate::eval::classes::call_method(
+                                state,
+                                &del_method,
+                                Value::Instance(desc),
+                                call,
+                                tools,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    }
                     if let Some(prop) =
                         crate::eval::classes::lookup_property(state, &class_name, &attr_name)
                     {

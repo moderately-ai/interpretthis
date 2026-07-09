@@ -1026,6 +1026,24 @@ pub fn instance_attribute(
     .into())
 }
 
+/// Walk MRO for a class attribute that is a user instance (descriptor
+/// candidate). First hit wins.
+pub fn lookup_class_attr_instance(
+    state: &InterpreterState,
+    class_name: &str,
+    attr: &str,
+) -> Option<InstanceValue> {
+    let class = state.classes.get(class_name)?;
+    for ancestor_name in &class.mro {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(Value::Instance(inst)) = ancestor.class_attrs.get(attr) {
+                return Some(inst.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Walk `class_name`'s MRO looking for a `@property` descriptor named
 /// `attr`. Returns the first match.
 pub fn lookup_property(

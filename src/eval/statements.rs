@@ -412,6 +412,34 @@ pub fn assign_target<'a>(
                                     }
                                 }
                             }
+                            // User data descriptor `__set__` on class attrs.
+                            if let Some(desc) = crate::eval::classes::lookup_class_attr_instance(
+                                state,
+                                &class_name,
+                                &attr_name,
+                            ) {
+                                if let Some((_, set_method)) =
+                                    crate::eval::classes::lookup_method_in_mro(
+                                        state,
+                                        &desc.class_name,
+                                        "__set__",
+                                    )
+                                {
+                                    let call = crate::eval::functions::CallArgs {
+                                        positional: &[obj.clone(), value.clone()],
+                                        keyword: &indexmap::IndexMap::new(),
+                                    };
+                                    let _ = crate::eval::classes::call_method(
+                                        state,
+                                        &set_method,
+                                        Value::Instance(desc),
+                                        call,
+                                        tools,
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                            }
                             if let Some(prop) = crate::eval::classes::lookup_property(
                                 state,
                                 &class_name,

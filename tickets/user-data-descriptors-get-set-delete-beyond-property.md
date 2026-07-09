@@ -1,7 +1,7 @@
 ---
 id: user-data-descriptors-get-set-delete-beyond-property
 title: User data descriptors (__get__/__set__/__delete__ beyond property)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]
