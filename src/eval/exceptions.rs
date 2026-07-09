@@ -236,6 +236,11 @@ fn interpreter_error_to_exception(err: &InterpreterError) -> ExceptionValue {
         InterpreterError::Runtime(msg) => {
             ExceptionValue::new("RuntimeError", strip_line_marker(msg))
         }
+        // Tool failures are catchable as generic Exception (see ToolHandler docs).
+        InterpreterError::Tool { tool_name, message } => ExceptionValue::new(
+            "Exception",
+            format!("ToolError in '{tool_name}': {}", strip_line_marker(message)),
+        ),
         _ => ExceptionValue::new("Exception", strip_line_marker(&format!("{err}"))),
     }
 }

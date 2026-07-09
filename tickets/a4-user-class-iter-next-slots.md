@@ -1,7 +1,7 @@
 ---
 id: a4-user-class-iter-next-slots
 title: "A4: user-class __iter__/__next__ slots"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

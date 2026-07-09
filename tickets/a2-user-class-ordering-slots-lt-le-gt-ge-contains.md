@@ -1,7 +1,7 @@
 ---
 id: a2-user-class-ordering-slots-lt-le-gt-ge-contains
 title: "A2: user-class ordering slots (__lt__/__le__/__gt__/__ge__/__contains__)"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

@@ -116,6 +116,48 @@ async fn tool_error_propagates() {
     assert!(resp.error.is_some());
 }
 
+/// User Python can catch tool failures as a generic `Exception`.
+/// Host still sees `InterpreterError::Tool` when the exception escapes.
+#[tokio::test]
+async fn tool_error_catchable_as_exception() {
+    let interp = interpreter();
+    let tools = Tools::new().with("fail", failing_tool());
+
+    let resp = interp
+        .execute(
+            r#"
+try:
+    fail()
+    print("not-reached")
+except Exception as e:
+    print("caught")
+    print(type(e).__name__)
+"#,
+            &tools,
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "caught tool failure must not abort execute: {:?}", resp.error);
+    let lines: Vec<_> = resp.stdout.lines().collect();
+    assert_eq!(lines.first().map(AsRef::as_ref), Some("caught"));
+    assert_eq!(lines.get(1).map(AsRef::as_ref), Some("Exception"));
+}
+
+/// Uncaught tool failure still surfaces as host Tool error (not silent).
+#[tokio::test]
+async fn tool_error_uncaught_is_host_tool_error() {
+    let interp = interpreter();
+    let tools = Tools::new().with("fail", failing_tool());
+
+    let resp = interp.execute("fail()", &tools, HashMap::new()).await;
+    let err = resp.error.expect("uncaught tool error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("fail") || msg.contains("Tool") || msg.contains("deliberate"),
+        "expected tool-flavoured host error, got: {msg}"
+    );
+}
+
 #[tokio::test]
 async fn tool_lambda_calling_tool() {
     let interp = interpreter();

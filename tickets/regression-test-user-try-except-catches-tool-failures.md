@@ -1,7 +1,7 @@
 ---
 id: regression-test-user-try-except-catches-tool-failures
 title: "Regression test: user try/except catches tool failures"
-status: ready
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-1-hardening-and-product-backlog]

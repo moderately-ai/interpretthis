@@ -1,7 +1,7 @@
 ---
 id: a3-user-class-arithmetic-slots-binary-unary-augmented-reflected
 title: "A3: user-class arithmetic slots (binary/unary/augmented + reflected)"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]
