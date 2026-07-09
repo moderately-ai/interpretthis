@@ -125,3 +125,33 @@ async fn max_int_bits_limits_power() {
     let resp = interp.execute("print(1 << 100)", &Tools::new(), HashMap::new()).await;
     assert!(resp.error.is_some(), "expected overflow for max_int_bits=64 on shift");
 }
+
+/// __prepare__ seeds attrs; method tables restored after type() rebuild.
+#[tokio::test]
+async fn metaclass_prepare_and_method_restore() {
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r#"
+class Meta:
+    def __prepare__(name, bases):
+        return {"from_prepare": 1}
+    def __new__(cls, name, bases, ns):
+        ns["from_new"] = 2
+        return type(name, bases, ns)
+
+class C(metaclass=Meta):
+    def hello(self):
+        return "hi"
+
+print(C.from_prepare)
+print(C.from_new)
+print(C().hello())
+"#,
+            &Tools::new(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "1\n2\nhi");
+}

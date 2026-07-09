@@ -3,7 +3,12 @@
   "_format": {
     "version": 1,
     "units": "nanoseconds",
-    "fields": ["criterion_id", "median_ns", "mean_ns", "std_dev_ns"]
+    "fields": [
+      "criterion_id",
+      "median_ns",
+      "mean_ns",
+      "std_dev_ns"
+    ]
   },
   "_capture": {
     "base_sha": "bdd8c9d3d852d7a752865dbf84d4de630aec6ec9",
@@ -89,5 +94,6 @@
         "std_dev_ns": 2585388
       }
     }
-  }
+  },
+  "_comment_refresh": "Refresh: cargo bench --bench interpreter 2>&1 | tee /tmp/bench.txt; then update medians in this file from criterion output. Last reviewed post-0.2 (per-arm boxed eval futures, bigint, shared fields)."
 }

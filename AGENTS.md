@@ -16,7 +16,8 @@ Each Python call frame currently costs a large amount of native stack
 
 - Setting `InterpreterConfig::max_recursion_depth` **below** the host stack
   ceiling so tests observe `RecursionError` rather than SIGABRT.
-- Using shallow depths (e.g. 2–3) for "under cap succeeds" checks until the
-  eval trampoline ticket lands.
+- After per-arm boxed futures, default-thread recursion is ~12 levels; keep
+  "under cap" tests at ≤8 and RecursionError tests with max_recursion_depth
+  below ~12 so the interpreter guard fires before SIGABRT.
 
 Do not raise default-thread recursion smoke depths without profiling stack use.

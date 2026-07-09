@@ -112,9 +112,9 @@ def factorial(n):
 
     // Shallow depth: native stack per Python frame is large until the
     // eval trampoline lands (see AGENTS.md).
-    let resp2 = interp2.execute("print(factorial(2))", &no_tools(), HashMap::new()).await;
+    let resp2 = interp2.execute("print(factorial(6))", &no_tools(), HashMap::new()).await;
     assert!(resp2.error.is_none(), "error: {:?}", resp2.error);
-    assert_eq!(resp2.stdout.trim(), "2");
+    assert_eq!(resp2.stdout.trim(), "720");
 }
 
 #[tokio::test]

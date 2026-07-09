@@ -1,7 +1,7 @@
 ---
 id: eval-trampoline-shrink-pin-frame-stack
 title: "Eval trampoline: shrink Box::pin per-frame native stack"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

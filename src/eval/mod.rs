@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::future::Future;
+use std::pin::Pin;
+
 use rustpython_parser::ast::{Expr, Ranged, Stmt};
 
 use crate::{
@@ -10,6 +13,12 @@ use crate::{
     tools::Tools,
     value::Value,
 };
+
+/// Boxed eval future. Each statement/expression arm returns its own box so the
+/// concrete future state machine stays small — poll stack cost scales with the
+/// active arm, not the max of every arm (the previous single-match `Box::pin`
+/// design).
+type EvalFut<'a> = Pin<Box<dyn Future<Output = EvalResult> + Send + 'a>>;
 
 /// 1-based line number that byte `offset` falls on inside `source`.
 /// Returns 1 if `offset` is past the end (caller passed a degenerate
@@ -105,90 +114,126 @@ pub mod strings;
 
 /// Evaluate a single statement.
 ///
-/// Uses `Box::pin` internally to handle recursive async calls.
+/// Each match arm is a **separately** `Box::pin`'d future so the polled
+/// state machine is only as large as the active arm (not the max of all
+/// arms). That cuts native stack use per recursive Python call and is
+/// what lets realistic recursion depths work on default OS stacks.
 pub fn eval_stmt<'a>(
     state: &'a mut InterpreterState,
     stmt: &'a Stmt,
     tools: &'a Tools,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = EvalResult> + Send + 'a>> {
-    Box::pin(async move {
-        state.increment_ops().map_err(EvalError::Interpreter)?;
+) -> EvalFut<'a> {
+    if let Err(e) = state.increment_ops() {
+        return Box::pin(async move { Err(EvalError::Interpreter(e)) });
+    }
 
-        // Compute the statement's start line so a downstream error can be
-        // stamped with `(at line N)`. Done before dispatch so the innermost
-        // statement (deepest in the recursion) stamps first; outer
-        // statements observe the marker and skip — preserving the most
-        // specific line for the agent loop.
-        //
-        // When we're executing inside a function/lambda body, the byte
-        // offsets in the body's AST nodes point into the source that
-        // *defined* the body — not into the current execute()'s source.
-        // call_user_function / call_lambda push their body's source on
-        // `body_source_stack` before recursing; consult the top here so
-        // a persisted function called in a later execute() stamps with
-        // the correct line.
-        let stmt_line = {
-            let active_source = state
-                .body_source_stack
-                .last()
-                .map_or(state.current_source.as_str(), String::as_str);
-            line_of(active_source, stmt.range().start().to_usize())
-        };
+    // When we're executing inside a function/lambda body, the byte
+    // offsets in the body's AST nodes point into the source that
+    // *defined* the body — not into the current execute()'s source.
+    let stmt_line = {
+        let active_source =
+            state.body_source_stack.last().map_or(state.current_source.as_str(), String::as_str);
+        line_of(active_source, stmt.range().start().to_usize())
+    };
 
-        let result = match stmt {
-            // Bare-expression statements (`docstring`, top-level `42`)
-            // whose value is a Constant are no-ops — Python evaluates
-            // them but the result is discarded. Skip the eval_expr
-            // recursion entirely; the line-stamp + op-count above
-            // already covered the per-statement overhead.
-            Stmt::Expr(node) if matches!(node.value.as_ref(), Expr::Constant(_)) => Ok(Value::None),
-            Stmt::Expr(node) => eval_expr(state, &node.value, tools).await,
-            Stmt::Assign(node) => statements::eval_assign(state, node, tools).await,
-            Stmt::AugAssign(node) => statements::eval_aug_assign(state, node, tools).await,
-            Stmt::AnnAssign(node) => statements::eval_ann_assign(state, node, tools).await,
-            Stmt::If(node) => control_flow::eval_if(state, node, tools).await,
-            Stmt::For(node) => control_flow::eval_for(state, node, tools).await,
-            Stmt::While(node) => control_flow::eval_while(state, node, tools).await,
-            Stmt::Break(_) => Err(EvalError::Signal(ControlFlow::Break)),
-            Stmt::Continue(_) => Err(EvalError::Signal(ControlFlow::Continue)),
-            Stmt::Return(node) => {
-                // Inline `?` would short-circuit past `result.map_err`
-                // below and ship the underlying error un-stamped — the
-                // very bug B1/B2 are meant to fix. Match explicitly so
-                // the error bubbles through the post-match stamp.
-                let val_result = if let Some(ref v) = node.value {
-                    eval_expr(state, v, tools).await
-                } else {
-                    Ok(Value::None)
-                };
-                match val_result {
-                    Ok(val) => Err(EvalError::Signal(ControlFlow::Return(Box::new(val)))),
-                    Err(e) => Err(e),
-                }
+    match stmt {
+        // Bare-expression statements whose value is a Constant are no-ops.
+        Stmt::Expr(node) if matches!(node.value.as_ref(), Expr::Constant(_)) => {
+            Box::pin(async move { Ok(Value::None) })
+        }
+        Stmt::Expr(node) => Box::pin(async move {
+            eval_expr(state, &node.value, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Assign(node) => Box::pin(async move {
+            statements::eval_assign(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::AugAssign(node) => Box::pin(async move {
+            statements::eval_aug_assign(state, node, tools)
+                .await
+                .map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::AnnAssign(node) => Box::pin(async move {
+            statements::eval_ann_assign(state, node, tools)
+                .await
+                .map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::If(node) => Box::pin(async move {
+            control_flow::eval_if(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::For(node) => Box::pin(async move {
+            control_flow::eval_for(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::While(node) => Box::pin(async move {
+            control_flow::eval_while(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Break(_) => Box::pin(async move { Err(EvalError::Signal(ControlFlow::Break)) }),
+        Stmt::Continue(_) => Box::pin(async move { Err(EvalError::Signal(ControlFlow::Continue)) }),
+        Stmt::Return(node) => Box::pin(async move {
+            let val_result = if let Some(ref v) = node.value {
+                eval_expr(state, v, tools).await
+            } else {
+                Ok(Value::None)
+            };
+            match val_result {
+                Ok(val) => Err(stamp_line(
+                    EvalError::Signal(ControlFlow::Return(Box::new(val))),
+                    stmt_line,
+                )),
+                Err(e) => Err(stamp_line(e, stmt_line)),
             }
-            Stmt::FunctionDef(node) => functions::eval_function_def(state, node, tools).await,
-            Stmt::Try(node) => exceptions::eval_try(state, node, tools).await,
-            Stmt::TryStar(node) => exceptions::eval_try_star(state, node, tools).await,
-            Stmt::Raise(node) => exceptions::eval_raise(state, node, tools).await,
-            Stmt::Assert(node) => exceptions::eval_assert(state, node, tools).await,
-            Stmt::Delete(node) => delete::eval_delete(state, node, tools).await,
-            Stmt::Match(node) => match_stmt::eval_match(state, node, tools).await,
-            Stmt::With(node) => control_flow::eval_with(state, node, tools).await,
-            Stmt::Import(node) => modules::eval_import(state, node),
-            Stmt::ImportFrom(node) => modules::eval_import_from(state, node),
-            Stmt::ClassDef(node) => classes::eval_class_def(state, node, tools).await,
-            // Pass, Global, and Nonlocal are all interpreter-level no-ops —
-            // Python semantics don't require scope annotations for our
-            // runtime.
-            Stmt::Pass(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => Ok(Value::None),
-            _ => Err(InterpreterError::Runtime(format!(
+        }),
+        Stmt::FunctionDef(node) => Box::pin(async move {
+            functions::eval_function_def(state, node, tools)
+                .await
+                .map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Try(node) => Box::pin(async move {
+            exceptions::eval_try(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::TryStar(node) => Box::pin(async move {
+            exceptions::eval_try_star(state, node, tools)
+                .await
+                .map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Raise(node) => Box::pin(async move {
+            exceptions::eval_raise(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Assert(node) => Box::pin(async move {
+            exceptions::eval_assert(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Delete(node) => Box::pin(async move {
+            delete::eval_delete(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Match(node) => Box::pin(async move {
+            match_stmt::eval_match(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::With(node) => Box::pin(async move {
+            control_flow::eval_with(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Import(node) => {
+            let r = modules::eval_import(state, node).map_err(|e| stamp_line(e, stmt_line));
+            Box::pin(async move { r })
+        }
+        Stmt::ImportFrom(node) => {
+            let r = modules::eval_import_from(state, node).map_err(|e| stamp_line(e, stmt_line));
+            Box::pin(async move { r })
+        }
+        Stmt::ClassDef(node) => Box::pin(async move {
+            classes::eval_class_def(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
+        }),
+        Stmt::Pass(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => {
+            Box::pin(async move { Ok(Value::None) })
+        }
+        _ => {
+            let msg = format!(
                 "unsupported statement: {:?} (see CONFORMANCE.md#unsupported-language-features)",
                 std::mem::discriminant(stmt)
-            ))
-            .into()),
-        };
-        result.map_err(|e| stamp_line(e, stmt_line))
-    })
+            );
+            Box::pin(
+                async move { Err(stamp_line(InterpreterError::Runtime(msg).into(), stmt_line)) },
+            )
+        }
+    }
 }
 
 /// Try to evaluate an expression synchronously, without allocating a
@@ -231,86 +276,94 @@ pub fn try_eval_expr_sync(
 
 /// Evaluate a single expression.
 ///
-/// Uses `Box::pin` internally to handle recursive async calls. Hot
-/// callers should try [`try_eval_expr_sync`] first to skip the boxed
+/// Each match arm is a separately boxed future (see [`eval_stmt`]) so
+/// recursive expression trees don't pay the max-arm state-machine size
+/// on every poll.
+///
+/// Hot callers should try [`try_eval_expr_sync`] first to skip the boxed
 /// future on Constant / Name leaves.
 pub fn eval_expr<'a>(
     state: &'a mut InterpreterState,
     expr: &'a Expr,
     tools: &'a Tools,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = EvalResult> + Send + 'a>> {
-    Box::pin(async move {
-        state.increment_ops().map_err(EvalError::Interpreter)?;
+) -> EvalFut<'a> {
+    if let Some(fast) = try_eval_expr_sync(state, expr, tools) {
+        return Box::pin(async move { fast });
+    }
 
-        match expr {
-            Expr::Constant(node) => Ok(literals::eval_constant(&node.value)),
-            Expr::List(node) => literals::eval_list(state, node, tools).await,
-            Expr::Tuple(node) => literals::eval_tuple(state, node, tools).await,
-            Expr::Dict(node) => literals::eval_dict(state, node, tools).await,
-            Expr::Set(node) => literals::eval_set(state, node, tools).await,
-            Expr::Name(node) => names::eval_name(state, node, tools),
-            Expr::Attribute(node) => names::eval_attribute(state, node, tools).await,
-            Expr::Subscript(node) => names::eval_subscript(state, node, tools).await,
-            Expr::BinOp(node) => operations::eval_binop(state, node, tools).await,
-            Expr::UnaryOp(node) => operations::eval_unaryop(state, node, tools).await,
-            Expr::Compare(node) => operations::eval_compare(state, node, tools).await,
-            Expr::BoolOp(node) => operations::eval_boolop(state, node, tools).await,
-            Expr::IfExp(node) => operations::eval_ifexp(state, node, tools).await,
-            Expr::Call(node) => functions::eval_call(state, node, tools).await,
-            Expr::Lambda(node) => functions::eval_lambda_def(state, node, tools).await,
-            Expr::JoinedStr(node) => strings::eval_joined_str(state, node, tools).await,
-            Expr::FormattedValue(node) => strings::eval_formatted_value(state, node, tools).await,
-            Expr::ListComp(node) => comprehensions::eval_list_comp(state, node, tools).await,
-            Expr::DictComp(node) => comprehensions::eval_dict_comp(state, node, tools).await,
-            Expr::SetComp(node) => comprehensions::eval_set_comp(state, node, tools).await,
-            Expr::GeneratorExp(node) => {
-                comprehensions::eval_generator_exp(state, node, tools).await
-            }
-            Expr::NamedExpr(node) => names::eval_named_expr(state, node, tools).await,
-            Expr::Starred(node) => eval_expr(state, &node.value, tools).await,
-            Expr::Slice(node) => names::eval_slice(state, node, tools).await,
-            // Track C: yield inside a generator function body pushes
-            // the yielded value onto the current yield-buffer frame.
-            // The yield expression evaluates to None (we don't support
-            // gen.send() yet — that requires a real coroutine).
-            Expr::Yield(node) => {
-                let value = if let Some(ref v) = node.value {
-                    eval_expr(state, v, tools).await?
-                } else {
-                    crate::value::Value::None
-                };
-                let Some(buffer) = state.yield_stack.last_mut() else {
-                    return Err(crate::error::InterpreterError::Runtime(
-                        "'yield' outside function: yield can only appear inside a generator function".into(),
-                    )
-                    .into());
-                };
-                buffer.push(value);
-                Ok(crate::value::Value::None)
-            }
-            // `yield from <iterable>` — delegate every value out
-            // through the current buffer.
-            Expr::YieldFrom(node) => {
-                let source = eval_expr(state, &node.value, tools).await?;
-                let items = crate::eval::op::iter(state, &source, tools).await?;
-                let Some(buffer) = state.yield_stack.last_mut() else {
-                    return Err(crate::error::InterpreterError::Runtime(
-                        "'yield from' outside function: yield from can only appear inside a generator function".into(),
-                    )
-                    .into());
-                };
-                buffer.extend(items);
-                Ok(crate::value::Value::None)
-            }
-            // `await` requires the full async / coroutine machinery
-            // (PEP 492), which is out of scope per CONFORMANCE.md.
-            Expr::Await(_) => Err(InterpreterError::Runtime(
+    if let Err(e) = state.increment_ops() {
+        return Box::pin(async move { Err(EvalError::Interpreter(e)) });
+    }
+
+    match expr {
+        Expr::Constant(node) => {
+            let v = literals::eval_constant(&node.value);
+            Box::pin(async move { Ok(v) })
+        }
+        Expr::List(node) => Box::pin(literals::eval_list(state, node, tools)),
+        Expr::Tuple(node) => Box::pin(literals::eval_tuple(state, node, tools)),
+        Expr::Dict(node) => Box::pin(literals::eval_dict(state, node, tools)),
+        Expr::Set(node) => Box::pin(literals::eval_set(state, node, tools)),
+        Expr::Name(node) => {
+            let r = names::eval_name(state, node, tools);
+            Box::pin(async move { r })
+        }
+        Expr::Attribute(node) => Box::pin(names::eval_attribute(state, node, tools)),
+        Expr::Subscript(node) => Box::pin(names::eval_subscript(state, node, tools)),
+        Expr::BinOp(node) => Box::pin(operations::eval_binop(state, node, tools)),
+        Expr::UnaryOp(node) => Box::pin(operations::eval_unaryop(state, node, tools)),
+        Expr::Compare(node) => Box::pin(operations::eval_compare(state, node, tools)),
+        Expr::BoolOp(node) => Box::pin(operations::eval_boolop(state, node, tools)),
+        Expr::IfExp(node) => Box::pin(operations::eval_ifexp(state, node, tools)),
+        Expr::Call(node) => Box::pin(functions::eval_call(state, node, tools)),
+        Expr::Lambda(node) => Box::pin(functions::eval_lambda_def(state, node, tools)),
+        Expr::JoinedStr(node) => Box::pin(strings::eval_joined_str(state, node, tools)),
+        Expr::FormattedValue(node) => Box::pin(strings::eval_formatted_value(state, node, tools)),
+        Expr::ListComp(node) => Box::pin(comprehensions::eval_list_comp(state, node, tools)),
+        Expr::DictComp(node) => Box::pin(comprehensions::eval_dict_comp(state, node, tools)),
+        Expr::SetComp(node) => Box::pin(comprehensions::eval_set_comp(state, node, tools)),
+        Expr::GeneratorExp(node) => {
+            Box::pin(comprehensions::eval_generator_exp(state, node, tools))
+        }
+        Expr::NamedExpr(node) => Box::pin(names::eval_named_expr(state, node, tools)),
+        Expr::Starred(node) => eval_expr(state, &node.value, tools),
+        Expr::Slice(node) => Box::pin(names::eval_slice(state, node, tools)),
+        Expr::Yield(node) => Box::pin(async move {
+            let value = if let Some(ref v) = node.value {
+                eval_expr(state, v, tools).await?
+            } else {
+                Value::None
+            };
+            let Some(buffer) = state.yield_stack.last_mut() else {
+                return Err(InterpreterError::Runtime(
+                    "'yield' outside function: yield can only appear inside a generator function"
+                        .into(),
+                )
+                .into());
+            };
+            buffer.push(value);
+            Ok(Value::None)
+        }),
+        Expr::YieldFrom(node) => Box::pin(async move {
+            let source = eval_expr(state, &node.value, tools).await?;
+            let items = crate::eval::op::iter(state, &source, tools).await?;
+            let Some(buffer) = state.yield_stack.last_mut() else {
+                return Err(InterpreterError::Runtime(
+                    "'yield from' outside function: yield from can only appear inside a generator function".into(),
+                )
+                .into());
+            };
+            buffer.extend(items);
+            Ok(Value::None)
+        }),
+        Expr::Await(_) => Box::pin(async move {
+            Err(InterpreterError::Runtime(
                 "'await' is not supported (see CONFORMANCE.md#unsupported-language-features)"
                     .into(),
             )
-            .into()),
-        }
-    })
+            .into())
+        }),
+    }
 }
 
 /// Evaluate a list of statements, returning the last value.

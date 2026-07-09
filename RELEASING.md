@@ -49,3 +49,9 @@ GitHub pull requests are fully disabled on this repo. Dependency hygiene:
 
 Ignored advisories for unmaintained `unic-*` / `paste` (via `rustpython-parser`)
 live in `deny.toml` with reasons — re-evaluate when the parser upgrades.
+
+## Benchmark baselines
+
+`benches/baseline.json` records criterion medians for regression envelopes.
+After material interpreter changes, run `cargo bench --bench interpreter` and
+update the file (see `_comment` / `_comment_refresh` inside the JSON).

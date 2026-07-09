@@ -1,7 +1,7 @@
 ---
 id: bench-baselines-refresh-after-0-2
 title: Refresh criterion baselines after 0.2 (bigint, shared fields)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

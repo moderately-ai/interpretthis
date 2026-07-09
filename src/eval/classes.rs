@@ -164,6 +164,19 @@ pub async fn eval_class_def(
     // parameter order.
     let mut annotations: Vec<String> = Vec::new();
 
+    // PEP 3115: Meta.__prepare__(name, bases) may supply the initial namespace.
+    if let Some(ref meta) = metaclass_name {
+        if let Some(prepared) =
+            invoke_metaclass_prepare(state, meta, class_name, &bases, tools).await?
+        {
+            for (k, v) in prepared {
+                if let crate::value::ValueKey::String(s) = k {
+                    class_attrs.insert(s.to_string(), v);
+                }
+            }
+        }
+    }
+
     for stmt in &node.body {
         match stmt {
             Stmt::FunctionDef(method) => {
@@ -266,9 +279,29 @@ pub async fn eval_class_def(
         .set_variable(class_name, Value::Class(class_name.to_string()))
         .map_err(EvalError::Interpreter)?;
 
-    // Metaclass `__new__` (PEP 3115 subset): Meta.__new__(Meta, name, bases, ns).
+    // Metaclass `__new__` / `__init__` (PEP 3115 subset).
     if let Some(meta) = metaclass_name {
+        // Preserve method tables across type() rebuilds that only carry attrs.
+        let saved_methods = state.classes.get(class_name).map(|c| {
+            (
+                c.methods.clone(),
+                c.properties.clone(),
+                c.static_methods.clone(),
+                c.class_methods.clone(),
+            )
+        });
         invoke_metaclass_new(state, class_name, &meta, tools).await?;
+        if let Some((methods, properties, static_methods, class_methods)) = saved_methods {
+            if let Some(cv) = state.classes.get_mut(class_name) {
+                if cv.methods.is_empty() && !methods.is_empty() {
+                    cv.methods = methods;
+                    cv.properties = properties;
+                    cv.static_methods = static_methods;
+                    cv.class_methods = class_methods;
+                }
+            }
+        }
+        invoke_metaclass_init(state, class_name, &meta, tools).await?;
     }
 
     // PEP 487: after the class dict is built, call `__set_name__(cls, name)`
@@ -1359,6 +1392,27 @@ pub async fn super_method_call(
 /// `__init__` lookup. Returns the first matching `(defining_class,
 /// FunctionDef)` so callers can build the per-frame `__class__` binding
 /// for zero-arg `super()`.
+
+/// Method or classmethod named `method_name` on `class_name`'s MRO.
+fn lookup_method_or_classmethod(
+    state: &InterpreterState,
+    class_name: &str,
+    method_name: &str,
+) -> Option<(String, FunctionDef)> {
+    if let Some(found) = lookup_method_in_mro(state, class_name, method_name) {
+        return Some(found);
+    }
+    let class = state.classes.get(class_name)?;
+    for ancestor_name in &class.mro {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            if let Some(def) = ancestor.class_methods.get(method_name) {
+                return Some((ancestor_name.clone(), def.clone()));
+            }
+        }
+    }
+    None
+}
+
 pub fn lookup_method_in_mro(
     state: &InterpreterState,
     class_name: &str,
@@ -1434,6 +1488,75 @@ pub(crate) fn dynamic_type_new(
     Ok(Value::Class(class_name))
 }
 
+/// `Meta.__prepare__(name, bases)` → optional initial namespace dict.
+async fn invoke_metaclass_prepare(
+    state: &mut InterpreterState,
+    meta: &str,
+    class_name: &str,
+    bases: &[String],
+    tools: &Tools,
+) -> Result<Option<IndexMap<crate::value::ValueKey, Value>>, EvalError> {
+    let Some((_, method)) = lookup_method_or_classmethod(state, meta, "__prepare__") else {
+        return Ok(None);
+    };
+    // PEP 3115: `namespace = metaclass.__prepare__(name, bases)` — NOT bound
+    // as an instance method; only (name, bases) are passed.
+    let name_v = Value::String(class_name.into());
+    let bases_t = Value::Tuple(bases.iter().map(|b| Value::Class(b.clone())).collect());
+    let empty_kw = IndexMap::new();
+    let returned = crate::eval::functions::call_user_function(
+        state,
+        &method,
+        &[name_v, bases_t],
+        &empty_kw,
+        tools,
+    )
+    .await?;
+    let _ = meta;
+    match returned {
+        Value::Dict(map) => Ok(Some(map)),
+        Value::None => Ok(None),
+        other => Err(InterpreterError::TypeError(format!(
+            "__prepare__() must return a mapping, not '{}'",
+            other.type_name()
+        ))
+        .into()),
+    }
+}
+
+/// Call `Meta.__init__(cls, name, bases, namespace)` when present.
+async fn invoke_metaclass_init(
+    state: &mut InterpreterState,
+    class_name: &str,
+    meta: &str,
+    tools: &Tools,
+) -> Result<(), EvalError> {
+    let Some((_, method)) = lookup_method_or_classmethod(state, meta, "__init__") else {
+        return Ok(());
+    };
+    let class = state
+        .classes
+        .get(class_name)
+        .cloned()
+        .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
+    let mut ns = IndexMap::new();
+    for (k, v) in &class.class_attrs {
+        ns.insert(crate::value::ValueKey::String(k.as_str().into()), v.clone());
+    }
+    let bases_t = Value::Tuple(class.bases.iter().map(|b| Value::Class(b.clone())).collect());
+    let name_v = Value::String(class_name.into());
+    let ns_v = Value::Dict(ns);
+    // CPython: Meta.__init__(cls, name, bases, ns) with cls = the new class.
+    let cls_v = Value::Class(class_name.to_string());
+    let call = crate::eval::functions::CallArgs {
+        positional: &[name_v, bases_t, ns_v],
+        keyword: &IndexMap::new(),
+    };
+    let _ = call_method(state, &method, cls_v, call, tools).await?;
+    let _ = meta; // used for MRO lookup above
+    Ok(())
+}
+
 /// Call `Meta.__new__(Meta, name, bases, namespace)` when present.
 async fn invoke_metaclass_new(
     state: &mut InterpreterState,
@@ -1441,7 +1564,7 @@ async fn invoke_metaclass_new(
     meta: &str,
     tools: &Tools,
 ) -> Result<(), EvalError> {
-    let Some((_, method)) = lookup_method_in_mro(state, meta, "__new__") else {
+    let Some((_, method)) = lookup_method_or_classmethod(state, meta, "__new__") else {
         return Ok(());
     };
     let class = state
