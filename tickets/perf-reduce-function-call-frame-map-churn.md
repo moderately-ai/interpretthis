@@ -1,7 +1,7 @@
 ---
 id: perf-reduce-function-call-frame-map-churn
 title: "Performance: reduce function-call frame map churn"
-status: ready
+status: done
 priority: p1
 dependencies: []
 related: []

@@ -166,7 +166,7 @@ pub async fn eval_function_def(
 pub(super) fn apply_nonlocal_cell(
     state: &mut InterpreterState,
     func_def: &FunctionDef,
-    local_scope: &std::collections::HashMap<String, Value>,
+    local_scope: &rustc_hash::FxHashMap<String, Value>,
 ) -> Result<(), EvalError> {
     let Some(cell_id) = func_def.nonlocal_cell_id else { return Ok(()) };
     let Some(cell) = state.nonlocal_cells.get(&cell_id).cloned() else { return Ok(()) };
@@ -206,7 +206,7 @@ pub(super) fn apply_nonlocal_cell(
 pub(super) fn apply_function_scope(
     state: &mut InterpreterState,
     func_def: &FunctionDef,
-    local_scope: &std::collections::HashMap<String, Value>,
+    local_scope: &rustc_hash::FxHashMap<String, Value>,
 ) -> Result<(), EvalError> {
     for (name, value) in &func_def.closure {
         if local_scope.contains_key(name) || func_def.global_names.contains(name) {
@@ -241,7 +241,7 @@ pub(super) fn apply_function_scope(
 pub(super) fn apply_lambda_scope(
     state: &mut InterpreterState,
     lambda_def: &LambdaDef,
-    local_scope: &std::collections::HashMap<String, Value>,
+    local_scope: &rustc_hash::FxHashMap<String, Value>,
 ) -> Result<(), EvalError> {
     for (name, value) in &lambda_def.closure {
         if local_scope.contains_key(name) {
@@ -726,15 +726,17 @@ pub(crate) struct VariableCheckpoint {
 }
 
 impl VariableCheckpoint {
-    pub(crate) fn capture<I: IntoIterator<Item = String>>(
-        state: &InterpreterState,
-        names: I,
-    ) -> Self {
+    pub(crate) fn capture<I, S>(state: &InterpreterState, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let snapshots: Vec<(String, Option<Value>)> = names
             .into_iter()
             .map(|n| {
-                let prev = state.variables.get(&n).cloned();
-                (n, prev)
+                let name = n.as_ref();
+                let prev = state.variables.get(name).cloned();
+                (name.to_string(), prev)
             })
             .collect();
         Self { snapshots }

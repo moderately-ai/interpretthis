@@ -158,7 +158,7 @@ pub(crate) async fn call_user_function(
         .chain(func_def.assigned_names.iter().cloned())
         .filter(|n| !func_def.global_names.contains(n) && !func_def.nonlocal_names.contains(n))
         .collect();
-    let checkpoint = VariableCheckpoint::capture(state, touched.clone());
+    let checkpoint = VariableCheckpoint::capture(state, &touched);
 
     // Apply closure + nonlocal cell + local-scope bindings as a sync
     // helper call. The helper's stack frame is released before any
@@ -352,7 +352,7 @@ pub(crate) async fn call_lambda(
         .chain(closure_touched.map(|(name, _)| name.clone()))
         .chain(lambda_def.assigned_names.iter().cloned())
         .collect();
-    let checkpoint = VariableCheckpoint::capture(state, touched);
+    let checkpoint = VariableCheckpoint::capture(state, &touched);
 
     if let Err(e) = apply_lambda_scope(state, lambda_def, &local_scope) {
         checkpoint.restore(state);

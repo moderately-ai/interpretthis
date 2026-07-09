@@ -957,7 +957,7 @@ pub async fn instance_method_call(
 /// stack-budget reasoning.
 fn apply_method_scope(
     state: &mut InterpreterState,
-    local_scope: &std::collections::HashMap<String, Value>,
+    local_scope: &rustc_hash::FxHashMap<String, Value>,
 ) -> Result<(), EvalError> {
     for (name, value) in local_scope {
         state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
@@ -1031,7 +1031,7 @@ pub async fn call_method(
         .chain(method.assigned_names.iter().cloned())
         .filter(|n| !method.global_names.contains(n))
         .collect();
-    let checkpoint = crate::eval::functions::VariableCheckpoint::capture(state, touched);
+    let checkpoint = crate::eval::functions::VariableCheckpoint::capture(state, &touched);
 
     // Apply param/self bindings via a sync helper — same future-size
     // reasoning as `call_user_function`.

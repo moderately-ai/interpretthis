@@ -20,9 +20,8 @@
 //! (`functions/mod.rs`) and `eval::classes::call_method` can all
 //! consume them without inflating `functions/mod.rs`.
 
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
+use rustc_hash::FxHashMap;
 use rustpython_parser::ast;
 
 use crate::{
@@ -103,8 +102,12 @@ pub(crate) async fn bind_params(
     kwargs: &IndexMap<String, Value>,
     state: &mut InterpreterState,
     tools: &Tools,
-) -> Result<HashMap<String, Value>, EvalError> {
-    let mut scope = HashMap::new();
+) -> Result<FxHashMap<String, Value>, EvalError> {
+    let capacity = params.args.len()
+        + usize::from(params.vararg.is_some())
+        + params.kwonlyargs.len()
+        + usize::from(params.kwarg.is_some());
+    let mut scope = FxHashMap::with_capacity_and_hasher(capacity, Default::default());
     let num_params = params.args.len();
     let num_defaults = params.defaults.len();
     let first_default = num_params.saturating_sub(num_defaults);
