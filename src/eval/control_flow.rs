@@ -293,7 +293,7 @@ fn build_exit_args(current_error: Option<&EvalError>) -> (bool, Vec<Value>) {
             true,
             vec![
                 Value::ExceptionType(exc.type_name.clone()),
-                Value::Exception(exc.clone()),
+                Value::Exception(Box::new(exc.clone())),
                 Value::None,
             ],
         ),
@@ -308,7 +308,7 @@ fn build_exit_args(current_error: Option<&EvalError>) -> (bool, Vec<Value>) {
                 true,
                 vec![
                     Value::ExceptionType(exc.type_name.clone()),
-                    Value::Exception(exc),
+                    Value::Exception(Box::new(exc)),
                     Value::None,
                 ],
             )

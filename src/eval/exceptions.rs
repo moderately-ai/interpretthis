@@ -131,7 +131,7 @@ async fn try_match_star_handlers(
 
         if let Some(ref name) = h.name {
             state
-                .set_variable(name.as_str(), Value::Exception(group.clone()))
+                .set_variable(name.as_str(), Value::Exception(Box::new(group.clone())))
                 .map_err(EvalError::Interpreter)?;
         }
 
@@ -265,7 +265,7 @@ async fn try_match_handlers(
 
         if let Some(ref name) = h.name {
             state
-                .set_variable(name.as_str(), Value::Exception(exc.clone()))
+                .set_variable(name.as_str(), Value::Exception(Box::new(exc.clone())))
                 .map_err(EvalError::Interpreter)?;
         }
 
@@ -482,7 +482,7 @@ pub async fn eval_raise(
     let cause = if let Some(ref cause_expr) = node.cause {
         let cause_val = eval_expr(state, cause_expr, tools).await?;
         match cause_val {
-            Value::Exception(e) => Some(Box::new(e)),
+            Value::Exception(e) => Some(e),
             _ => None,
         }
     } else {
@@ -504,7 +504,8 @@ pub async fn eval_raise(
     let attached_cause = cause.or(implicit_context);
 
     match exc_val {
-        Value::Exception(mut exc) => {
+        Value::Exception(exc) => {
+            let mut exc = *exc;
             exc.cause = attached_cause;
             Err(EvalError::Exception(exc))
         }
@@ -585,7 +586,7 @@ pub(crate) fn construct_exception_type(
                 .lock()
                 .iter()
                 .map(|v| match v {
-                    Value::Exception(e) => Ok(e.clone()),
+                    Value::Exception(e) => Ok((**e).clone()),
                     other => Err(InterpreterError::TypeError(format!(
                         "Item in {type_name} must be an exception, not '{}'",
                         other.type_name()
@@ -595,7 +596,7 @@ pub(crate) fn construct_exception_type(
             Value::Tuple(items) => items
                 .iter()
                 .map(|v| match v {
-                    Value::Exception(e) => Ok(e.clone()),
+                    Value::Exception(e) => Ok((**e).clone()),
                     other => Err(InterpreterError::TypeError(format!(
                         "Item in {type_name} must be an exception, not '{}'",
                         other.type_name()
@@ -616,14 +617,18 @@ pub(crate) fn construct_exception_type(
             )
             .into());
         }
-        return Ok(Value::Exception(ExceptionValue::group(type_name.to_string(), message, nested)));
+        return Ok(Value::Exception(Box::new(ExceptionValue::group(
+            type_name.to_string(),
+            message,
+            nested,
+        ))));
     }
     let message = match args.len() {
         0 => String::new(),
         1 => format!("{}", args[0]),
         _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
     };
-    Ok(Value::Exception(ExceptionValue::new(type_name, message).with_args(args.to_vec())))
+    Ok(Value::Exception(Box::new(ExceptionValue::new(type_name, message).with_args(args.to_vec()))))
 }
 
 /// `ExceptionGroup.subgroup(match)` / `.split(match)`.
@@ -686,31 +691,31 @@ pub(crate) fn call_exception_method(
             if matched.is_empty() {
                 Ok(Value::None)
             } else {
-                Ok(Value::Exception(ExceptionValue::group(
+                Ok(Value::Exception(Box::new(ExceptionValue::group(
                     exception.type_name.clone(),
                     exception.message.clone(),
                     matched,
-                )))
+                ))))
             }
         }
         "split" => {
             let m = if matched.is_empty() {
                 Value::None
             } else {
-                Value::Exception(ExceptionValue::group(
+                Value::Exception(Box::new(ExceptionValue::group(
                     exception.type_name.clone(),
                     exception.message.clone(),
                     matched,
-                ))
+                )))
             };
             let r = if rest.is_empty() {
                 Value::None
             } else {
-                Value::Exception(ExceptionValue::group(
+                Value::Exception(Box::new(ExceptionValue::group(
                     exception.type_name.clone(),
                     exception.message.clone(),
                     rest,
-                ))
+                )))
             };
             Ok(Value::Tuple(vec![m, r]))
         }

@@ -719,10 +719,10 @@ pub async fn instantiate(
                 1 => format!("{}", args[0]),
                 _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
             };
-            return Ok(Value::Exception(
+            return Ok(Value::Exception(Box::new(
                 crate::value::ExceptionValue::new(class_name.to_string(), message)
                     .with_args(args.to_vec()),
-            ));
+            )));
         }
     }
     let instance = Value::Instance(InstanceValue {

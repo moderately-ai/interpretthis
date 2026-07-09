@@ -1,7 +1,7 @@
 ---
 id: perf-value-footprint-and-memory-accounting
 title: "Performance: shrink Value footprint or align memory accounting"
-status: ready
+status: done
 priority: p1
 dependencies: []
 related: []

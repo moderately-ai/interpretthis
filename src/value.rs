@@ -242,9 +242,9 @@ pub enum Value {
     /// Python `range()` result.
     Range { start: i64, stop: i64, step: i64 },
     /// Runtime exception instance (for `try`/`except`/`raise`).
-    Exception(ExceptionValue),
+    Exception(Box<ExceptionValue>),
     /// Bound method on an exception instance (`eg.subgroup`, `eg.split`).
-    ExceptionMethod { method: String, exception: ExceptionValue },
+    ExceptionMethod { method: String, exception: Box<ExceptionValue> },
     /// Deferred tool result — resolved lazily when consumed.
     /// Not serializable; filtered before state export.
     #[serde(skip)]
@@ -1009,7 +1009,8 @@ impl ExceptionValue {
         exceptions: Vec<Self>,
     ) -> Self {
         let message = message.into();
-        let nested: Vec<Value> = exceptions.iter().cloned().map(Value::Exception).collect();
+        let nested: Vec<Value> =
+            exceptions.iter().cloned().map(|exc| Value::Exception(Box::new(exc))).collect();
         Self {
             type_name: type_name.into(),
             message: message.clone(),

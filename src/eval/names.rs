@@ -442,20 +442,21 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
             let items = exc
                 .exceptions
                 .as_ref()
-                .map(|xs| xs.iter().cloned().map(Value::Exception).collect())
+                .map(|xs| xs.iter().cloned().map(|e| Value::Exception(Box::new(e))).collect())
                 .unwrap_or_default();
             Ok(Value::Tuple(items))
         }
-        "subgroup" | "split" => {
-            Ok(Value::ExceptionMethod { method: attr_name.to_string(), exception: exc.clone() })
-        }
+        "subgroup" | "split" => Ok(Value::ExceptionMethod {
+            method: attr_name.to_string(),
+            exception: Box::new(exc.clone()),
+        }),
         // `args` is the truth — ExceptionValue::new defaults it from
         // the message (empty message → empty tuple, non-empty →
         // (message,)) so this never needs a synthesis fallback. Multi-
         // arg constructors override via with_args at construction.
         "args" => Ok(Value::Tuple(exc.args.clone())),
         "__cause__" | "__context__" => {
-            Ok(exc.cause.as_ref().map_or(Value::None, |cause| Value::Exception((**cause).clone())))
+            Ok(exc.cause.as_ref().map_or(Value::None, |cause| Value::Exception(cause.clone())))
         }
         "message" => Ok(Value::String(exc.message.clone().into())),
         _ => Err(attribute_error(&exc.type_name, attr_name)),

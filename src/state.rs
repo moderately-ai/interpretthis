@@ -366,14 +366,13 @@ impl InterpreterState {
 }
 
 /// Per-`Value` enum slot footprint, including the discriminant. Set
-/// from the post-boxing layout: heaviest variants are Dict / Counter /
-/// Deque / Instance (~48 B inline) and `EnumMember` (~56 B inline);
-/// the enum sizes to fit those plus the 8 B discriminant. Used by
-/// [`estimate_value_size`] to account for the per-slot overhead in
-/// every container — without it, a `[Value::Int(0); 1000]` reports
-/// 8_000 B (payload only) when its actual heap footprint is
-/// ~64_000 B + the `Vec` header.
-const VALUE_SLOT_BYTES: usize = 64;
+/// from the boxed-exception layout (`size_of::<Value>() == 80` on the
+/// supported 64-bit targets). Used by [`estimate_value_size`] to
+/// account for the per-slot overhead in every container — without it,
+/// a `[Value::Int(0); 1000]` reports 8_000 B (payload only) when its
+/// actual heap footprint is dominated by the enum slots plus the `Vec`
+/// header.
+const VALUE_SLOT_BYTES: usize = 80;
 
 /// `String` header footprint: pointer + length + capacity = 3 × `usize`
 /// on a 64-bit target. `CompactString` matches the layout exactly —
