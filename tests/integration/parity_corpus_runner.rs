@@ -223,11 +223,10 @@ fn usable_python() -> Option<String> {
     RESOLVED
         .get_or_init(|| {
             for candidate in ["python3.12", "python3"] {
-                if let Some((major, minor)) = probe_version(candidate)
-                    && major == 3
-                    && minor == 12
-                {
-                    return Some(candidate.to_string());
+                if let Some((major, minor)) = probe_version(candidate) {
+                    if major == 3 && minor == 12 {
+                        return Some(candidate.to_string());
+                    }
                 }
             }
             None

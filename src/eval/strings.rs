@@ -453,18 +453,18 @@ pub fn str_format(template: &str, args: &[Value], kwargs: &IndexMap<String, Valu
     let mut auto_index: usize = 0;
     let mut i = 0;
     while i < chars.len() {
-        match chars[i] {
-            '{' if chars.get(i + 1) == Some(&'{') => {
+        match chars.get(i) {
+            Some('{') if chars.get(i + 1) == Some(&'{') => {
                 out.push('{');
                 i += 2;
             }
-            '}' if chars.get(i + 1) == Some(&'}') => {
+            Some('}') if chars.get(i + 1) == Some(&'}') => {
                 out.push('}');
                 i += 2;
             }
-            '{' => {
+            Some('{') => {
                 let mut j = i + 1;
-                while j < chars.len() && chars[j] != '}' {
+                while j < chars.len() && chars.get(j) != Some(&'}') {
                     j += 1;
                 }
                 if j >= chars.len() {
@@ -482,16 +482,17 @@ pub fn str_format(template: &str, args: &[Value], kwargs: &IndexMap<String, Valu
                 )?));
                 i = j + 1;
             }
-            '}' => {
+            Some('}') => {
                 return Err(InterpreterError::ValueError(
                     "Single '}' encountered in format string".into(),
                 )
                 .into());
             }
-            other => {
-                out.push(other);
+            Some(other) => {
+                out.push(*other);
                 i += 1;
             }
+            None => break,
         }
     }
     Ok(Value::String(out.into()))

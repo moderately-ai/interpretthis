@@ -189,10 +189,6 @@ pub(crate) fn dispatch_string_method(s: &str, method: &str, args: &[Value]) -> E
         // case-folding (eg. ß → ss) is a separate refinement we
         // don't currently model — to_lowercase already handles the
         // vast majority of customer text.
-        #[expect(
-            clippy::match_same_arms,
-            reason = "casefold and lower diverge for non-ASCII Unicode (e.g. ß); kept as separate arms so the divergence can be filled in without re-splitting"
-        )]
         "casefold" => Ok(Value::String(s.to_lowercase().into())),
         "encode" => {
             // CPython: str.encode(encoding="utf-8", errors="strict").

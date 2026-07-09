@@ -461,16 +461,20 @@ fn value_to_iterable(val: &Value) -> Result<Vec<Value>, EvalError> {
         Value::Range { start, stop, step } => {
             let mut items = Vec::new();
             let mut i = *start;
-            if *step > 0 {
-                while i < *stop {
-                    items.push(Value::Int(i));
-                    i += step;
+            match (*step).cmp(&0) {
+                std::cmp::Ordering::Greater => {
+                    while i < *stop {
+                        items.push(Value::Int(i));
+                        i += step;
+                    }
                 }
-            } else if *step < 0 {
-                while i > *stop {
-                    items.push(Value::Int(i));
-                    i += step;
+                std::cmp::Ordering::Less => {
+                    while i > *stop {
+                        items.push(Value::Int(i));
+                        i += step;
+                    }
                 }
+                std::cmp::Ordering::Equal => {}
             }
             Ok(items)
         }
