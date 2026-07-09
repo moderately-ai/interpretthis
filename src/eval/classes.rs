@@ -1392,7 +1392,6 @@ pub async fn super_method_call(
 /// `__init__` lookup. Returns the first matching `(defining_class,
 /// FunctionDef)` so callers can build the per-frame `__class__` binding
 /// for zero-arg `super()`.
-
 /// Method or classmethod named `method_name` on `class_name`'s MRO.
 fn lookup_method_or_classmethod(
     state: &InterpreterState,
