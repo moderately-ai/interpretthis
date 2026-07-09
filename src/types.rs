@@ -120,11 +120,11 @@ pub struct TypeObject {
     /// `TypeError("'<name>' object has no attribute '<name>' to set")`
     /// via the dispatcher.
     pub set_attr_slot: Option<SetAttrSlot>,
-    /// Method-table marker: when true, `method_dispatch` owns a per-type
-    /// method table for this builtin (str/list/dict/…). Kept as a bool
-    /// rather than an fn pointer so `TypeObject` stays free of the
-    /// `eval::functions` dependency cycle; the tables themselves live in
-    /// `method_dispatch::METHODS_TABLE` keyed by [`TypeObject::name`].
+    /// Method-table marker: when true, `method_dispatch` has a
+    /// per-type handler in its fn-pointer table (see
+    /// `methods_handler_for`). Kept as a bool rather than an fn pointer
+    /// so `TypeObject` stays free of the `eval::functions` dependency
+    /// cycle.
     pub has_methods_table: bool,
 }
 

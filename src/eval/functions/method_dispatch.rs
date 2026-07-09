@@ -165,11 +165,261 @@ pub(super) async fn resolve_method_kwargs(
     Ok(resolved)
 }
 
+// ---------------------------------------------------------------------------
+// Per-type method handlers (fn-pointer table)
+// ---------------------------------------------------------------------------
+
+/// Signature of a builtin method-table entry.
+type MethodsHandler =
+    fn(&mut Value, &str, &[Value], &IndexMap<String, Value>) -> Result<MethodOutcome, EvalError>;
+
+fn str_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::String(s) = obj else {
+        return Err(type_mismatch("str"));
+    };
+    methods::str::dispatch_string_method(s, method, args, kwargs).map(MethodOutcome::pure)
+}
+
+fn list_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::List(items) = obj else {
+        return Err(type_mismatch("list"));
+    };
+    let mut guard = items.lock();
+    methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
+}
+
+fn dict_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Dict(map) = obj else {
+        return Err(type_mismatch("dict"));
+    };
+    methods::dict::dispatch_dict_method(map, method, args, kwargs)
+}
+
+fn counter_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Counter(map) = obj else {
+        return Err(type_mismatch("Counter"));
+    };
+    methods::counter::dispatch_counter_method(map, method, args, kwargs)
+}
+
+fn deque_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Deque { items, maxlen } = obj else {
+        return Err(type_mismatch("deque"));
+    };
+    methods::deque::dispatch_deque_method(items, maxlen.as_ref(), method, args, kwargs)
+}
+
+fn defaultdict_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::DefaultDict(data) = obj else {
+        return Err(type_mismatch("defaultdict"));
+    };
+    methods::dict::dispatch_dict_method(&mut data.items, method, args, kwargs)
+}
+
+fn set_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Set(items) = obj else {
+        return Err(type_mismatch("set"));
+    };
+    methods::set::dispatch_set_method(items, method, args, kwargs)
+}
+
+fn tuple_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Tuple(items) = obj else {
+        return Err(type_mismatch("tuple"));
+    };
+    methods::tuple::dispatch_tuple_method(items, method, args, kwargs).map(MethodOutcome::pure)
+}
+
+fn int_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    match obj {
+        Value::Int(i) => {
+            methods::int::dispatch_int_method(*i, method, args, kwargs).map(MethodOutcome::pure)
+        }
+        Value::BigInt(i) => match i64::try_from(i.as_ref()) {
+            Ok(n) => {
+                methods::int::dispatch_int_method(n, method, args, kwargs).map(MethodOutcome::pure)
+            }
+            Err(_) => Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                "OverflowError",
+                "Python int too large to convert to C long",
+            ))),
+        },
+        _ => Err(type_mismatch("int")),
+    }
+}
+
+fn bytes_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Bytes(b) = obj else {
+        return Err(type_mismatch("bytes"));
+    };
+    methods::bytes::dispatch_bytes_method(b, method, args, kwargs).map(MethodOutcome::pure)
+}
+
+fn date_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Date(date) = obj else {
+        return Err(type_mismatch("date"));
+    };
+    crate::eval::modules::datetime::dispatch_date_method(*date, method, args, kwargs)
+        .map(MethodOutcome::pure)
+}
+
+fn datetime_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::DateTime { dt, tz_offset_secs } = obj else {
+        return Err(type_mismatch("datetime"));
+    };
+    crate::eval::modules::datetime::dispatch_datetime_method(
+        *dt,
+        *tz_offset_secs,
+        method,
+        args,
+        kwargs,
+    )
+    .map(MethodOutcome::pure)
+}
+
+fn time_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Time(t) = obj else {
+        return Err(type_mismatch("time"));
+    };
+    crate::eval::modules::datetime::dispatch_time_method(*t, method, args, kwargs)
+        .map(MethodOutcome::pure)
+}
+
+fn timedelta_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::TimeDelta(micros) = obj else {
+        return Err(type_mismatch("timedelta"));
+    };
+    crate::eval::modules::datetime::dispatch_timedelta_method(*micros, method, args, kwargs)
+        .map(MethodOutcome::pure)
+}
+
+fn re_match_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::ReMatch(m) = obj else {
+        return Err(type_mismatch("re.Match"));
+    };
+    crate::eval::modules::re::dispatch_match_method(m, method, args, kwargs)
+        .map(MethodOutcome::pure)
+}
+
+fn hash_digest_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::HashDigest { algo, bytes } = obj else {
+        return Err(type_mismatch("HASH"));
+    };
+    crate::eval::modules::hashlib::dispatch_hash_method(algo, bytes, method, args, kwargs)
+        .map(MethodOutcome::pure)
+}
+
+fn type_mismatch(expected: &str) -> EvalError {
+    InterpreterError::TypeError(format!("internal: method table expected {expected}")).into()
+}
+
+/// Look up the method-table handler for `obj`'s runtime type.
+fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
+    match obj {
+        Value::String(_) => Some(str_methods),
+        Value::List(_) => Some(list_methods),
+        Value::Dict(_) => Some(dict_methods),
+        Value::Counter(_) => Some(counter_methods),
+        Value::Deque { .. } => Some(deque_methods),
+        Value::DefaultDict(_) => Some(defaultdict_methods),
+        Value::Set(_) => Some(set_methods),
+        Value::Tuple(_) => Some(tuple_methods),
+        Value::Int(_) | Value::BigInt(_) => Some(int_methods),
+        Value::Bytes(_) => Some(bytes_methods),
+        Value::Date(_) => Some(date_methods),
+        Value::DateTime { .. } => Some(datetime_methods),
+        Value::Time(_) => Some(time_methods),
+        Value::TimeDelta(_) => Some(timedelta_methods),
+        Value::ReMatch(_) => Some(re_match_methods),
+        Value::HashDigest { .. } => Some(hash_digest_methods),
+        _ => None,
+    }
+}
+
 /// Dispatch a method call against a mutable receiver slot.
 ///
-/// Per-type method tables live here (keyed by the builtin type name from
-/// [`crate::types::type_name_of`]); `TypeObject::has_methods_table` marks
-/// which builtins participate. Read-only methods return a fresh value
+/// Table-driven: each method-bearing builtin has a dedicated handler
+/// (see [`methods_handler_for`]). Read-only methods return a fresh value
 /// (`mem_delta == 0`); mutating methods modify `obj` in place and report
 /// the byte delta. `args` / `kwargs` must already be proxy-resolved
 /// (see [`resolve_method_args`] / [`resolve_method_kwargs`]).
@@ -179,98 +429,19 @@ pub(super) fn dispatch_method(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
-    // Prefer TypeObject::has_methods_table when the value is on the
-    // type-object table; module-backed variants (ReMatch, HashDigest
-    // already flagged, Date*) still dispatch via the match below.
-    match obj {
-        Value::String(s) => {
-            methods::str::dispatch_string_method(s, method, args, kwargs).map(MethodOutcome::pure)
-        }
-        Value::List(items) => {
-            // Lock the shared list for the duration of the method call —
-            // list methods (`append`, `pop`, `sort`, `reverse`, slice
-            // assigns, …) all need exclusive mutation over the inner Vec.
-            // The guard's scope is bounded by the dispatch return.
-            let mut guard = items.lock();
-            methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
-        }
-        Value::Dict(map) => methods::dict::dispatch_dict_method(map, method, args, kwargs),
-        Value::Counter(map) => methods::counter::dispatch_counter_method(map, method, args, kwargs),
-        Value::Deque { items, maxlen } => {
-            methods::deque::dispatch_deque_method(items, maxlen.as_ref(), method, args, kwargs)
-        }
-        Value::DefaultDict(data) => {
-            // DefaultDict shares dict's method surface for everything
-            // except __missing__ (which is the get-path, not a method).
-            // Route through dispatch_dict_method against the backing
-            // map.
-            methods::dict::dispatch_dict_method(&mut data.items, method, args, kwargs)
-        }
-        Value::Set(items) => methods::set::dispatch_set_method(items, method, args, kwargs),
-        Value::Tuple(items) => methods::tuple::dispatch_tuple_method(items, method, args, kwargs)
-            .map(MethodOutcome::pure),
-        Value::Date(date) => {
-            crate::eval::modules::datetime::dispatch_date_method(*date, method, args, kwargs)
-                .map(MethodOutcome::pure)
-        }
-        Value::DateTime { dt, tz_offset_secs } => {
-            crate::eval::modules::datetime::dispatch_datetime_method(
-                *dt,
-                *tz_offset_secs,
-                method,
-                args,
-                kwargs,
-            )
-            .map(MethodOutcome::pure)
-        }
-        Value::Time(t) => {
-            crate::eval::modules::datetime::dispatch_time_method(*t, method, args, kwargs)
-                .map(MethodOutcome::pure)
-        }
-        Value::TimeDelta(micros) => {
-            crate::eval::modules::datetime::dispatch_timedelta_method(*micros, method, args, kwargs)
-                .map(MethodOutcome::pure)
-        }
-        Value::ReMatch(m) => {
-            crate::eval::modules::re::dispatch_match_method(m, method, args, kwargs)
-                .map(MethodOutcome::pure)
-        }
-        Value::HashDigest { algo, bytes } => {
-            crate::eval::modules::hashlib::dispatch_hash_method(algo, bytes, method, args, kwargs)
-                .map(MethodOutcome::pure)
-        }
-        Value::Int(i) => {
-            methods::int::dispatch_int_method(*i, method, args, kwargs).map(MethodOutcome::pure)
-        }
-        Value::BigInt(i) => {
-            // int methods that need i64 (bit_length, etc.) narrow or error.
-            match i64::try_from(i.as_ref()) {
-                Ok(n) => methods::int::dispatch_int_method(n, method, args, kwargs)
-                    .map(MethodOutcome::pure),
-                Err(_) => Err(EvalError::Exception(crate::value::ExceptionValue::new(
-                    "OverflowError",
-                    "Python int too large to convert to C long",
-                ))),
-            }
-        }
-        Value::Bytes(b) => {
-            methods::bytes::dispatch_bytes_method(b, method, args, kwargs).map(MethodOutcome::pure)
-        }
-        // A function/lambda stored in a variable then called as `f.attr()` lands
-        // here, as does any other non-method-bearing type.
-        other => {
-            debug_assert!(
-                !crate::types::type_has_methods_table(other),
-                "type {} claims has_methods_table but has no match arm",
-                crate::types::type_name_of(other)
-            );
-            Err(InterpreterError::AttributeError(format!(
-                "'{}' object has no attribute '{method}'",
-                other.type_name()
-            ))
-            .into())
-        }
-    }
+    let Some(handler) = methods_handler_for(obj) else {
+        debug_assert!(
+            !crate::types::type_has_methods_table(obj),
+            "type {} claims has_methods_table but has no handler",
+            crate::types::type_name_of(obj)
+        );
+        return Err(InterpreterError::AttributeError(format!(
+            "'{}' object has no attribute '{method}'",
+            obj.type_name()
+        ))
+        .into());
+    };
+    handler(obj, method, args, kwargs)
 }
 
 /// Fetch the single required positional argument for a method, with a Python-

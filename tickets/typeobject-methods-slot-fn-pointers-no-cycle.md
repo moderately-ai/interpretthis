@@ -1,7 +1,7 @@
 ---
 id: typeobject-methods-slot-fn-pointers-no-cycle
 title: "TypeObject methods_slot: real fn-pointer tables without types↔eval cycle"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]
