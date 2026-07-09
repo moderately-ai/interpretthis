@@ -11,14 +11,28 @@
 //! used methods (translate tables, encoding aliases) are added on
 //! demand pinned by parity probes.
 
-use super::super::{to_index, to_len_i64, value_to_i64};
+use indexmap::IndexMap;
+
+use super::super::{bind_method_params, reject_kwargs, to_index, to_len_i64, value_to_i64};
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
     eval::control_flow::iterate_value,
     value::{ExceptionValue, Value, shared_list},
 };
 
-pub(crate) fn dispatch_string_method(s: &str, method: &str, args: &[Value]) -> EvalResult {
+pub(crate) fn dispatch_string_method(
+    s: &str,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> EvalResult {
+    // CPython 3.12 keyword-accepting str methods (others are positional-only
+    // and raise TypeError on kwargs — never silently drop).
+    // See CONFORMANCE.md#method-call-kwargs.
+    if !kwargs.is_empty() && !matches!(method, "split" | "rsplit" | "encode" | "expandtabs") {
+        reject_kwargs(method, kwargs)?;
+    }
+
     match method {
         "upper" => Ok(Value::String(s.to_uppercase().into())),
         "lower" => Ok(Value::String(s.to_lowercase().into())),
@@ -50,49 +64,51 @@ pub(crate) fn dispatch_string_method(s: &str, method: &str, args: &[Value]) -> E
             }
         }
         "split" => {
-            if args.is_empty() {
-                // Split on whitespace
-                let parts: Vec<Value> =
-                    s.split_whitespace().map(|p| Value::String(p.into())).collect();
-                Ok(Value::List(shared_list(parts)))
-            } else if let Value::String(sep) = &args[0] {
-                let maxsplit =
-                    if args.len() >= 2 { value_to_i64(&args[1]).unwrap_or(-1) } else { -1 };
-                let parts: Vec<Value> = if maxsplit < 0 {
-                    s.split(sep.as_str()).map(|p| Value::String(p.into())).collect()
-                } else {
-                    let n = to_index(maxsplit + 1)?;
-                    s.splitn(n, sep.as_str()).map(|p| Value::String(p.into())).collect()
-                };
-                Ok(Value::List(shared_list(parts)))
-            } else {
-                let parts: Vec<Value> =
-                    s.split_whitespace().map(|p| Value::String(p.into())).collect();
-                Ok(Value::List(shared_list(parts)))
+            let bound = bind_method_params(method, args, kwargs, &["sep", "maxsplit"])?;
+            let maxsplit = bound[1].as_ref().map_or(-1, |v| value_to_i64(v).unwrap_or(-1));
+            match &bound[0] {
+                None | Some(Value::None) => {
+                    Ok(Value::List(shared_list(split_whitespace_max(s, maxsplit)?)))
+                }
+                Some(Value::String(sep)) => {
+                    let parts: Vec<Value> = if maxsplit < 0 {
+                        s.split(sep.as_str()).map(|p| Value::String(p.into())).collect()
+                    } else {
+                        let n = to_index(maxsplit + 1)?;
+                        s.splitn(n, sep.as_str()).map(|p| Value::String(p.into())).collect()
+                    };
+                    Ok(Value::List(shared_list(parts)))
+                }
+                Some(_) => {
+                    Err(InterpreterError::TypeError("must be str or None, not other type".into())
+                        .into())
+                }
             }
         }
         "rsplit" => {
-            if args.is_empty() {
-                let parts: Vec<Value> =
-                    s.split_whitespace().map(|p| Value::String(p.into())).collect();
-                Ok(Value::List(shared_list(parts)))
-            } else if let Value::String(sep) = &args[0] {
-                let maxsplit =
-                    if args.len() >= 2 { value_to_i64(&args[1]).unwrap_or(-1) } else { -1 };
-                let parts: Vec<Value> = if maxsplit < 0 {
-                    s.rsplit(sep.as_str()).map(|p| Value::String(p.into())).collect()
-                } else {
-                    let n = to_index(maxsplit + 1)?;
-                    let mut parts: Vec<Value> =
-                        s.rsplitn(n, sep.as_str()).map(|p| Value::String(p.into())).collect();
-                    parts.reverse();
-                    parts
-                };
-                Ok(Value::List(shared_list(parts)))
-            } else {
-                Ok(Value::List(shared_list(
-                    s.split_whitespace().map(|p| Value::String(p.into())).collect(),
-                )))
+            let bound = bind_method_params(method, args, kwargs, &["sep", "maxsplit"])?;
+            let maxsplit = bound[1].as_ref().map_or(-1, |v| value_to_i64(v).unwrap_or(-1));
+            match &bound[0] {
+                None | Some(Value::None) => {
+                    Ok(Value::List(shared_list(rsplit_whitespace_max(s, maxsplit)?)))
+                }
+                Some(Value::String(sep)) => {
+                    let parts: Vec<Value> = if maxsplit < 0 {
+                        // CPython rsplit with no max returns left-to-right order.
+                        s.split(sep.as_str()).map(|p| Value::String(p.into())).collect()
+                    } else {
+                        let n = to_index(maxsplit + 1)?;
+                        let mut parts: Vec<Value> =
+                            s.rsplitn(n, sep.as_str()).map(|p| Value::String(p.into())).collect();
+                        parts.reverse();
+                        parts
+                    };
+                    Ok(Value::List(shared_list(parts)))
+                }
+                Some(_) => {
+                    Err(InterpreterError::TypeError("must be str or None, not other type".into())
+                        .into())
+                }
             }
         }
         "join" => {
@@ -119,6 +135,7 @@ pub(crate) fn dispatch_string_method(s: &str, method: &str, args: &[Value]) -> E
             Ok(Value::String(str_parts.join(s).into()))
         }
         "replace" => {
+            // CPython: str.replace(self, old, new, count=-1, /) — positional-only.
             if args.len() < 2 || args.len() > 3 {
                 return Err(
                     InterpreterError::TypeError("replace() takes 2 or 3 arguments".into()).into()
@@ -195,10 +212,13 @@ pub(crate) fn dispatch_string_method(s: &str, method: &str, args: &[Value]) -> E
             // We only support utf-8 (the default); other encodings
             // would need a proper codec table, so they fall through
             // to TypeError matching CPython's "unknown encoding".
-            let encoding = match args.first() {
+            // `errors` is accepted for signature parity and ignored when
+            // encoding succeeds (only strict path is implemented).
+            let bound = bind_method_params(method, args, kwargs, &["encoding", "errors"])?;
+            let encoding = match &bound[0] {
                 Some(Value::String(name)) => name.as_str(),
                 None => "utf-8",
-                _ => {
+                Some(_) => {
                     return Err(InterpreterError::TypeError(
                         "encode() argument must be str".into(),
                     )
@@ -218,7 +238,8 @@ pub(crate) fn dispatch_string_method(s: &str, method: &str, args: &[Value]) -> E
             // CPython default tabsize is 8. Each tab character expands
             // to enough spaces to reach the next multiple of tabsize.
             // Newlines reset the column counter — matching CPython.
-            let tabsize = match args.first() {
+            let bound = bind_method_params(method, args, kwargs, &["tabsize"])?;
+            let tabsize = match &bound[0] {
                 Some(Value::Int(n)) => usize::try_from((*n).max(0)).unwrap_or(0),
                 Some(Value::Bool(b)) => usize::from(*b),
                 Some(_) => {
@@ -589,4 +610,69 @@ pub(crate) fn dispatch_string_method(s: &str, method: &str, args: &[Value]) -> E
         ))
         .into()),
     }
+}
+
+/// Whitespace split with optional maxsplit, preserving the remainder of the
+/// original string (CPython: `"a  b  c".split(maxsplit=1) == ['a', 'b  c']`).
+fn split_whitespace_max(s: &str, maxsplit: i64) -> Result<Vec<Value>, EvalError> {
+    if maxsplit == 0 {
+        return Ok(vec![Value::String(s.into())]);
+    }
+    let mut parts = Vec::new();
+    let mut rest = s.trim_start();
+    let mut splits = 0i64;
+    while !rest.is_empty() {
+        if maxsplit >= 0 && splits >= maxsplit {
+            parts.push(Value::String(rest.into()));
+            break;
+        }
+        if let Some(ws) = rest.find(char::is_whitespace) {
+            parts.push(Value::String(rest[..ws].into()));
+            rest = rest[ws..].trim_start();
+            splits += 1;
+        } else {
+            parts.push(Value::String(rest.into()));
+            break;
+        }
+    }
+    if parts.is_empty() && s.chars().all(char::is_whitespace) {
+        // Empty / all-whitespace → empty list (CPython).
+        return Ok(parts);
+    }
+    Ok(parts)
+}
+
+fn rsplit_whitespace_max(s: &str, maxsplit: i64) -> Result<Vec<Value>, EvalError> {
+    if maxsplit < 0 {
+        return Ok(s.split_whitespace().map(|p| Value::String(p.into())).collect());
+    }
+    if maxsplit == 0 {
+        return Ok(vec![Value::String(s.into())]);
+    }
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = words.len();
+    let keep = usize::try_from(maxsplit).unwrap_or(n).min(n);
+    if keep >= n {
+        return Ok(words.into_iter().map(|p| Value::String(p.into())).collect());
+    }
+    // Remainder is everything before the last `keep` words, preserving
+    // original internal whitespace (CPython rsplit semantics).
+    let target_word = words[n - keep];
+    let mut search_from = 0usize;
+    for w in &words[..n - keep] {
+        let idx = s[search_from..].find(w).map(|i| search_from + i).unwrap_or(search_from);
+        search_from = idx + w.len();
+    }
+    let rem_end =
+        s[search_from..].find(target_word).map(|i| search_from + i).unwrap_or(search_from);
+    let remainder = s[..rem_end].trim_end();
+    let mut parts = Vec::with_capacity(keep + 1);
+    parts.push(Value::String(remainder.into()));
+    for w in &words[n - keep..] {
+        parts.push(Value::String((*w).into()));
+    }
+    Ok(parts)
 }

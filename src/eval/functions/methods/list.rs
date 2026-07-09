@@ -6,11 +6,13 @@
 //! the in-place receiver model (`MethodOutcome::grew`/`shrank` returns
 //! how the caller's memory tracker should adjust).
 //!
-//! `list.sort(key=)` is intercepted at `eval_call` because it takes
-//! keyword-only args that this positional dispatch path doesn't
-//! carry — see the `"sort"` comment below.
+//! `list.sort(key=)` is intercepted at `eval_call` because it needs
+//! async key= dispatch. Most list methods are positional-only in
+//! CPython 3.12 — unexpected kwargs raise TypeError.
 
-use super::super::{MethodOutcome, arg1, to_index, to_len_i64, value_to_i64};
+use indexmap::IndexMap;
+
+use super::super::{MethodOutcome, arg1, reject_kwargs, to_index, to_len_i64, value_to_i64};
 use crate::{
     error::{EvalError, InterpreterError},
     eval::control_flow::iterate_value,
@@ -22,8 +24,13 @@ pub(crate) fn dispatch_list_method(
     items: &mut Vec<Value>,
     method: &str,
     args: &[Value],
+    kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
     use crate::eval::operations::values_equal_pub;
+
+    // CPython 3.12 list methods are positional-only (except sort, handled
+    // in eval_call). Reject kwargs so they are never silently dropped.
+    reject_kwargs(method, kwargs)?;
 
     match method {
         // `list.copy()` is a shallow copy: new SharedList, same inner elements.
@@ -112,9 +119,7 @@ pub(crate) fn dispatch_list_method(
             Ok(MethodOutcome::shrank(Value::None, estimate_value_size(&removed)))
         }
         // `list.sort()` is intercepted at `eval_call` because it takes
-        // keyword-only args (`key=`, `reverse=`) that this positional
-        // dispatch path doesn't carry. Don't reintroduce a sync arm
-        // here — the kwarg-less form is the gap, not a feature.
+        // keyword-only args (`key=`, `reverse=`) and needs async key=.
         "reverse" => {
             items.reverse();
             Ok(MethodOutcome::pure(Value::None))

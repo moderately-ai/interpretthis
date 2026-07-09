@@ -19,7 +19,9 @@ pub(crate) fn dispatch_set_method(
     items: &mut Vec<Value>,
     method: &str,
     args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     // Sets are stored as a `Vec` (Value is not `Hash`), so membership is a
     // linear scan keyed on `value_to_key`.
     let contains = |items: &[Value], probe: &Value| {

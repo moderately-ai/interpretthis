@@ -37,7 +37,9 @@ pub use definitions::{build_function_params, eval_function_def, eval_lambda_def}
 // Re-exports from dispatch
 pub(crate) use dispatch::{call_lambda, call_user_function, call_value_as_function};
 // Re-exports from method_dispatch
-pub(crate) use method_dispatch::{CallArgs, MethodOutcome, arg1};
+pub(crate) use method_dispatch::{
+    CallArgs, MethodOutcome, arg1, bind_method_params, reject_kwargs, require_param,
+};
 pub(crate) use params::{bind_params, evaluate_param_defaults, execute_body};
 
 /// Convert a Python-visible `i64` index into a `usize` slot after caller-side

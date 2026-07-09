@@ -15,7 +15,13 @@ use crate::{
 /// Dispatch a method call on an `int` receiver. CPython exposes
 /// `bit_length`, `bit_count`, `to_bytes`, `from_bytes`, `as_integer_ratio`,
 /// `conjugate`, `real`, `imag` — wire the commonly-used ones.
-pub(crate) fn dispatch_int_method(i: i64, method: &str, _args: &[Value]) -> EvalResult {
+pub(crate) fn dispatch_int_method(
+    i: i64,
+    method: &str,
+    _args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "bit_length" => {
             // CPython: 0.bit_length() == 0; -42.bit_length() == 6

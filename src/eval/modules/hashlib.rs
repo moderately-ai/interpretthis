@@ -49,7 +49,14 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
 }
 
 /// Dispatch a method on a `HashDigest` value.
-pub fn dispatch_hash_method(algo: &str, bytes: &[u8], method: &str, _args: &[Value]) -> EvalResult {
+pub fn dispatch_hash_method(
+    algo: &str,
+    bytes: &[u8],
+    method: &str,
+    _args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "hexdigest" => Ok(Value::String(hex::encode(bytes).into())),
         "digest" => Ok(Value::Bytes(bytes.to_vec())),

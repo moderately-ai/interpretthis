@@ -235,7 +235,13 @@ fn group_text(caps: &regex::Captures<'_>, index: usize) -> compact_str::CompactS
 // ---------------------------------------------------------------------------
 
 /// Dispatch a method call on a `re.Match` value.
-pub fn dispatch_match_method(m: &MatchValue, method: &str, args: &[Value]) -> EvalResult {
+pub fn dispatch_match_method(
+    m: &MatchValue,
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "group" => match args.len() {
             0 => group_value(m, 0),

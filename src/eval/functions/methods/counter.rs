@@ -22,11 +22,12 @@ pub(crate) fn dispatch_counter_method(
     map: &mut IndexMap<ValueKey, Value>,
     method: &str,
     args: &[Value],
+    kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
     match method {
         // Inherited from dict — same shape, same outcome.
         "keys" | "values" | "items" | "get" | "copy" | "pop" | "setdefault" | "clear" => {
-            let outcome = dict::dispatch_dict_method(map, method, args)?;
+            let outcome = dict::dispatch_dict_method(map, method, args, kwargs)?;
             // `copy` of a Counter returns a Counter, not a dict — fix
             // up the return value here so callers see the right type.
             let value = if method == "copy" {
@@ -43,6 +44,7 @@ pub(crate) fn dispatch_counter_method(
         // sorted by count descending (stable for ties). `n=None` or
         // absent returns all entries.
         "most_common" => {
+            crate::eval::functions::reject_kwargs(method, kwargs)?;
             let mut entries: Vec<(ValueKey, i64)> = map
                 .iter()
                 .map(|(k, v)| {
@@ -79,6 +81,7 @@ pub(crate) fn dispatch_counter_method(
         // an iterator; we materialise a list (consistent with the rest
         // of the interpreter's eager iteration model).
         "elements" => {
+            crate::eval::functions::reject_kwargs(method, kwargs)?;
             let mut out: Vec<Value> = Vec::new();
             for (key, value) in map.iter() {
                 let n = match value {
@@ -98,6 +101,7 @@ pub(crate) fn dispatch_counter_method(
         // `c.subtract(other)` decrements counts. Unlike +/- which
         // keep_positive, subtract allows zero and negative counts.
         "subtract" => {
+            crate::eval::functions::reject_kwargs(method, kwargs)?;
             counter_apply_in_place(map, args.first(), |cur, delta| cur - delta)?;
             Ok(MethodOutcome::pure(Value::None))
         }
@@ -105,11 +109,13 @@ pub(crate) fn dispatch_counter_method(
         // which overwrites). Same semantics as Counter(iter) on first
         // construction.
         "update" => {
+            crate::eval::functions::reject_kwargs(method, kwargs)?;
             counter_apply_in_place(map, args.first(), |cur, delta| cur + delta)?;
             Ok(MethodOutcome::pure(Value::None))
         }
         // `c.total()` returns the sum of all counts.
         "total" => {
+            crate::eval::functions::reject_kwargs(method, kwargs)?;
             let total: i64 = map
                 .values()
                 .map(|v| match v {

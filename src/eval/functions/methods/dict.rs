@@ -8,7 +8,7 @@
 
 use indexmap::IndexMap;
 
-use super::super::{MethodOutcome, arg1};
+use super::super::{MethodOutcome, arg1, bind_method_params, reject_kwargs, require_param};
 use crate::{
     error::{EvalError, InterpreterError},
     eval::{literals::value_to_key, place},
@@ -20,24 +20,39 @@ pub(crate) fn dispatch_dict_method(
     map: &mut IndexMap<ValueKey, Value>,
     method: &str,
     args: &[Value],
+    kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
     match method {
-        "keys" => Ok(MethodOutcome::pure(Value::List(shared_list(
-            map.keys().map(ValueKey::to_value).collect(),
-        )))),
+        "keys" => {
+            reject_kwargs(method, kwargs)?;
+            Ok(MethodOutcome::pure(Value::List(shared_list(
+                map.keys().map(ValueKey::to_value).collect(),
+            ))))
+        }
         "values" => {
+            reject_kwargs(method, kwargs)?;
             Ok(MethodOutcome::pure(Value::List(shared_list(map.values().cloned().collect()))))
         }
-        "items" => Ok(MethodOutcome::pure(Value::List(shared_list(
-            map.iter().map(|(k, v)| Value::Tuple(vec![k.to_value(), v.clone()])).collect(),
-        )))),
+        "items" => {
+            reject_kwargs(method, kwargs)?;
+            Ok(MethodOutcome::pure(Value::List(shared_list(
+                map.iter().map(|(k, v)| Value::Tuple(vec![k.to_value(), v.clone()])).collect(),
+            ))))
+        }
         "get" => {
+            // CPython: dict.get(self, key, default=None, /) — positional-only.
+            reject_kwargs(method, kwargs)?;
             let key = value_to_key(arg1(method, args)?)?;
             let default = args.get(1).cloned().unwrap_or(Value::None);
             Ok(MethodOutcome::pure(map.get(&key).cloned().unwrap_or(default)))
         }
-        "copy" => Ok(MethodOutcome::pure(Value::Dict(map.clone()))),
+        "copy" => {
+            reject_kwargs(method, kwargs)?;
+            Ok(MethodOutcome::pure(Value::Dict(map.clone())))
+        }
         "pop" => {
+            // CPython: dict.pop(self, key, default=<unspecified>, /) — positional-only.
+            reject_kwargs(method, kwargs)?;
             let key = value_to_key(arg1(method, args)?)?;
             if let Some(val) = map.swap_remove(&key) {
                 let freed = estimate_key_size(&key) + estimate_value_size(&val);
@@ -50,27 +65,35 @@ pub(crate) fn dispatch_dict_method(
             Err(EvalError::Exception(ExceptionValue::key_error(key)))
         }
         "update" => {
-            let Some(arg) = args.first() else { return Ok(MethodOutcome::pure(Value::None)) };
-            let Value::Dict(new_entries) = arg else {
+            // CPython: update([other], **kwargs). `other` may be a mapping or
+            // omitted; kwargs always merge last (string keys).
+            if args.len() > 1 {
                 return Err(InterpreterError::TypeError(
-                    "dict.update() argument must be a dict".into(),
+                    "update() takes at most 1 positional argument".into(),
                 )
                 .into());
-            };
-            // Net delta: an overwrite changes only the value's size; a new key
-            // adds key + value. Computed precisely so the budget stays accurate.
+            }
             let mut delta = 0isize;
-            for (k, v) in new_entries.clone() {
-                let v_size = estimate_value_size(&v);
-                let entry_delta = map.insert(k.clone(), v).map_or_else(
-                    || place::to_isize(estimate_key_size(&k) + v_size),
-                    |old| place::size_delta(estimate_value_size(&old), v_size),
-                );
-                delta = delta.saturating_add(entry_delta);
+            if let Some(arg) = args.first() {
+                let Value::Dict(new_entries) = arg else {
+                    return Err(InterpreterError::TypeError(
+                        "dict.update() argument must be a dict".into(),
+                    )
+                    .into());
+                };
+                for (k, v) in new_entries.clone() {
+                    delta = delta.saturating_add(insert_entry(map, k, v));
+                }
+            }
+            for (k, v) in kwargs {
+                let key = ValueKey::String(k.clone().into());
+                delta = delta.saturating_add(insert_entry(map, key, v.clone()));
             }
             Ok(MethodOutcome { value: Value::None, mem_delta: delta })
         }
         "setdefault" => {
+            // CPython: dict.setdefault(self, key, default=None, /) — positional-only.
+            reject_kwargs(method, kwargs)?;
             let key = value_to_key(arg1(method, args)?)?;
             let default = args.get(1).cloned().unwrap_or(Value::None);
             if let Some(existing) = map.get(&key) {
@@ -82,6 +105,7 @@ pub(crate) fn dispatch_dict_method(
             Ok(MethodOutcome::grew(returned, entry_size))
         }
         "clear" => {
+            reject_kwargs(method, kwargs)?;
             let freed: usize =
                 map.iter().map(|(k, v)| estimate_key_size(k) + estimate_value_size(v)).sum();
             map.clear();
@@ -95,8 +119,10 @@ pub(crate) fn dispatch_dict_method(
         // CPython's plain dict raises AttributeError for
         // `.move_to_end`. See CONFORMANCE.md#ordereddict-on-dict.
         "move_to_end" => {
-            let key = value_to_key(arg1(method, args)?)?;
-            let last = args.get(1).is_none_or(Value::is_truthy);
+            // CPython OrderedDict.move_to_end accepts key=/last= kwargs.
+            let bound = bind_method_params(method, args, kwargs, &["key", "last"])?;
+            let key = value_to_key(require_param(method, &bound, 0, "key")?)?;
+            let last = bound[1].as_ref().is_none_or(Value::is_truthy);
             let Some((existing_key, val)) = map.shift_remove_entry(&key) else {
                 return Err(EvalError::Exception(ExceptionValue::key_error(key)));
             };
@@ -112,4 +138,12 @@ pub(crate) fn dispatch_dict_method(
         ))
         .into()),
     }
+}
+
+fn insert_entry(map: &mut IndexMap<ValueKey, Value>, k: ValueKey, v: Value) -> isize {
+    let v_size = estimate_value_size(&v);
+    map.insert(k.clone(), v).map_or_else(
+        || place::to_isize(estimate_key_size(&k) + v_size),
+        |old| place::size_delta(estimate_value_size(&old), v_size),
+    )
 }

@@ -14,7 +14,13 @@ use crate::{
 /// Dispatch a method call on a `bytes` receiver. CPython's full bytes
 /// API is large; we wire the common ones used by agent-emitted code
 /// (decode, hex, startswith/endswith, split, replace, find).
-pub(crate) fn dispatch_bytes_method(b: &[u8], method: &str, args: &[Value]) -> EvalResult {
+pub(crate) fn dispatch_bytes_method(
+    b: &[u8],
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "decode" => {
             // CPython: bytes.decode(encoding="utf-8", errors="strict")

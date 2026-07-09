@@ -1,7 +1,7 @@
 ---
 id: fix-method-call-kwargs-silently-dropped-on-builtin-methods
 title: "Fix: method-call kwargs silently dropped on builtin methods"
-status: ready
+status: done
 priority: p0
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

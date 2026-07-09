@@ -46,6 +46,81 @@ impl MethodOutcome {
     }
 }
 
+/// Reject any keyword arguments. Use for methods that take only positionals
+/// (or no args) when the caller passed kwargs — CPython raises TypeError
+/// rather than silently ignoring them.
+pub(crate) fn reject_kwargs(
+    method: &str,
+    kwargs: &IndexMap<String, Value>,
+) -> Result<(), EvalError> {
+    if let Some((name, _)) = kwargs.first() {
+        return Err(InterpreterError::TypeError(format!(
+            "{method}() got an unexpected keyword argument '{name}'"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Bind positional + keyword args onto named method parameters.
+///
+/// Returns one slot per `params` entry (`None` = not supplied). Enforces:
+/// - no more positionals than `params.len()`
+/// - no unknown kwargs
+/// - no argument supplied both positionally and by keyword
+///
+/// Callers decide which slots are required and supply defaults for the rest.
+pub(crate) fn bind_method_params(
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    params: &[&str],
+) -> Result<Vec<Option<Value>>, EvalError> {
+    if args.len() > params.len() {
+        return Err(InterpreterError::TypeError(format!(
+            "{method}() takes at most {} argument{} ({} given)",
+            params.len(),
+            if params.len() == 1 { "" } else { "s" },
+            args.len()
+        ))
+        .into());
+    }
+    let mut bound: Vec<Option<Value>> = params.iter().map(|_| None).collect();
+    for (i, arg) in args.iter().enumerate() {
+        bound[i] = Some(arg.clone());
+    }
+    for (name, value) in kwargs {
+        let Some(idx) = params.iter().position(|p| *p == name.as_str()) else {
+            return Err(InterpreterError::TypeError(format!(
+                "{method}() got an unexpected keyword argument '{name}'"
+            ))
+            .into());
+        };
+        if bound[idx].is_some() {
+            return Err(InterpreterError::TypeError(format!(
+                "{method}() got multiple values for argument '{name}'"
+            ))
+            .into());
+        }
+        bound[idx] = Some(value.clone());
+    }
+    Ok(bound)
+}
+
+/// Require a bound slot (positional or keyword) by index.
+pub(crate) fn require_param<'a>(
+    method: &str,
+    bound: &'a [Option<Value>],
+    idx: usize,
+    name: &str,
+) -> Result<&'a Value, EvalError> {
+    bound.get(idx).and_then(Option::as_ref).ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "{method}() missing required argument: '{name}'"
+        )))
+    })
+}
+
 /// Resolve lazy-proxy method arguments before dispatch. `join` and friends
 /// iterate collection items, so proxies one level inside a list/tuple argument
 /// are resolved too.
@@ -78,19 +153,32 @@ pub(super) async fn resolve_method_args(args: &[Value]) -> Result<Vec<Value>, Ev
     Ok(resolved_args)
 }
 
+/// Resolve lazy-proxy values nested in keyword arguments.
+pub(super) async fn resolve_method_kwargs(
+    kwargs: &IndexMap<String, Value>,
+) -> Result<IndexMap<String, Value>, EvalError> {
+    let mut resolved = IndexMap::with_capacity(kwargs.len());
+    for (k, v) in kwargs {
+        resolved.insert(k.clone(), resolve_proxy(v).await?);
+    }
+    Ok(resolved)
+}
+
 /// Dispatch a method call against a mutable receiver slot.
 ///
 /// Read-only methods return a fresh value (`mem_delta == 0`); mutating methods
-/// modify `obj` in place and report the byte delta. `args` must already be
-/// proxy-resolved (see [`resolve_method_args`]).
+/// modify `obj` in place and report the byte delta. `args` / `kwargs` must
+/// already be proxy-resolved (see [`resolve_method_args`] /
+/// [`resolve_method_kwargs`]).
 pub(super) fn dispatch_method(
     obj: &mut Value,
     method: &str,
     args: &[Value],
+    kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
     match obj {
         Value::String(s) => {
-            methods::str::dispatch_string_method(s, method, args).map(MethodOutcome::pure)
+            methods::str::dispatch_string_method(s, method, args, kwargs).map(MethodOutcome::pure)
         }
         Value::List(items) => {
             // Lock the shared list for the duration of the method call —
@@ -98,26 +186,25 @@ pub(super) fn dispatch_method(
             // assigns, …) all need exclusive mutation over the inner Vec.
             // The guard's scope is bounded by the dispatch return.
             let mut guard = items.lock();
-            methods::list::dispatch_list_method(&mut guard, method, args)
+            methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
         }
-        Value::Dict(map) => methods::dict::dispatch_dict_method(map, method, args),
-        Value::Counter(map) => methods::counter::dispatch_counter_method(map, method, args),
+        Value::Dict(map) => methods::dict::dispatch_dict_method(map, method, args, kwargs),
+        Value::Counter(map) => methods::counter::dispatch_counter_method(map, method, args, kwargs),
         Value::Deque { items, maxlen } => {
-            methods::deque::dispatch_deque_method(items, maxlen.as_ref(), method, args)
+            methods::deque::dispatch_deque_method(items, maxlen.as_ref(), method, args, kwargs)
         }
         Value::DefaultDict(data) => {
             // DefaultDict shares dict's method surface for everything
             // except __missing__ (which is the get-path, not a method).
             // Route through dispatch_dict_method against the backing
             // map.
-            methods::dict::dispatch_dict_method(&mut data.items, method, args)
+            methods::dict::dispatch_dict_method(&mut data.items, method, args, kwargs)
         }
-        Value::Set(items) => methods::set::dispatch_set_method(items, method, args),
-        Value::Tuple(items) => {
-            methods::tuple::dispatch_tuple_method(items, method, args).map(MethodOutcome::pure)
-        }
+        Value::Set(items) => methods::set::dispatch_set_method(items, method, args, kwargs),
+        Value::Tuple(items) => methods::tuple::dispatch_tuple_method(items, method, args, kwargs)
+            .map(MethodOutcome::pure),
         Value::Date(date) => {
-            crate::eval::modules::datetime::dispatch_date_method(*date, method, args)
+            crate::eval::modules::datetime::dispatch_date_method(*date, method, args, kwargs)
                 .map(MethodOutcome::pure)
         }
         Value::DateTime { dt, tz_offset_secs } => {
@@ -126,26 +213,31 @@ pub(super) fn dispatch_method(
                 *tz_offset_secs,
                 method,
                 args,
+                kwargs,
             )
             .map(MethodOutcome::pure)
         }
-        Value::Time(t) => crate::eval::modules::datetime::dispatch_time_method(*t, method, args)
-            .map(MethodOutcome::pure),
-        Value::TimeDelta(micros) => {
-            crate::eval::modules::datetime::dispatch_timedelta_method(*micros, method, args)
+        Value::Time(t) => {
+            crate::eval::modules::datetime::dispatch_time_method(*t, method, args, kwargs)
                 .map(MethodOutcome::pure)
         }
-        Value::ReMatch(m) => crate::eval::modules::re::dispatch_match_method(m, method, args)
-            .map(MethodOutcome::pure),
+        Value::TimeDelta(micros) => {
+            crate::eval::modules::datetime::dispatch_timedelta_method(*micros, method, args, kwargs)
+                .map(MethodOutcome::pure)
+        }
+        Value::ReMatch(m) => {
+            crate::eval::modules::re::dispatch_match_method(m, method, args, kwargs)
+                .map(MethodOutcome::pure)
+        }
         Value::HashDigest { algo, bytes } => {
-            crate::eval::modules::hashlib::dispatch_hash_method(algo, bytes, method, args)
+            crate::eval::modules::hashlib::dispatch_hash_method(algo, bytes, method, args, kwargs)
                 .map(MethodOutcome::pure)
         }
         Value::Int(i) => {
-            methods::int::dispatch_int_method(*i, method, args).map(MethodOutcome::pure)
+            methods::int::dispatch_int_method(*i, method, args, kwargs).map(MethodOutcome::pure)
         }
         Value::Bytes(b) => {
-            methods::bytes::dispatch_bytes_method(b, method, args).map(MethodOutcome::pure)
+            methods::bytes::dispatch_bytes_method(b, method, args, kwargs).map(MethodOutcome::pure)
         }
         // A function/lambda stored in a variable then called as `f.attr()` lands
         // here, as does any other non-method-bearing type.

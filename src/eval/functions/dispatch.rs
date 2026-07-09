@@ -407,7 +407,8 @@ pub(crate) async fn call_value_as_function(
         Value::BoundMethod { receiver, method } => match receiver {
             crate::value::BoundMethodReceiver::Snapshot(value) => {
                 let mut recv = (**value).clone();
-                Ok(dispatch_method(&mut recv, method, args)?.value)
+                let empty_kwargs = IndexMap::new();
+                Ok(dispatch_method(&mut recv, method, args, &empty_kwargs)?.value)
             }
             crate::value::BoundMethodReceiver::Place { root, steps } => {
                 use crate::{
@@ -423,13 +424,14 @@ pub(crate) async fn call_value_as_function(
                     })
                     .collect();
 
+                let empty_kwargs = IndexMap::new();
                 let outcome = {
                     let root_slot = state
                         .variables
                         .get_mut(root)
                         .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(root)))?;
                     with_navigate_mut(root_slot, &pl_steps, |target| {
-                        dispatch_method(target, method, args)
+                        dispatch_method(target, method, args, &empty_kwargs)
                     })??
                 };
                 apply_mem_delta(state, outcome.mem_delta)?;
@@ -459,7 +461,8 @@ pub(crate) async fn call_value_as_function(
                 .into());
             };
             let mut recv = recv_arg.clone();
-            Ok(dispatch_method(&mut recv, method, rest)?.value)
+            let empty_kwargs = IndexMap::new();
+            Ok(dispatch_method(&mut recv, method, rest, &empty_kwargs)?.value)
         }
         // `from json import dumps` stored as a variable, then passed
         // through map/filter/key=. The eval_call name-lookup branch

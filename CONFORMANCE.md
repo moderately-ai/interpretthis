@@ -245,13 +245,14 @@ The reverse direction (an actual `OrderedDict` missing a method CPython supports
 ## Method-call keyword arguments
 <a id="method-call-kwargs"></a>
 
-Method calls on builtin types (e.g. `s.split(maxsplit=2)`, `d.move_to_end("k", last=False)`, `lst.sort(reverse=True)`) silently drop keyword arguments today: only positional arguments reach the per-type dispatcher (`dispatch_string_method`, `dispatch_list_method`, `dispatch_dict_method`, ...). The free-function builtins (`sorted`, `print`, `range`, etc.) and module functions (`re.split`, `json.dumps`, ...) DO receive kwargs through the regular call path; the gap is specifically the method-call site at `src/eval/functions.rs::eval_call`.
+Method calls thread kwargs through `dispatch_method` → per-type dispatchers. Behaviour matches CPython 3.12's positional-only vs keyword-capable split:
 
-User-visible effect: kwargs the user passed are ignored. Methods that take only optional kwargs (`dict.update(**kwargs)`) misbehave subtly; methods that work either positionally or by keyword (`s.split(",", 2)` vs `s.split(",", maxsplit=2)`) work only in the positional form.
+- **Accept kwargs**: `str.split` / `rsplit` (`sep`, `maxsplit`), `str.encode` (`encoding`, `errors`), `str.expandtabs` (`tabsize`), `dict.update(**kwargs)`, `OrderedDict.move_to_end` (`key`, `last`), `list.sort` (`key`, `reverse` — special-cased in `eval_call`), `str.format` / `format_map` (free-form field names).
+- **Positional-only** (unexpected kwargs → `TypeError`, never silent drop): most other methods, including `dict.get` / `pop` / `setdefault`, `str.replace` / `center` / `strip` / …, and list mutators.
 
-**Rationale**: closing this gap is a one-place change at the method-call site, but it ripples to every per-type dispatcher's signature. Tracked as a follow-up; will land before the per-type method tables move into `TypeObject.methods_slot` (the Track A0 layout in the parity plan).
+Binding uses `bind_method_params` in `src/eval/functions/method_dispatch.rs`.
 
-**Status**: Known gap. Documented so users hit it deterministically rather than mysteriously.
+**Status**: Shipped for the CPython 3.12 keyword surface above. Additional methods gain named kwargs on demand when CPython accepts them.
 
 ---
 

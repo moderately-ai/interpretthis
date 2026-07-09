@@ -28,7 +28,9 @@ pub(crate) fn dispatch_deque_method(
     maxlen: Option<&usize>,
     method: &str,
     args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "append" => {
             let val = arg1(method, args)?.clone();

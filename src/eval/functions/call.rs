@@ -9,7 +9,7 @@ use super::{
     builtins::{is_exception_type_name, try_builtin},
     dispatch::{call_lambda, call_user_function, call_value_as_function},
     helpers::{SortRequest, dsu_sort, list_sort_type_error},
-    method_dispatch::{CallArgs, dispatch_method, resolve_method_args},
+    method_dispatch::{CallArgs, dispatch_method, resolve_method_args, resolve_method_kwargs},
 };
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
@@ -70,13 +70,13 @@ pub async fn eval_call(
         if let Some(obj_expr) = method_obj_expr {
             let method_name = func_name.as_deref().unwrap_or("");
             let resolved_args = resolve_method_args(&args).await?;
+            let kwargs = resolve_method_kwargs(&kwargs).await?;
 
             // `str.format` / `str.format_map` are printf-equivalent string
             // building, not a security risk. They are special-cased here because
-            // they are the only string methods that consume keyword arguments
-            // (`"{k}".format(k=v)`), which the positional-only `dispatch_method`
-            // signature does not carry. They never mutate the receiver, so it is
-            // evaluated by value.
+            // format consumes free-form field kwargs (not a fixed param list),
+            // and format_map takes a mapping argument. They never mutate the
+            // receiver, so it is evaluated by value.
             if matches!(method_name, "format" | "format_map") {
                 let obj = eval_expr(state, obj_expr, tools).await?;
                 let Value::String(template) = obj else {
@@ -105,14 +105,9 @@ pub async fn eval_call(
                 return crate::eval::strings::str_format(&template, &[], &kw);
             }
 
-            // `list.sort()` is the only OTHER builtin method (besides
-            // str.format/format_map above) that takes kwargs — CPython
-            // 3.12: `list.sort(*, key=None, reverse=False)`, both
-            // keyword-only. The positional dispatch_method path strips
-            // kwargs, so handle it here. Async + receiver mutation +
-            // key= dispatch through call_value_as_function: shares
-            // `dsu_sort` with the `sorted` builtin so comparator +
-            // reversal semantics stay in one place.
+            // `list.sort()` is special-cased: CPython 3.12 makes both
+            // `key=` and `reverse=` keyword-only, and key= needs async
+            // call_value_as_function. Shares `dsu_sort` with `sorted`.
             if method_name == "sort" {
                 if !resolved_args.is_empty() {
                     return Err(InterpreterError::TypeError(
@@ -212,8 +207,12 @@ pub async fn eval_call(
                                 Value::Module(module) => Ok(Dispatch::Module(module.clone())),
                                 Value::Class(class_name) => Ok(Dispatch::Class(class_name.clone())),
                                 _ => {
-                                    let outcome =
-                                        dispatch_method(target, method_name, &resolved_args)?;
+                                    let outcome = dispatch_method(
+                                        target,
+                                        method_name,
+                                        &resolved_args,
+                                        &kwargs,
+                                    )?;
                                     Ok(Dispatch::Done(outcome.value, outcome.mem_delta))
                                 }
                             })?;
@@ -372,7 +371,7 @@ pub async fn eval_call(
                 };
                 return call_value_as_function(state, &unbound, &resolved_args, tools).await;
             }
-            return Ok(dispatch_method(&mut temp, method_name, &resolved_args)?.value);
+            return Ok(dispatch_method(&mut temp, method_name, &resolved_args, &kwargs)?.value);
         }
     }
 

@@ -11,7 +11,13 @@ use crate::{
     value::{ExceptionValue, Value},
 };
 
-pub(crate) fn dispatch_tuple_method(items: &[Value], method: &str, args: &[Value]) -> EvalResult {
+pub(crate) fn dispatch_tuple_method(
+    items: &[Value],
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "count" => {
             if args.is_empty() {

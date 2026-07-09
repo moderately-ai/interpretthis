@@ -213,7 +213,13 @@ pub fn timedelta_attribute(micros: i64, attr: &str) -> EvalResult {
 }
 
 /// Dispatch a method on a `date` value.
-pub fn dispatch_date_method(date: NaiveDate, method: &str, args: &[Value]) -> EvalResult {
+pub fn dispatch_date_method(
+    date: NaiveDate,
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "isoformat" => Ok(Value::String(date.format("%Y-%m-%d").to_string().into())),
         // Python: Monday == 0 … Sunday == 6.
@@ -246,7 +252,9 @@ pub fn dispatch_datetime_method(
     tz_offset_secs: Option<i32>,
     method: &str,
     args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "isoformat" => {
             // CPython: `2026-01-15T14:30:00` for naive; with tz adds
@@ -297,7 +305,13 @@ pub fn dispatch_datetime_method(
 }
 
 /// Dispatch a method on a `time` value.
-pub fn dispatch_time_method(t: NaiveTime, method: &str, args: &[Value]) -> EvalResult {
+pub fn dispatch_time_method(
+    t: NaiveTime,
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "isoformat" => {
             let mut s = t.format("%H:%M:%S").to_string();
@@ -319,7 +333,13 @@ pub fn dispatch_time_method(t: NaiveTime, method: &str, args: &[Value]) -> EvalR
 }
 
 /// Dispatch a method on a `timedelta` value.
-pub fn dispatch_timedelta_method(micros: i64, method: &str, _args: &[Value]) -> EvalResult {
+pub fn dispatch_timedelta_method(
+    micros: i64,
+    method: &str,
+    _args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "total_seconds" => {
             #[expect(
