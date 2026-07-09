@@ -9,11 +9,8 @@
 //! — CPython's wraps copies metadata; we approximate as identity since
 //! our FunctionDef metadata isn't observable beyond `__name__`).
 //!
-//! Other functools entries (`partial`, `lru_cache`, `cache`,
-//! `singledispatch`, `cached_property`, `cmp_to_key`) land as a
-//! follow-up — partial / lru_cache need a fresh Value variant to
-//! capture the bound state, and cmp_to_key needs the cmp callback
-//! threaded into sorted()'s sort path.
+//! Also: `partial`, `cmp_to_key`. `lru_cache` / `cache` / `singledispatch`
+//! remain open (see tickets).
 
 use indexmap::IndexMap;
 
@@ -22,11 +19,14 @@ use crate::{
     eval::control_flow::iterate_value,
     state::InterpreterState,
     tools::Tools,
-    value::Value,
+    value::{ClassValue, InstanceValue, Value},
 };
 
+/// Marker class for objects returned by `cmp_to_key` factories.
+pub const CMP_KEY_CLASS: &str = "functools.CmpKey";
+
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "wraps" | "reduce" | "partial")
+    matches!(name, "wraps" | "reduce" | "partial" | "cmp_to_key" | "_cmp_key")
 }
 
 pub async fn call(
@@ -54,6 +54,35 @@ pub async fn call(
                 args: args[1..].to_vec(),
                 keywords: kwargs.clone(),
             })))
+        }
+        "cmp_to_key" => {
+            // Returns a key= factory: key(obj) wraps obj for cmp-based sort.
+            let Some(cmp) = args.first().cloned() else {
+                return Err(InterpreterError::TypeError(
+                    "cmp_to_key() missing required argument: 'mycmp'".into(),
+                )
+                .into());
+            };
+            ensure_cmp_key_class(state);
+            Ok(Value::Partial(Box::new(crate::value::PartialData {
+                func: Value::ModuleFunction { module: "functools".into(), name: "_cmp_key".into() },
+                args: vec![cmp],
+                keywords: IndexMap::new(),
+            })))
+        }
+        "_cmp_key" => {
+            // Internal: _cmp_key(cmp, obj) -> CmpKey instance.
+            let cmp = args.first().cloned().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError("_cmp_key() missing cmp".into()))
+            })?;
+            let obj = args.get(1).cloned().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError("_cmp_key() missing obj".into()))
+            })?;
+            ensure_cmp_key_class(state);
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("cmp".into(), cmp);
+            fields.insert("obj".into(), obj);
+            Ok(Value::Instance(InstanceValue { class_name: CMP_KEY_CLASS.into(), fields }))
         }
         "wraps" => {
             // wraps(wrapped) -> identity decorator. CPython's wraps
@@ -167,6 +196,80 @@ pub async fn call(
 /// `functools` module registration. Genuinely async — `reduce(f, iter)`
 /// re-enters the evaluator to call the user-supplied callable.
 pub struct FunctoolsModule;
+
+fn ensure_cmp_key_class(state: &mut InterpreterState) {
+    if state.classes.contains_key(CMP_KEY_CLASS) {
+        return;
+    }
+    state.classes.insert(
+        CMP_KEY_CLASS.to_string(),
+        ClassValue {
+            name: CMP_KEY_CLASS.to_string(),
+            methods: Default::default(),
+            class_attrs: Default::default(),
+            bases: Vec::new(),
+            mro: vec![CMP_KEY_CLASS.to_string()],
+            properties: Default::default(),
+            static_methods: Default::default(),
+            class_methods: Default::default(),
+            enum_kind: None,
+            annotations: Vec::new(),
+            dataclass_fields: None,
+            frozen: false,
+            order: false,
+        },
+    );
+}
+
+/// Compare two `functools.CmpKey` instances via their stored cmp callable.
+/// Returns `Some(result)` when both sides are CmpKey wrappers.
+pub(crate) async fn try_cmp_key_lt(
+    state: &mut InterpreterState,
+    left: &Value,
+    right: &Value,
+    tools: &Tools,
+) -> Option<Result<bool, EvalError>> {
+    let (Value::Instance(a), Value::Instance(b)) = (left, right) else {
+        return None;
+    };
+    if a.class_name != CMP_KEY_CLASS || b.class_name != CMP_KEY_CLASS {
+        return None;
+    }
+    let cmp = a.fields.get("cmp")?;
+    let oa = a.fields.get("obj")?;
+    let ob = b.fields.get("obj")?;
+    // mycmp(a, b) -> negative / zero / positive
+    let call = crate::eval::functions::CallArgs {
+        positional: &[oa.clone(), ob.clone()],
+        keyword: &IndexMap::new(),
+    };
+    // Reuse call_value_as_function through a small async block.
+    Some(
+        async {
+            let result = crate::eval::functions::call_value_as_function(
+                state,
+                cmp,
+                &[oa.clone(), ob.clone()],
+                tools,
+            )
+            .await?;
+            let _ = call;
+            let n = match result {
+                Value::Int(i) => i,
+                Value::Bool(b) => i64::from(b),
+                other => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "cmp_to_key cmp must return int, got '{}'",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            Ok(n < 0)
+        }
+        .await,
+    )
+}
 
 #[async_trait::async_trait]
 impl crate::eval::modules::Module for FunctoolsModule {

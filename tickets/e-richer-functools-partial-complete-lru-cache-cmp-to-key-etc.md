@@ -1,7 +1,7 @@
 ---
 id: e-richer-functools-partial-complete-lru-cache-cmp-to-key-etc
 title: "E: richer functools (partial complete, lru_cache, cmp_to_key, etc.)"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

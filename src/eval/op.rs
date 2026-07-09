@@ -477,6 +477,11 @@ pub async fn lt(
     if let Some(r) = dataclass_order_compare(state, CmpOp::Lt, left, right) {
         return r;
     }
+    if let Some(r) =
+        crate::eval::modules::functools::try_cmp_key_lt(state, left, right, tools).await
+    {
+        return r;
+    }
     crate::types::dispatch_lt(left, right)
 }
 
