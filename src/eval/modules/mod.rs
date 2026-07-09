@@ -145,7 +145,8 @@ pub fn eval_import(state: &mut InterpreterState, node: &ast::StmtImport) -> Eval
         // dotted name is rejected rather than silently binding the wrong thing.
         if module.contains('.') {
             return Err(InterpreterError::Security(
-                "dotted/submodule imports are not supported".into(),
+                "dotted/submodule imports are not supported (see CONFORMANCE.md#import-allowlist)"
+                    .into(),
             )
             .into());
         }
@@ -178,7 +179,8 @@ pub fn eval_import_from(state: &mut InterpreterState, node: &ast::StmtImportFrom
         let name = alias.name.as_str();
         if name == "*" {
             return Err(InterpreterError::Security(
-                "`from module import *` is not supported".into(),
+                "`from module import *` is not supported (see CONFORMANCE.md#import-allowlist)"
+                    .into(),
             )
             .into());
         }

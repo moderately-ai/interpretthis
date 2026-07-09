@@ -181,7 +181,7 @@ pub fn eval_stmt<'a>(
             // runtime.
             Stmt::Pass(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => Ok(Value::None),
             _ => Err(InterpreterError::Runtime(format!(
-                "unsupported statement: {:?}",
+                "unsupported statement: {:?} (see CONFORMANCE.md#unsupported-language-features)",
                 std::mem::discriminant(stmt)
             ))
             .into()),

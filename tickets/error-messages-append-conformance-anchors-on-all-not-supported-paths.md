@@ -1,7 +1,7 @@
 ---
 id: error-messages-append-conformance-anchors-on-all-not-supported-paths
 title: "Error messages: append CONFORMANCE anchors on all not-supported paths"
-status: ready
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

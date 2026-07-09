@@ -52,7 +52,7 @@ async fn delete_target(
         Expr::Attribute(attr_node) => {
             let Expr::Name(name_node) = attr_node.value.as_ref() else {
                 return Err(InterpreterError::Runtime(
-                    "complex delete attribute target not supported".into(),
+                    "complex delete attribute target not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
                 )
                 .into());
             };

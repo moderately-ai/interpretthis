@@ -138,7 +138,10 @@ pub fn apply_binop(left: &Value, right: &Value, op: ast::Operator) -> Result<Val
         ast::Operator::BitXor => bitxor_values(left, right),
         ast::Operator::BitAnd => bitand_values(left, right),
         ast::Operator::MatMult => {
-            Err(InterpreterError::TypeError("matrix multiplication is not supported".into()).into())
+            Err(InterpreterError::TypeError(
+                "matrix multiplication is not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
+            )
+            .into())
         }
     }
 }

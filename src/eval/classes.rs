@@ -82,7 +82,7 @@ pub async fn eval_class_def(
     for base in &node.bases {
         let Expr::Name(name_node) = base else {
             return Err(InterpreterError::Security(
-                "class base must be a bare class name; computed bases are not supported".into(),
+                "class base must be a bare class name; computed bases are not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
             )
             .into());
         };

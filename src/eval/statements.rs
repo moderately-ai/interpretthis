@@ -90,11 +90,13 @@ pub async fn eval_aug_assign(
     pretouch_defaultdict(state, &node.target, tools).await?;
 
     let place = place::eval_place(state, &node.target, tools).await?.ok_or_else(|| {
-        EvalError::from(InterpreterError::Runtime("unsupported augmented assignment target".into()))
+        EvalError::from(InterpreterError::Runtime(
+            "unsupported augmented assignment target (see CONFORMANCE.md#unsupported-language-features)".into(),
+        ))
     })?;
     if !place.is_navigable() {
         return Err(InterpreterError::Runtime(
-            "augmented assignment to a slice target is not supported".into(),
+            "augmented assignment to a slice target is not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
         )
         .into());
     }
