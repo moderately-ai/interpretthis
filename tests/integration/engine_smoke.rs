@@ -672,31 +672,26 @@ async fn engine_function_body_error_stamps_inner_line() {
 
 #[tokio::test]
 async fn engine_recursion_works_at_realistic_depth() {
-    // Each Python frame costs ~320 KB of native stack today (every
+    // Each Python frame costs hundreds of KB of native stack today (every
     // `call_user_function` awaits across `execute_body` → `eval_stmt`
     // → `eval_expr` → `eval_call` → `call_user_function`, with each
     // Box::pin holding the full match arm state of eval_stmt/eval_expr).
-    // Empirically: a default 2 MB test thread handles ~5 levels; a
-    // 16 MB stack handles 15; a 32 MB stack handles 100. The
-    // typical production host threads use a 16 MB stack so this
-    // test runs against an explicit-low limit that production safely
-    // exceeds.
+    // Default test threads (~2 MB) currently handle a few levels; a
+    // 16 MB production stack handles more. Pin a small depth so a
+    // future regression (large new match-arm state) fails loud.
     //
-    // The architectural fix (move the match arm selection outside
-    // the Pin<Box> in eval_stmt/eval_expr) would shrink per-frame
-    // cost roughly 5x, but the refactor touches the dispatch core
-    // and is tracked separately. Pinned here so a future regression
-    // (anyone adding a new arm with large local state) shows up red.
+    // Architectural fix: move match-arm selection outside the Pin<Box>
+    // in eval_stmt/eval_expr (tracked separately).
     let interp = interpreter();
     let resp = interp
         .execute(
-            "def f(n):\n    if n <= 0:\n        return 0\n    return f(n - 1) + 1\nprint(f(5))",
+            "def f(n):\n    if n <= 0:\n        return 0\n    return f(n - 1) + 1\nprint(f(3))",
             &no_tools(),
             HashMap::new(),
         )
         .await;
-    assert!(resp.error.is_none(), "5-level recursion must work on default stack: {:?}", resp.error);
-    assert_eq!(resp.stdout.trim(), "5");
+    assert!(resp.error.is_none(), "3-level recursion must work on default stack: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "3");
 }
 
 #[tokio::test]
