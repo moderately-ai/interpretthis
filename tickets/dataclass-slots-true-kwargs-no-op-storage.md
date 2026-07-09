@@ -1,7 +1,7 @@
 ---
 id: dataclass-slots-true-kwargs-no-op-storage
 title: Dataclass slots=True kwargs (no-op / storage)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [dataclass-frozen-order-slots-kwargs]

@@ -133,6 +133,7 @@ fn ensure_marker_classes(state: &mut InterpreterState) {
                 dataclass_fields: None,
                 frozen: false,
                 order: false,
+                slots: false,
             },
         );
     }

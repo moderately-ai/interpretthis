@@ -397,6 +397,21 @@ pub fn assign_target<'a>(
                                     ),
                                 ));
                             }
+                            // `@dataclass(slots=True)` — only declared fields.
+                            if let Some(class) = state.classes.get(&class_name) {
+                                if class.slots {
+                                    let allowed = class
+                                        .dataclass_fields
+                                        .as_ref()
+                                        .is_some_and(|fs| fs.iter().any(|f| f.name == attr_name));
+                                    if !allowed {
+                                        return Err(InterpreterError::AttributeError(format!(
+                                            "'{class_name}' object has no attribute '{attr_name}'"
+                                        ))
+                                        .into());
+                                    }
+                                }
+                            }
                             if let Some(prop) = crate::eval::classes::lookup_property(
                                 state,
                                 &class_name,

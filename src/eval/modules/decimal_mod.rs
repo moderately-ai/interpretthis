@@ -170,6 +170,7 @@ fn ensure_context_class(state: &mut crate::state::InterpreterState) {
             dataclass_fields: None,
             frozen: false,
             order: false,
+            slots: false,
         },
     );
 }

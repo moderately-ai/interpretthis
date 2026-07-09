@@ -556,6 +556,11 @@ pub struct ClassValue {
     /// `@dataclass(order=True)` — rich comparisons use field tuples.
     #[serde(default)]
     pub order: bool,
+    /// `@dataclass(slots=True)` — only declared dataclass fields may be
+    /// set on instances (CPython's no-`__dict__` restriction, modelled
+    /// as field-name allowlist rather than layout change).
+    #[serde(default)]
+    pub slots: bool,
 }
 
 /// A single field of an `@dataclass`-decorated class.

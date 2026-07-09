@@ -231,6 +231,7 @@ pub async fn eval_class_def(
             dataclass_fields: None,
             frozen: false,
             order: false,
+            slots: false,
         },
     );
     state

@@ -291,8 +291,8 @@ fn resolve_class_name(arg: Option<&Value>) -> Result<String, EvalError> {
 /// `__match_args__` (a tuple of field names) so PEP-634 class patterns
 /// work without further plumbing.
 ///
-/// Honours `frozen=` and `order=` kwargs. `slots=` / `kw_only=` are
-/// accepted but no-op (see tickets).
+/// Honours `frozen=`, `order=`, and `slots=` kwargs. `kw_only=` is
+/// accepted but no-op.
 pub(crate) fn apply_dataclass(
     state: &mut InterpreterState,
     class_name: &str,
@@ -300,6 +300,7 @@ pub(crate) fn apply_dataclass(
 ) -> Result<(), EvalError> {
     let frozen = kwargs.get("frozen").is_some_and(Value::is_truthy);
     let order = kwargs.get("order").is_some_and(Value::is_truthy);
+    let slots = kwargs.get("slots").is_some_and(Value::is_truthy);
     let class = state
         .classes
         .get(class_name)
@@ -342,9 +343,15 @@ pub(crate) fn apply_dataclass(
         .get_mut(class_name)
         .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
     class_mut.class_attrs.insert("__match_args__".to_string(), match_args);
+    if slots {
+        let slot_names =
+            Value::Tuple(fields.iter().map(|f| Value::String(f.name.as_str().into())).collect());
+        class_mut.class_attrs.insert("__slots__".to_string(), slot_names);
+    }
     class_mut.dataclass_fields = Some(fields);
     class_mut.frozen = frozen;
     class_mut.order = order;
+    class_mut.slots = slots;
     Ok(())
 }
 

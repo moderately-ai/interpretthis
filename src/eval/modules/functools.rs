@@ -338,6 +338,7 @@ fn ensure_cmp_key_class(state: &mut InterpreterState) {
             dataclass_fields: None,
             frozen: false,
             order: false,
+            slots: false,
         },
     );
 }
