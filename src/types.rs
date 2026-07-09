@@ -2443,7 +2443,11 @@ fn decimal_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, Ev
                     InterpreterError::Runtime("Decimal division by zero".into()).into()
                 ));
             }
-            a / b
+            let prec = crate::eval::modules::decimal::active_prec();
+            let digits = u64::try_from(prec).unwrap_or(28);
+            // Cap significant digits at context prec without padding exact results.
+            let q = a / b;
+            if q.digits() > digits { q.with_prec(digits) } else { q }
         }
         BinOp::FloorDiv => {
             if b.is_zero() {

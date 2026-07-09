@@ -1,7 +1,7 @@
 ---
 id: decimal-expose-getcontext-prec-context-api
 title: "Decimal: expose getcontext/prec Context API"
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

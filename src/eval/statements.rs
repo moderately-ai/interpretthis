@@ -351,6 +351,37 @@ pub fn assign_target<'a>(
             // intercept), then the place machinery (default field
             // write). Property + __setattr__ are async-only paths.
             Expr::Attribute(attr_node) => {
+                // Temporary receiver (`getcontext().prec = n`): mutate shared
+                // instance fields even when the base is not a bare name, then
+                // sync decimal.Context.prec into interpreter state.
+                if !matches!(attr_node.value.as_ref(), Expr::Name(_)) {
+                    let obj = crate::eval::eval_expr(state, &attr_node.value, tools).await?;
+                    if let Value::Instance(inst) = &obj {
+                        let attr_name = attr_node.attr.as_str();
+                        if state.classes.get(&inst.class_name).is_some_and(|c| c.frozen) {
+                            return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                                "FrozenInstanceError",
+                                format!("cannot assign to field '{attr_name}'"),
+                            )));
+                        }
+                        inst.fields.lock().insert(attr_name.to_string(), value.clone());
+                        if attr_name == "prec"
+                            && inst.class_name == crate::eval::modules::decimal::CONTEXT_CLASS
+                        {
+                            if let Value::Int(n) = &value {
+                                if *n >= 1 {
+                                    state.decimal_prec = *n;
+                                    crate::eval::modules::decimal::store_prec(*n);
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                    return Err(InterpreterError::Runtime(
+                        "cannot assign to this expression".into(),
+                    )
+                    .into());
+                }
                 if let Expr::Name(name_node) = attr_node.value.as_ref() {
                     let obj_name = name_node.id.as_str().to_string();
                     if let Some(obj) = state.variables.get(&obj_name).cloned() {
@@ -428,10 +459,32 @@ pub fn assign_target<'a>(
                         EvalError::from(InterpreterError::name_not_defined(&target_place.root))
                     })?;
                     place::with_navigate_mut(root, prefix, |container| {
-                        place::assign_terminal(container, last, value)
+                        place::assign_terminal(container, last, value.clone())
                     })??
                 };
                 place::apply_mem_delta(state, delta)?;
+                // decimal.Context.prec writeback into interpreter state.
+                if let place::PlaceStep::Attr(attr) = last {
+                    if prefix.is_empty() && attr == "prec" {
+                        let class_name = state.variables.get(&target_place.root).and_then(|v| {
+                            if let Value::Instance(inst) = v {
+                                Some(inst.class_name.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if class_name.as_deref()
+                            == Some(crate::eval::modules::decimal::CONTEXT_CLASS)
+                        {
+                            if let Value::Int(n) = &value {
+                                if *n >= 1 {
+                                    state.decimal_prec = *n;
+                                    crate::eval::modules::decimal::store_prec(*n);
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(())
             }
             // Subscript / slice assignment goes through the place

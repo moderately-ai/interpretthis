@@ -47,6 +47,8 @@ pub struct InterpreterState {
     pub operations_count: u64,
     /// Wall-clock start time for execution timeout tracking.
     pub execution_start: Instant,
+    /// Active `decimal` context precision (CPython default 28).
+    pub decimal_prec: i64,
     /// Approximate memory used by interpreter state, in bytes.
     pub memory_used_bytes: usize,
     /// Current nested call depth. Bumped on entry to each user function
@@ -145,6 +147,7 @@ impl InterpreterState {
             body_source_stack: Vec::new(),
             operations_count: 0,
             execution_start: Instant::now(),
+            decimal_prec: 28,
             memory_used_bytes: 0,
             call_depth: 0,
             method_frame_stack: Vec::new(),
