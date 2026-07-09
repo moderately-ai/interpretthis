@@ -1,7 +1,7 @@
 ---
 id: complex-del-attribute-subscript-targets-unsupported
 title: Complex del attribute/subscript targets unsupported
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

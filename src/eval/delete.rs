@@ -45,79 +45,108 @@ async fn delete_target(
             // Delete the variable
             state.delete_variable(name).map_err(EvalError::Interpreter)
         }
-        // `del inst.attr` — Track B2 supports the @property deleter
-        // path. Other attribute deletions are out of scope: instance
-        // fields have no del path in our owned model, and __delattr__
-        // beyond the property protocol is not modelled.
+        // `del path.attr` — property deleter / __delattr__ when the base is a
+        // bare name; otherwise place-navigate to the parent and drop the field
+        // (covers `del a.b.c` and `del items[0].x` with shared instance fields).
         Expr::Attribute(attr_node) => {
-            let Expr::Name(name_node) = attr_node.value.as_ref() else {
+            let attr_name = attr_node.attr.as_str().to_string();
+            crate::security::validator::validate_attribute(&attr_name)?;
+
+            // Fast path: bare `del name.attr` keeps property / __delattr__ hooks.
+            if let Expr::Name(name_node) = attr_node.value.as_ref() {
+                let obj_name = name_node.id.as_str().to_string();
+                let obj = state.variables.get(&obj_name).cloned().ok_or_else(|| {
+                    EvalError::from(InterpreterError::name_not_defined(&obj_name))
+                })?;
+                if let Value::Instance(inst) = &obj {
+                    let class_name = inst.class_name.clone();
+                    if let Some(prop) =
+                        crate::eval::classes::lookup_property(state, &class_name, &attr_name)
+                    {
+                        let Some(deleter) = prop.deleter else {
+                            return Err(InterpreterError::AttributeError(format!(
+                                "property '{attr_name}' of '{class_name}' object has no deleter"
+                            ))
+                            .into());
+                        };
+                        let configured = crate::eval::classes::invoke_property_deleter(
+                            state, &deleter, obj, tools,
+                        )
+                        .await?;
+                        state
+                            .set_variable(&obj_name, configured)
+                            .map_err(EvalError::Interpreter)?;
+                        return Ok(());
+                    }
+                    if let Some((_, method)) = crate::eval::classes::lookup_method_in_mro(
+                        state,
+                        &class_name,
+                        "__delattr__",
+                    ) {
+                        let name_arg = Value::String(attr_name.as_str().into());
+                        let call = crate::eval::functions::CallArgs {
+                            positional: std::slice::from_ref(&name_arg),
+                            keyword: &indexmap::IndexMap::new(),
+                        };
+                        let (_returned, updated_self) =
+                            crate::eval::classes::call_method(state, &method, obj, call, tools)
+                                .await?;
+                        state
+                            .set_variable(&obj_name, updated_self)
+                            .map_err(EvalError::Interpreter)?;
+                        return Ok(());
+                    }
+                    if inst.fields.lock().remove(&attr_name).is_some() {
+                        return Ok(());
+                    }
+                    return Err(InterpreterError::AttributeError(format!(
+                        "'{class_name}' object has no attribute '{attr_name}'"
+                    ))
+                    .into());
+                }
+            }
+
+            // Complex path: navigate place to parent, delete attribute on Instance.
+            let place = crate::eval::place::eval_place(state, target, tools)
+                .await?
+                .ok_or_else(|| {
+                    EvalError::from(InterpreterError::Runtime(
+                        "complex delete attribute target not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
+                    ))
+                })?;
+            if !place.is_navigable() {
+                return Err(InterpreterError::Runtime(
+                    "complex delete attribute target not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
+                )
+                .into());
+            }
+            let Some((crate::eval::place::PlaceStep::Attr(name), prefix)) =
+                place.steps.split_last()
+            else {
                 return Err(InterpreterError::Runtime(
                     "complex delete attribute target not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
                 )
                 .into());
             };
-            let obj_name = name_node.id.as_str().to_string();
-            let attr_name = attr_node.attr.as_str().to_string();
-            let obj =
-                state.variables.get(&obj_name).cloned().ok_or_else(|| {
-                    EvalError::from(InterpreterError::name_not_defined(&obj_name))
-                })?;
-            let Value::Instance(inst) = &obj else {
-                return Err(InterpreterError::AttributeError(format!(
-                    "'{}' object attribute deletion not supported",
-                    obj.type_name()
-                ))
-                .into());
-            };
-            let class_name = inst.class_name.clone();
-            if let Some(prop) =
-                crate::eval::classes::lookup_property(state, &class_name, &attr_name)
-            {
-                let Some(deleter) = prop.deleter else {
-                    return Err(InterpreterError::AttributeError(format!(
-                        "property '{attr_name}' of '{class_name}' object has no deleter"
-                    ))
-                    .into());
+            let root = state
+                .variables
+                .get_mut(&place.root)
+                .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&place.root)))?;
+            crate::eval::place::with_navigate_mut(root, prefix, |parent| {
+                let Value::Instance(inst) = parent else {
+                    return Err(EvalError::from(InterpreterError::AttributeError(format!(
+                        "'{}' object attribute deletion not supported",
+                        parent.type_name()
+                    ))));
                 };
-                let configured =
-                    crate::eval::classes::invoke_property_deleter(state, &deleter, obj, tools)
-                        .await?;
-                state.set_variable(&obj_name, configured).map_err(EvalError::Interpreter)?;
-                return Ok(());
-            }
-            // User-defined `__delattr__` intercepts every plain field
-            // delete. Inside the slot, `super().__delattr__(name)` is
-            // the canonical way to actually drop the field — that's
-            // dispatched by classes::super_method_call's object-default
-            // path.
-            if let Some((_, method)) =
-                crate::eval::classes::lookup_method_in_mro(state, &class_name, "__delattr__")
-            {
-                let name_arg = Value::String(attr_name.as_str().into());
-                let call = crate::eval::functions::CallArgs {
-                    positional: std::slice::from_ref(&name_arg),
-                    keyword: &indexmap::IndexMap::new(),
-                };
-                let (_returned, updated_self) =
-                    crate::eval::classes::call_method(state, &method, obj, call, tools).await?;
-                state.set_variable(&obj_name, updated_self).map_err(EvalError::Interpreter)?;
-                return Ok(());
-            }
-            // No __delattr__ slot: default is to drop the field
-            // directly. CPython's `object.__delattr__` raises
-            // AttributeError when the field is missing.
-            if inst.fields.lock().contains_key(&attr_name) {
-                let new_inst = inst.clone();
-                new_inst.fields.lock().remove(&attr_name);
-                state
-                    .set_variable(&obj_name, Value::Instance(new_inst))
-                    .map_err(EvalError::Interpreter)?;
-                return Ok(());
-            }
-            Err(InterpreterError::AttributeError(format!(
-                "'{class_name}' object has no attribute '{attr_name}'"
-            ))
-            .into())
+                if inst.fields.lock().remove(name).is_none() {
+                    return Err(EvalError::from(InterpreterError::AttributeError(format!(
+                        "'{}' object has no attribute '{name}'",
+                        inst.class_name
+                    ))));
+                }
+                Ok(())
+            })?
         }
         Expr::Subscript(sub_node) => {
             // Slice deletion is its own path — keeps the Name-only fast
