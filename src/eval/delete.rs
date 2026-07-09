@@ -106,9 +106,9 @@ async fn delete_target(
             // No __delattr__ slot: default is to drop the field
             // directly. CPython's `object.__delattr__` raises
             // AttributeError when the field is missing.
-            if inst.fields.contains_key(&attr_name) {
-                let mut new_inst = inst.clone();
-                new_inst.fields.remove(&attr_name);
+            if inst.fields.lock().contains_key(&attr_name) {
+                let new_inst = inst.clone();
+                new_inst.fields.lock().remove(&attr_name);
                 state
                     .set_variable(&obj_name, Value::Instance(new_inst))
                     .map_err(EvalError::Interpreter)?;
@@ -221,8 +221,8 @@ fn writeback_receiver(
             if let Expr::Name(name_node) = attr_node.value.as_ref() {
                 let owner_name = name_node.id.as_str().to_string();
                 let attr_name = attr_node.attr.as_str().to_string();
-                if let Some(Value::Instance(mut inst)) = state.variables.get(&owner_name).cloned() {
-                    inst.fields.insert(attr_name, updated_self);
+                if let Some(Value::Instance(inst)) = state.variables.get(&owner_name).cloned() {
+                    inst.fields.lock().insert(attr_name, updated_self);
                     return state
                         .set_variable(&owner_name, Value::Instance(inst))
                         .map_err(EvalError::Interpreter);

@@ -205,7 +205,8 @@ fn nav_recurse<R>(
             }
             Value::Instance(inst) => {
                 let class_name = inst.class_name.clone();
-                let v = inst.fields.get_mut(name.as_str()).ok_or_else(|| -> EvalError {
+                let mut fields = inst.fields.lock();
+                let v = fields.get_mut(name.as_str()).ok_or_else(|| -> EvalError {
                     InterpreterError::AttributeError(format!(
                         "'{class_name}' object has no attribute '{name}'"
                     ))
@@ -285,7 +286,7 @@ fn set_index(container: &mut Value, key: &Value, value: Value) -> Result<isize, 
 fn set_attr(container: &mut Value, name: &str, value: Value) -> Result<isize, EvalError> {
     if let Value::Instance(inst) = container {
         let new_size = estimate_value_size(&value);
-        let delta = inst.fields.insert(name.to_string(), value).map_or_else(
+        let delta = inst.fields.lock().insert(name.to_string(), value).map_or_else(
             || to_isize(name.len() + new_size),
             |old| size_delta(estimate_value_size(&old), new_size),
         );

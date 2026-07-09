@@ -1,7 +1,7 @@
 ---
 id: bounded-getattr-setattr-delattr-safe-three-arg-getattr
 title: Bounded getattr/setattr/delattr (safe three-arg getattr)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

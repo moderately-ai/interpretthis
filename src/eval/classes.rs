@@ -606,7 +606,7 @@ pub async fn instantiate(
     }
     let instance = Value::Instance(InstanceValue {
         class_name: class_name.to_string(),
-        fields: BTreeMap::new(),
+        fields: crate::value::shared_fields(BTreeMap::new()),
     });
 
     // `@dataclass`-synthesized __init__: if the class is a dataclass
@@ -731,7 +731,7 @@ async fn dataclass_instantiate(
 
     Ok(Value::Instance(InstanceValue {
         class_name: class_name.to_string(),
-        fields: instance_fields,
+        fields: crate::value::shared_fields(instance_fields),
     }))
 }
 
@@ -958,7 +958,7 @@ pub fn instance_attribute(
     inst: &InstanceValue,
     attr: &str,
 ) -> EvalResult {
-    if let Some(value) = inst.fields.get(attr) {
+    if let Some(value) = inst.fields.lock().get(attr) {
         return Ok(value.clone());
     }
     if let Some(value) = lookup_class_attr(state, &inst.class_name, attr) {
@@ -1192,8 +1192,8 @@ pub async fn super_method_call(
                         "object.__setattr__: missing value argument".into(),
                     ))
                 })?;
-                let mut inst = instance;
-                inst.fields.insert(attr_name.into(), value);
+                let inst = instance;
+                inst.fields.lock().insert(attr_name.into(), value);
                 let updated = Value::Instance(inst);
                 if let Some(name) =
                     state.method_frame_stack.last().and_then(|f| f.self_local_name.clone())
@@ -1212,9 +1212,9 @@ pub async fn super_method_call(
                             "object.__delattr__: argument must be str".into(),
                         ))
                     })?;
-                let mut inst = instance;
+                let inst = instance;
                 let class_name = inst.class_name.clone();
-                if inst.fields.remove(attr_name.as_str()).is_none() {
+                if inst.fields.lock().remove(attr_name.as_str()).is_none() {
                     return Err(InterpreterError::AttributeError(format!(
                         "'{class_name}' object has no attribute '{attr_name}'"
                     ))

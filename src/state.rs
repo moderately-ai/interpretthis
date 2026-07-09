@@ -404,7 +404,12 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         }
         Value::Instance(inst) => {
             16 + inst.class_name.len()
-                + inst.fields.iter().map(|(k, v)| k.len() + estimate_value_size(v)).sum::<usize>()
+                + inst
+                    .fields
+                    .lock()
+                    .iter()
+                    .map(|(k, v)| k.len() + estimate_value_size(v))
+                    .sum::<usize>()
         }
         Value::Super { defining_class, instance } => {
             16 + defining_class.len() + estimate_value_size(&Value::Instance((**instance).clone()))

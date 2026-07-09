@@ -170,7 +170,7 @@ fn asdict_recursive(state: &InterpreterState, inst: &InstanceValue) -> EvalResul
     let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
     let mut out: IndexMap<crate::value::ValueKey, Value> = IndexMap::new();
     for name in field_names {
-        let raw = inst.fields.get(&name).cloned().unwrap_or(Value::None);
+        let raw = inst.fields.lock().get(&name).cloned().unwrap_or(Value::None);
         let converted = convert_for_asdict(state, &raw)?;
         out.insert(crate::value::ValueKey::String(name.as_str().into()), converted);
     }
@@ -231,7 +231,7 @@ fn astuple_recursive(state: &InterpreterState, inst: &InstanceValue) -> EvalResu
     let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
     let mut out = Vec::with_capacity(field_names.len());
     for name in field_names {
-        let raw = inst.fields.get(&name).cloned().unwrap_or(Value::None);
+        let raw = inst.fields.lock().get(&name).cloned().unwrap_or(Value::None);
         out.push(convert_for_astuple(state, &raw)?);
     }
     Ok(Value::Tuple(out))

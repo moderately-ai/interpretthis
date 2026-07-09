@@ -865,12 +865,16 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             if a.class_name != b.class_name {
                 return false;
             }
-            if a.fields.len() != b.fields.len() {
+            // Shared storage: same Arc ⇒ identity equal (like list).
+            if std::sync::Arc::ptr_eq(&a.fields, &b.fields) {
+                return true;
+            }
+            let af = a.fields.lock();
+            let bf = b.fields.lock();
+            if af.len() != bf.len() {
                 return false;
             }
-            a.fields
-                .iter()
-                .all(|(name, va)| b.fields.get(name).is_some_and(|vb| values_equal(va, vb)))
+            af.iter().all(|(name, va)| bf.get(name).is_some_and(|vb| values_equal(va, vb)))
         }
         _ => false,
     }

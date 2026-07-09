@@ -207,7 +207,7 @@ fn render_dataclass(
         first = false;
         out.push_str(&field.name);
         out.push('=');
-        let field_value = inst.fields.get(&field.name).cloned().unwrap_or(Value::None);
+        let field_value = inst.fields.lock().get(&field.name).cloned().unwrap_or(Value::None);
         let rendered = match &field_value {
             Value::Instance(nested) => state
                 .classes

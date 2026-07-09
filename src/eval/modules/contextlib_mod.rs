@@ -66,7 +66,10 @@ async fn call(
             let enter_result = args.first().cloned().unwrap_or(Value::None);
             let mut fields = std::collections::BTreeMap::new();
             fields.insert("enter_result".into(), enter_result);
-            Ok(Value::Instance(InstanceValue { class_name: NULLCONTEXT_CLASS.into(), fields }))
+            Ok(Value::Instance(InstanceValue {
+                class_name: NULLCONTEXT_CLASS.into(),
+                fields: crate::value::shared_fields(fields),
+            }))
         }
         "suppress" => {
             // Store exception type names (or ExceptionType values) as a list.
@@ -88,7 +91,10 @@ async fn call(
             }
             let mut fields = std::collections::BTreeMap::new();
             fields.insert("exceptions".into(), Value::List(crate::value::shared_list(names)));
-            Ok(Value::Instance(InstanceValue { class_name: SUPPRESS_CLASS.into(), fields }))
+            Ok(Value::Instance(InstanceValue {
+                class_name: SUPPRESS_CLASS.into(),
+                fields: crate::value::shared_fields(fields),
+            }))
         }
         "contextmanager" => Err(InterpreterError::TypeError(
             "@contextmanager is not supported (requires suspended generators; \
@@ -145,7 +151,7 @@ pub(crate) fn try_contextlib_method(
     };
     match (inst.class_name.as_str(), method) {
         (NULLCONTEXT_CLASS, "__enter__") => {
-            Some(Ok(inst.fields.get("enter_result").cloned().unwrap_or(Value::None)))
+            Some(Ok(inst.fields.lock().get("enter_result").cloned().unwrap_or(Value::None)))
         }
         (NULLCONTEXT_CLASS, "__exit__") => Some(Ok(Value::Bool(false))),
         (SUPPRESS_CLASS, "__enter__") => Some(Ok(Value::None)),
@@ -161,17 +167,19 @@ fn suppress_exit(state: &InterpreterState, inst: &InstanceValue, args: &[Value])
     if matches!(exc_type, None | Some(Value::None)) {
         return Ok(Value::Bool(false));
     }
-    let Some(Value::List(list)) = inst.fields.get("exceptions") else {
-        return Ok(Value::Bool(false));
+    let names: Vec<String> = {
+        let fields = inst.fields.lock();
+        let Some(Value::List(list)) = fields.get("exceptions") else {
+            return Ok(Value::Bool(false));
+        };
+        list.lock()
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect()
     };
-    let names: Vec<String> = list
-        .lock()
-        .iter()
-        .filter_map(|v| match v {
-            Value::String(s) => Some(s.to_string()),
-            _ => None,
-        })
-        .collect();
     if names.is_empty() {
         return Ok(Value::Bool(false));
     }

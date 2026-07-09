@@ -143,15 +143,15 @@ Cross-link: [`THREAT_MODEL.md`](./THREAT_MODEL.md) documents validator entry poi
 ## `eval` / `exec`
 <a id="eval-exec"></a>
 
-`eval`, `exec`, and `compile` are in the `DANGEROUS_NAMES` set at `src/security/names.rs` and cannot be referenced from user code. Calling them raises `InterpreterError::Security`. The same applies to `__import__`, `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, and `shutil`. The const in `src/security/names.rs` is the source of truth.
+`eval`, `exec`, and `compile` are in the `DANGEROUS_NAMES` set at `src/security/names.rs` and cannot be referenced from user code. Calling them raises `InterpreterError::Security`. The same applies to `__import__`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, and `shutil`. The const in `src/security/names.rs` is the source of truth.
 
-`getattr` / `setattr` / `delattr` will eventually be re-introduced as bounded forms (three-arg `getattr(o, "name", default)` is on Track A6's roadmap); when that lands, the validator will permit the bounded form and continue rejecting the unbounded one. Until then the blanket rejection holds.
+`getattr` / `setattr` / `delattr` are **bounded builtins**: the attribute name must be a string and is checked against `BLOCKED_ATTRIBUTES` (class-walk dunders like `__class__` / `__bases__` stay forbidden). Three-arg `getattr(o, name, default)` returns the default only on `AttributeError`, never on a security rejection. Instance field storage is shared (`SharedFields`), so `setattr`/`delattr` mutate by identity like CPython.
 
 Cross-link: `THREAT_MODEL.md` enumerates the attack patterns these blocks defeat (`__import__('os').system(...)`, `().__class__.__bases__[0].__subclasses__()`, etc.).
 
 **Rationale**: `eval` and `exec` parse arbitrary strings as code; they are sandbox escape primitives by definition.
 
-**Status**: Permanent divergence for `eval` / `exec` / `compile`. `getattr` / `setattr` / `delattr` are planned to gain bounded variants without lifting the unbounded rejection.
+**Status**: Permanent divergence for `eval` / `exec` / `compile`. Bounded `getattr` / `setattr` / `delattr` shipped.
 
 ---
 

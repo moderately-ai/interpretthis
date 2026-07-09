@@ -4,9 +4,10 @@
 
 /// Names that are blocked from use in interpreter code.
 pub const DANGEROUS_NAMES: &[&str] = &[
-    "getattr",
-    "setattr",
-    "delattr",
+    // getattr/setattr/delattr are available as *bounded* builtins: the
+    // attribute name is validated against BLOCKED_ATTRIBUTES (see
+    // CONFORMANCE.md#eval-exec). Bare names stay off this list so the
+    // builtins can resolve.
     "eval",
     "exec",
     "compile",

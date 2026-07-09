@@ -334,6 +334,95 @@ pub(super) async fn try_builtin(
             }
             Ok(Some(Value::Bool(check_one(&type_arg_name(&args[1])))))
         }
+        "getattr" => {
+            // Bounded: attribute name must be a string and pass
+            // BLOCKED_ATTRIBUTES. Two-arg raises AttributeError on miss;
+            // three-arg returns the default instead.
+            check_arg_count(name, args, 2, 3)?;
+            let attr_name = match &args[1] {
+                Value::String(s) => s.as_str(),
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "getattr(): attribute name must be string".into(),
+                    )
+                    .into());
+                }
+            };
+            let obj = resolve_proxy(&args[0]).await?;
+            match crate::eval::names::getattr_on_value(state, obj, attr_name, tools, None).await {
+                Ok(v) => Ok(Some(v)),
+                // Default only swallows AttributeError — Security on blocked
+                // dunders stays a hard failure.
+                Err(EvalError::Interpreter(InterpreterError::AttributeError(_)))
+                    if args.len() >= 3 =>
+                {
+                    Ok(Some(args[2].clone()))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "setattr" => {
+            check_arg_count(name, args, 3, 3)?;
+            let attr_name = match &args[1] {
+                Value::String(s) => s.as_str(),
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "setattr(): attribute name must be string".into(),
+                    )
+                    .into());
+                }
+            };
+            crate::security::validator::validate_attribute(attr_name)?;
+            let obj = resolve_proxy(&args[0]).await?;
+            let value = resolve_proxy(&args[2]).await?;
+            match obj {
+                Value::Instance(inst) => {
+                    if state.classes.get(&inst.class_name).is_some_and(|c| c.frozen) {
+                        return Err(EvalError::Exception(ExceptionValue::new(
+                            "FrozenInstanceError",
+                            format!("cannot assign to field '{attr_name}'"),
+                        )));
+                    }
+                    // Shared fields: mutation is visible on every alias.
+                    inst.fields.lock().insert(attr_name.to_string(), value);
+                    Ok(Some(Value::None))
+                }
+                other => Err(InterpreterError::TypeError(format!(
+                    "setattr() attribute assignment not supported for '{}'",
+                    other.type_name()
+                ))
+                .into()),
+            }
+        }
+        "delattr" => {
+            check_arg_count(name, args, 2, 2)?;
+            let attr_name = match &args[1] {
+                Value::String(s) => s.as_str(),
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "delattr(): attribute name must be string".into(),
+                    )
+                    .into());
+                }
+            };
+            crate::security::validator::validate_attribute(attr_name)?;
+            let obj = resolve_proxy(&args[0]).await?;
+            match obj {
+                Value::Instance(inst) => {
+                    if inst.fields.lock().remove(attr_name).is_none() {
+                        return Err(
+                            InterpreterError::AttributeError(format!("'{attr_name}'")).into()
+                        );
+                    }
+                    Ok(Some(Value::None))
+                }
+                other => Err(InterpreterError::TypeError(format!(
+                    "delattr() attribute deletion not supported for '{}'",
+                    other.type_name()
+                ))
+                .into()),
+            }
+        }
         "hasattr" => {
             check_arg_count(name, args, 2, 2)?;
             let attr_name = match &args[1] {
@@ -345,6 +434,12 @@ pub(super) async fn try_builtin(
                     .into());
                 }
             };
+            // Reject blocked dunders as missing (hasattr returns False on
+            // AttributeError; Security on blocked names → False for parity
+            // with "cannot access" without leaking existence).
+            if crate::security::validator::validate_attribute(attr_name).is_err() {
+                return Ok(Some(Value::Bool(false)));
+            }
             // CPython hasattr(obj, name): True iff getattr(obj, name)
             // doesn't raise. Route through dispatch_getattr_opt first
             // (covers every builtin-with-attributes type); if the slot
@@ -355,7 +450,7 @@ pub(super) async fn try_builtin(
                 Ok(Some(_)) => true,
                 Ok(None) => match &args[0] {
                     Value::Instance(inst) => {
-                        inst.fields.contains_key(attr_name)
+                        inst.fields.lock().contains_key(attr_name)
                             || state.classes.get(&inst.class_name).is_some_and(|c| {
                                 c.class_attrs.contains_key(attr_name)
                                     || c.methods.contains_key(attr_name)

@@ -17,12 +17,26 @@ use parking_lot::Mutex;
 /// mutable defaults, and closure captures.
 pub type SharedList = Arc<Mutex<Vec<Value>>>;
 
+/// Shared instance-field map backing [`InstanceValue::fields`].
+///
+/// Same identity model as [`SharedList`]: cloning an instance Value is a
+/// refcount bump, so `setattr` / field writes through any alias are
+/// visible on every other alias — matching CPython object identity.
+pub type SharedFields = Arc<Mutex<BTreeMap<String, Value>>>;
+
 /// Construct a fresh `SharedList` from a `Vec<Value>`. Centralised so
 /// call sites use this instead of inlining `Arc::new(Mutex::new(v))`.
 #[inline]
 #[must_use]
 pub fn shared_list(items: Vec<Value>) -> SharedList {
     Arc::new(Mutex::new(items))
+}
+
+/// Construct a fresh [`SharedFields`] map.
+#[inline]
+#[must_use]
+pub fn shared_fields(fields: BTreeMap<String, Value>) -> SharedFields {
+    Arc::new(Mutex::new(fields))
 }
 
 /// Serialize a `SharedList` as if it were `Vec<Value>` (locking the
@@ -50,6 +64,23 @@ fn deserialize_shared_list<'de, D: serde::Deserializer<'de>>(
 ) -> Result<SharedList, D::Error> {
     let items: Vec<Value> = Deserialize::deserialize(deserializer)?;
     Ok(shared_list(items))
+}
+
+/// Serialize instance fields as a plain map (lock, then emit).
+fn serialize_shared_fields<S: serde::Serializer>(
+    fields: &SharedFields,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let snapshot = fields.lock().clone();
+    snapshot.serialize(serializer)
+}
+
+/// Deserialize a map into [`SharedFields`].
+fn deserialize_shared_fields<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SharedFields, D::Error> {
+    let map: BTreeMap<String, Value> = Deserialize::deserialize(deserializer)?;
+    Ok(shared_fields(map))
 }
 // `Zero` provides `is_zero` on `BigDecimal`/`BigRational`/`BigInt` —
 // used by `is_truthy` for the `Decimal` and `Fraction` variants.
@@ -415,13 +446,19 @@ pub struct MatchGroup {
 /// A user-defined class instance: its class name plus its own attributes.
 ///
 /// Methods are not stored here — they live in the class registry on
-/// `InterpreterState`, looked up by `class_name` at call time. `fields` is a
-/// `BTreeMap` for deterministic iteration; instance attribute order is not
-/// observable (`__dict__` / `vars()` are not exposed).
+/// `InterpreterState`, looked up by `class_name` at call time.
+///
+/// `fields` is a shared map ([`SharedFields`]) so cloning an instance Value
+/// preserves object identity for attribute mutation — same model as
+/// [`SharedList`] for `list`. Map iteration order is deterministic
+/// (`BTreeMap`); attribute order is not user-observable (`__dict__` /
+/// `vars()` are not exposed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceValue {
     pub class_name: String,
-    pub fields: BTreeMap<String, Value>,
+    #[serde(serialize_with = "serialize_shared_fields")]
+    #[serde(deserialize_with = "deserialize_shared_fields")]
+    pub fields: SharedFields,
 }
 
 /// The definition of a user-defined class, held in the interpreter's class

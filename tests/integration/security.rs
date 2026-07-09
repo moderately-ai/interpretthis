@@ -24,33 +24,72 @@ fn no_tools() -> Tools {
 // --- Dangerous builtins blocked ---
 
 #[tokio::test]
-async fn security_getattr_blocked() {
+async fn security_getattr_blocked_dunder() {
+    // Bounded getattr allows safe names but still rejects class-walk dunders.
     let interp = interpreter();
     let resp = interp.execute("x = getattr([], '__class__')", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some());
+    let msg = resp.error.unwrap().to_string();
+    assert!(
+        msg.contains("__class__") || msg.contains("Security") || msg.contains("not permitted"),
+        "expected security block, got: {msg}"
+    );
 }
 
 #[tokio::test]
 async fn security_class_attribute_access_blocked() {
-    // Direct attribute access — `getattr` is already blocked above, so
-    // this covers the only remaining surface for reaching `__class__`.
+    // Direct attribute access still blocks class-walk dunders.
     let interp = interpreter();
     let resp = interp.execute("x = ().__class__", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some());
 }
 
 #[tokio::test]
-async fn security_setattr_blocked() {
+async fn security_setattr_blocked_dunder() {
     let interp = interpreter();
-    let resp = interp.execute("x = []\nsetattr(x, 'y', 1)", &no_tools(), HashMap::new()).await;
+    let resp = interp
+        .execute(
+            r#"
+class C:
+    pass
+o = C()
+setattr(o, '__class__', 1)
+"#,
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
     assert!(resp.error.is_some());
 }
 
 #[tokio::test]
-async fn security_delattr_blocked() {
+async fn security_delattr_blocked_dunder() {
     let interp = interpreter();
     let resp = interp.execute("delattr([], '__class__')", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some());
+}
+
+#[tokio::test]
+async fn security_getattr_safe_three_arg() {
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r#"
+class C:
+    pass
+o = C()
+print(getattr(o, 'missing', 42))
+setattr(o, 'x', 7)
+print(getattr(o, 'x'))
+delattr(o, 'x')
+print(getattr(o, 'x', 'gone'))
+"#,
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "42\n7\ngone");
 }
 
 #[tokio::test]

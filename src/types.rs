@@ -468,10 +468,10 @@ pub fn dispatch_eq(state: &InterpreterState, lhs: &Value, rhs: &Value) -> EvalRe
                     if let Some(fields) = &class.dataclass_fields {
                         if !class.methods.contains_key("__eq__") {
                             let mut equal = true;
+                            let af = inst.fields.lock();
+                            let bf = other_inst.fields.lock();
                             for field in fields.iter().filter(|f| f.compare) {
-                                let lhs_val = inst.fields.get(&field.name);
-                                let rhs_val = other_inst.fields.get(&field.name);
-                                match (lhs_val, rhs_val) {
+                                match (af.get(&field.name), bf.get(&field.name)) {
                                     (Some(a), Some(b)) => {
                                         let cmp = dispatch_eq(state, a, b)?;
                                         if !matches!(cmp, Value::Bool(true)) {

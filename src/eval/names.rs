@@ -210,6 +210,20 @@ pub async fn eval_attribute(
         None => (eval_expr(state, &node.value, tools).await?, None),
     };
     let obj = resolve_proxy(&obj).await?;
+    getattr_on_value(state, obj, attr_name, tools, place_for_upgrade).await
+}
+
+/// Attribute lookup on an already-evaluated receiver. Shared by
+/// `obj.attr` and the bounded `getattr` builtin. Always runs
+/// [`validate_attribute`] so blocked dunders stay unreachable.
+pub(crate) async fn getattr_on_value(
+    state: &mut InterpreterState,
+    obj: Value,
+    attr_name: &str,
+    tools: &Tools,
+    place_for_upgrade: Option<&crate::eval::place::Place>,
+) -> EvalResult {
+    validator::validate_attribute(attr_name)?;
 
     // Property dispatch (B2): if `obj` is an instance whose MRO
     // defines a @property for this attribute, call the getter. Data
@@ -484,6 +498,7 @@ pub async fn eval_subscript(
                     if let Value::String(field_name) = &field_names[idx] {
                         return Ok(inst
                             .fields
+                            .lock()
                             .get(field_name.as_str())
                             .cloned()
                             .unwrap_or(Value::None));

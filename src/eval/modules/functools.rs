@@ -82,7 +82,10 @@ pub async fn call(
             let mut fields = std::collections::BTreeMap::new();
             fields.insert("cmp".into(), cmp);
             fields.insert("obj".into(), obj);
-            Ok(Value::Instance(InstanceValue { class_name: CMP_KEY_CLASS.into(), fields }))
+            Ok(Value::Instance(InstanceValue {
+                class_name: CMP_KEY_CLASS.into(),
+                fields: crate::value::shared_fields(fields),
+            }))
         }
         "wraps" => {
             // wraps(wrapped) -> identity decorator. CPython's wraps
@@ -235,25 +238,17 @@ pub(crate) async fn try_cmp_key_lt(
     if a.class_name != CMP_KEY_CLASS || b.class_name != CMP_KEY_CLASS {
         return None;
     }
-    let cmp = a.fields.get("cmp")?;
-    let oa = a.fields.get("obj")?;
-    let ob = b.fields.get("obj")?;
-    // mycmp(a, b) -> negative / zero / positive
-    let call = crate::eval::functions::CallArgs {
-        positional: &[oa.clone(), ob.clone()],
-        keyword: &IndexMap::new(),
+    let (cmp, oa, ob) = {
+        let af = a.fields.lock();
+        let bf = b.fields.lock();
+        (af.get("cmp")?.clone(), af.get("obj")?.clone(), bf.get("obj")?.clone())
     };
-    // Reuse call_value_as_function through a small async block.
+    // mycmp(a, b) -> negative / zero / positive
     Some(
         async {
-            let result = crate::eval::functions::call_value_as_function(
-                state,
-                cmp,
-                &[oa.clone(), ob.clone()],
-                tools,
-            )
-            .await?;
-            let _ = call;
+            let result =
+                crate::eval::functions::call_value_as_function(state, &cmp, &[oa, ob], tools)
+                    .await?;
             let n = match result {
                 Value::Int(i) => i,
                 Value::Bool(b) => i64::from(b),

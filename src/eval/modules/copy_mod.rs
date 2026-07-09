@@ -68,12 +68,12 @@ fn deep_clone(value: &Value) -> Value {
         }
         Value::Instance(inst) => {
             let mut fields = std::collections::BTreeMap::new();
-            for (k, v) in &inst.fields {
+            for (k, v) in inst.fields.lock().iter() {
                 fields.insert(k.clone(), deep_clone(v));
             }
             Value::Instance(crate::value::InstanceValue {
                 class_name: inst.class_name.clone(),
-                fields,
+                fields: crate::value::shared_fields(fields),
             })
         }
         other => other.clone(),

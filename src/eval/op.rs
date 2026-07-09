@@ -160,7 +160,7 @@ fn namedtuple_items(state: &InterpreterState, value: &Value) -> Option<Vec<Value
         let Value::String(fname) = name else {
             return None;
         };
-        items.push(inst.fields.get(fname.as_str()).cloned().unwrap_or(Value::None));
+        items.push(inst.fields.lock().get(fname.as_str()).cloned().unwrap_or(Value::None));
     }
     Some(items)
 }
@@ -414,10 +414,14 @@ fn dataclass_order_compare(
     }
     let fields = class.dataclass_fields.as_ref()?;
     // Build compare-key tuples (fields with compare=True, in order).
-    let key_a: Vec<&Value> =
-        fields.iter().filter(|f| f.compare).filter_map(|f| a.fields.get(&f.name)).collect();
-    let key_b: Vec<&Value> =
-        fields.iter().filter(|f| f.compare).filter_map(|f| b.fields.get(&f.name)).collect();
+    let key_a: Vec<Value> = {
+        let af = a.fields.lock();
+        fields.iter().filter(|f| f.compare).filter_map(|f| af.get(&f.name).cloned()).collect()
+    };
+    let key_b: Vec<Value> = {
+        let bf = b.fields.lock();
+        fields.iter().filter(|f| f.compare).filter_map(|f| bf.get(&f.name).cloned()).collect()
+    };
     // Lexicographic compare using values_equal / dispatch_lt for elements.
     let mut less = false;
     let mut equal = true;
