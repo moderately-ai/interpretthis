@@ -1,7 +1,7 @@
 ---
 id: invoke-set-name-on-attribute-binding
 title: Invoke __set_name__ on attribute binding
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

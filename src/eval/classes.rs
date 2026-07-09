@@ -196,6 +196,9 @@ pub async fn eval_class_def(
     // single-pass eval registers bases before their derivatives).
     let mro = build_mro(class_name, &bases, &state.classes)?;
     let bases_for_hook = bases.clone();
+    // Snapshot class attrs for PEP 487 `__set_name__` before move into registry.
+    let attrs_for_set_name: Vec<(String, Value)> =
+        class_attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
     state.classes.insert(
         class_name.to_string(),
@@ -218,6 +221,10 @@ pub async fn eval_class_def(
     state
         .set_variable(class_name, Value::Class(class_name.to_string()))
         .map_err(EvalError::Interpreter)?;
+
+    // PEP 487: after the class dict is built, call `__set_name__(cls, name)`
+    // on each attribute that defines it (descriptors / named objects).
+    invoke_set_name(state, class_name, &attrs_for_set_name, tools).await?;
 
     // PEP 487: invoke each base's `__init_subclass__` (classmethod-style)
     // with the newly created class. Walk direct bases only; each base
@@ -450,6 +457,30 @@ pub(crate) async fn apply_decorator(
 /// an enum subclass. Methods (FunctionDef / Lambda) inside an enum
 /// body stay unwrapped so they can be invoked. Non-method values
 /// (the typical case: `RED = 1`) become EnumMember.
+/// Call `attr.__set_name__(owner, name)` for each class attribute that
+/// defines `__set_name__` (PEP 487).
+async fn invoke_set_name(
+    state: &mut InterpreterState,
+    class_name: &str,
+    attrs: &[(String, Value)],
+    tools: &Tools,
+) -> Result<(), EvalError> {
+    let owner = Value::Class(class_name.to_string());
+    let empty_kwargs = IndexMap::new();
+    for (name, value) in attrs {
+        let Value::Instance(inst) = value else {
+            continue;
+        };
+        let Some((_, def)) = lookup_method_in_mro(state, &inst.class_name, "__set_name__") else {
+            continue;
+        };
+        let name_val = Value::String(name.as_str().into());
+        let call = CallArgs { positional: &[owner.clone(), name_val], keyword: &empty_kwargs };
+        let (_ret, _self) = call_method(state, &def, value.clone(), call, tools).await?;
+    }
+    Ok(())
+}
+
 /// Call `Base.__init_subclass__(cls)` for each direct base that defines it.
 /// CPython always treats `__init_subclass__` as a classmethod; the new
 /// subclass is passed as the first argument (`cls`).
