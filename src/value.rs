@@ -592,11 +592,14 @@ pub struct ClassValue {
     /// `@dataclass(order=True)` — rich comparisons use field tuples.
     #[serde(default)]
     pub order: bool,
-    /// `@dataclass(slots=True)` — only declared dataclass fields may be
-    /// set on instances (CPython's no-`__dict__` restriction, modelled
-    /// as field-name allowlist rather than layout change).
+    /// `@dataclass(slots=True)` or class-body `__slots__` — only listed
+    /// fields may be set on instances (CPython's no-`__dict__` restriction,
+    /// modelled as a field-name allowlist rather than layout change).
     #[serde(default)]
     pub slots: bool,
+    /// Names allowed when `slots` is true (from `__slots__` or dataclass fields).
+    #[serde(default)]
+    pub slot_names: Vec<String>,
 }
 
 /// A single field of an `@dataclass`-decorated class.
@@ -903,6 +906,9 @@ pub struct ExceptionValue {
     pub args: Vec<Value>,
     #[serde(default)]
     pub stamped_line: Option<u32>,
+    /// Nested exceptions for `ExceptionGroup` / `BaseExceptionGroup` (PEP 654).
+    #[serde(default)]
+    pub exceptions: Option<Vec<Self>>,
 }
 
 impl ExceptionValue {
@@ -923,7 +929,33 @@ impl ExceptionValue {
         } else {
             vec![Value::String(message.clone().into())]
         };
-        Self { type_name: type_name.into(), message, cause: None, args, stamped_line: None }
+        Self {
+            type_name: type_name.into(),
+            message,
+            cause: None,
+            args,
+            stamped_line: None,
+            exceptions: None,
+        }
+    }
+
+    /// Build an `ExceptionGroup` (or `BaseExceptionGroup`) with nested exceptions.
+    #[must_use]
+    pub fn group(
+        type_name: impl Into<String>,
+        message: impl Into<String>,
+        exceptions: Vec<Self>,
+    ) -> Self {
+        let message = message.into();
+        let nested: Vec<Value> = exceptions.iter().cloned().map(Value::Exception).collect();
+        Self {
+            type_name: type_name.into(),
+            message: message.clone(),
+            cause: None,
+            args: vec![Value::String(message.into()), Value::List(shared_list(nested))],
+            stamped_line: None,
+            exceptions: Some(exceptions),
+        }
     }
 
     /// Attach a `raise X from Y`-style cause.

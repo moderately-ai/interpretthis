@@ -12,6 +12,162 @@ use crate::{
     value::{ExceptionValue, Value},
 };
 
+/// Evaluate a `try` / `except*` / `finally` block (PEP 654).
+///
+/// Matching handlers receive an `ExceptionGroup` containing only the
+/// nested exceptions that matched; unmatched parts re-raise as a new
+/// group (or a single exception if only one remains).
+pub async fn eval_try_star(
+    state: &mut InterpreterState,
+    node: &ast::StmtTryStar,
+    tools: &Tools,
+) -> EvalResult {
+    // Reuse the same shape as StmtTry by constructing a thin adapter.
+    let as_try = ast::StmtTry {
+        range: node.range,
+        body: node.body.clone(),
+        handlers: node.handlers.clone(),
+        orelse: node.orelse.clone(),
+        finalbody: node.finalbody.clone(),
+    };
+    eval_try_star_inner(state, &as_try, tools).await
+}
+
+async fn eval_try_star_inner(
+    state: &mut InterpreterState,
+    node: &ast::StmtTry,
+    tools: &Tools,
+) -> EvalResult {
+    let mut result = Value::None;
+    let mut pending_error: Option<EvalError> = None;
+
+    match eval_body(state, &node.body, tools).await {
+        Ok(val) => {
+            result = val;
+            match eval_body(state, &node.orelse, tools).await {
+                Ok(val) => result = val,
+                Err(e) => pending_error = Some(e),
+            }
+        }
+        Err(EvalError::Signal(sig)) => {
+            pending_error = Some(EvalError::Signal(sig));
+        }
+        Err(EvalError::Exception(exc)) => {
+            match try_match_star_handlers(state, &exc, &node.handlers, tools).await? {
+                Some((value, new_error)) => {
+                    result = value;
+                    pending_error = new_error;
+                }
+                None => pending_error = Some(EvalError::Exception(exc)),
+            }
+        }
+        Err(EvalError::Interpreter(ie)) => {
+            let exc = interpreter_error_to_exception(&ie);
+            match try_match_star_handlers(state, &exc, &node.handlers, tools).await? {
+                Some((value, new_error)) => {
+                    result = value;
+                    pending_error = new_error;
+                }
+                None => pending_error = Some(EvalError::Interpreter(ie)),
+            }
+        }
+    }
+
+    if !node.finalbody.is_empty() {
+        if let Err(finally_err) = eval_body(state, &node.finalbody, tools).await {
+            pending_error = Some(finally_err);
+        }
+    }
+
+    if let Some(err) = pending_error {
+        return Err(err);
+    }
+    Ok(result)
+}
+
+/// Split an exception (group) across `except*` handlers.
+async fn try_match_star_handlers(
+    state: &mut InterpreterState,
+    exc: &ExceptionValue,
+    handlers: &[ast::ExceptHandler],
+    tools: &Tools,
+) -> Result<Option<(Value, Option<EvalError>)>, EvalError> {
+    // Flatten to a worklist of leaf/group exceptions to match.
+    let mut remaining: Vec<ExceptionValue> = if let Some(nested) = &exc.exceptions {
+        nested.clone()
+    } else {
+        // except* on a non-group: CPython still allows matching if type matches,
+        // wrapping the single exception as a group for the handler.
+        vec![exc.clone()]
+    };
+
+    let mut any_matched = false;
+    let mut last_value = Value::None;
+    let mut handler_error: Option<EvalError> = None;
+
+    for handler in handlers {
+        let ast::ExceptHandler::ExceptHandler(h) = handler;
+        if remaining.is_empty() {
+            break;
+        }
+
+        let mut matched = Vec::new();
+        let mut unmatched = Vec::new();
+        for leaf in remaining.drain(..) {
+            if matches_handler(state, &leaf, h, tools).await? {
+                matched.push(leaf);
+            } else {
+                unmatched.push(leaf);
+            }
+        }
+        remaining = unmatched;
+
+        if matched.is_empty() {
+            continue;
+        }
+        any_matched = true;
+
+        let group = ExceptionValue::group("ExceptionGroup", exc.message.clone(), matched);
+
+        if let Some(ref name) = h.name {
+            state
+                .set_variable(name.as_str(), Value::Exception(group.clone()))
+                .map_err(EvalError::Interpreter)?;
+        }
+
+        state.active_exception_stack.push(group);
+        let body_result = eval_body(state, &h.body, tools).await;
+        state.active_exception_stack.pop();
+
+        match body_result {
+            Ok(val) => last_value = val,
+            Err(err) => {
+                handler_error = Some(err);
+                break;
+            }
+        }
+
+        if let Some(ref name) = h.name {
+            let _ = state.delete_variable(name.as_str());
+        }
+    }
+
+    if let Some(err) = handler_error {
+        return Ok(Some((last_value, Some(err))));
+    }
+
+    if !remaining.is_empty() {
+        let re_raise = if remaining.len() == 1 && remaining[0].exceptions.is_none() {
+            remaining.into_iter().next().unwrap()
+        } else {
+            ExceptionValue::group("ExceptionGroup", exc.message.clone(), remaining)
+        };
+        return Ok(Some((last_value, Some(EvalError::Exception(re_raise)))));
+    }
+
+    if any_matched { Ok(Some((last_value, None))) } else { Ok(None) }
+}
+
 /// Evaluate a try/except/finally block.
 ///
 /// Key semantics:
@@ -210,9 +366,9 @@ fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool {
             "UnicodeError" => "ValueError",
             "NotImplementedError" | "RecursionError" => "RuntimeError",
             "AssertionError" | "AttributeError" | "NameError" | "TypeError" | "ValueError"
-            | "RuntimeError" | "OSError" | "LookupError" | "ArithmeticError" | "StopIteration" => {
-                "Exception"
-            }
+            | "RuntimeError" | "OSError" | "LookupError" | "ArithmeticError" | "StopIteration"
+            | "ExceptionGroup" => "Exception",
+            "BaseExceptionGroup" => "BaseException",
             "Exception" => "BaseException",
             _ => return false,
         };

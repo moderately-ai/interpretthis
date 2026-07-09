@@ -344,9 +344,11 @@ pub(crate) fn apply_dataclass(
         .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
     class_mut.class_attrs.insert("__match_args__".to_string(), match_args);
     if slots {
-        let slot_names =
-            Value::Tuple(fields.iter().map(|f| Value::String(f.name.as_str().into())).collect());
-        class_mut.class_attrs.insert("__slots__".to_string(), slot_names);
+        let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+        let slot_tup =
+            Value::Tuple(names.iter().map(|n| Value::String(n.as_str().into())).collect());
+        class_mut.class_attrs.insert("__slots__".to_string(), slot_tup);
+        class_mut.slot_names = names;
     }
     class_mut.dataclass_fields = Some(fields);
     class_mut.frozen = frozen;

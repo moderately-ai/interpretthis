@@ -339,6 +339,7 @@ fn ensure_cmp_key_class(state: &mut InterpreterState) {
             frozen: false,
             order: false,
             slots: false,
+            slot_names: Vec::new(),
         },
     );
 }

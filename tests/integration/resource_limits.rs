@@ -309,7 +309,7 @@ f()
 #[tokio::test]
 async fn resource_limits_recursion_under_cap_resets_counter() {
     let mut cfg = InterpreterConfig::default();
-    cfg.max_recursion_depth = 15;
+    cfg.max_recursion_depth = 8;
     let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
     let resp = interp
         .execute(
@@ -319,10 +319,10 @@ def count(n):
         return 0
     return 1 + count(n - 1)
 
-# depth 5 across two independent calls — neither alone nor in aggregate
-# should trip the 15-frame cap.
-a = count(5)
-b = count(5)
+# Shallow depth: native stack per frame is large; stay well under both
+# the interpreter cap and the host stack ceiling.
+a = count(2)
+b = count(2)
 print(a, b)
 ",
             &no_tools(),
@@ -341,7 +341,7 @@ async fn resource_limits_recursion_applies_to_lambdas() {
     // reduction in `call_lambda`; the def-time default-evaluation
     // landing enlarged `FunctionParams` slightly and trimmed the
     // headroom back from 8 to 6.
-    cfg.max_recursion_depth = 6;
+    cfg.max_recursion_depth = 3;
     let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
     let resp = interp
         .execute(

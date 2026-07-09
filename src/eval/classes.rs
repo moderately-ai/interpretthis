@@ -63,13 +63,29 @@ pub async fn eval_class_def(
         class_name,
     )?;
 
-    if !node.keywords.is_empty() {
-        return Err(InterpreterError::Security(
-            "class keyword arguments (e.g. metaclass=) are not supported \
-             (see CONFORMANCE.md#unsupported-language-features)"
-                .into(),
-        )
-        .into());
+    // Optional `metaclass=` (other class keywords still rejected).
+    let mut metaclass_name: Option<String> = None;
+    for kw in &node.keywords {
+        let key = kw.arg.as_ref().map(|a| a.as_str());
+        if key != Some("metaclass") {
+            return Err(InterpreterError::TypeError(format!(
+                "class keyword argument '{}' is not supported",
+                key.unwrap_or("<unknown>")
+            ))
+            .into());
+        }
+        let val = eval_expr(state, &kw.value, tools).await?;
+        match val {
+            Value::BuiltinName(n) | Value::Type(n) if n == "type" => {}
+            Value::Class(n) => metaclass_name = Some(n),
+            other => {
+                return Err(InterpreterError::TypeError(format!(
+                    "metaclass must be a type, not '{}'",
+                    other.type_name()
+                ))
+                .into());
+            }
+        }
     }
 
     // Collect declared bases (excluding the implicit `object`, which we
@@ -215,6 +231,9 @@ pub async fn eval_class_def(
     let attrs_for_set_name: Vec<(String, Value)> =
         class_attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
+    // Class-body `__slots__ = ('x', 'y')` / `"x"` / `["x"]`.
+    let (slots, slot_names) = parse_slots_attr(class_attrs.get("__slots__"));
+
     state.classes.insert(
         class_name.to_string(),
         ClassValue {
@@ -231,12 +250,18 @@ pub async fn eval_class_def(
             dataclass_fields: None,
             frozen: false,
             order: false,
-            slots: false,
+            slots,
+            slot_names,
         },
     );
     state
         .set_variable(class_name, Value::Class(class_name.to_string()))
         .map_err(EvalError::Interpreter)?;
+
+    // Metaclass `__new__` (PEP 3115 subset): Meta.__new__(Meta, name, bases, ns).
+    if let Some(meta) = metaclass_name {
+        invoke_metaclass_new(state, class_name, &meta, tools).await?;
+    }
 
     // PEP 487: after the class dict is built, call `__set_name__(cls, name)`
     // on each attribute that defines it (descriptors / named objects).
@@ -1340,4 +1365,144 @@ pub fn lookup_method_in_mro(
         }
     }
     None
+}
+
+/// `type(name, bases, dict)` — dynamic class creation.
+pub(crate) fn dynamic_type_new(
+    state: &mut InterpreterState,
+    name_v: &Value,
+    bases_v: &Value,
+    dict_v: &Value,
+) -> Result<Value, EvalError> {
+    let Value::String(name) = name_v else {
+        return Err(InterpreterError::TypeError("type() argument 1 must be str".into()).into());
+    };
+    let class_name = name.to_string();
+    let mut bases: Vec<String> = Vec::new();
+    let base_items: Vec<Value> = match bases_v {
+        Value::Tuple(items) => items.clone(),
+        Value::List(l) => l.lock().clone(),
+        _ => {
+            return Err(
+                InterpreterError::TypeError("type() argument 2 must be a tuple".into()).into()
+            );
+        }
+    };
+    for b in base_items {
+        match b {
+            Value::Class(n) => bases.push(n),
+            Value::ExceptionType(n) => bases.push(n),
+            Value::Type(n) | Value::BuiltinName(n) if n == "object" || n == "type" => {}
+            other => {
+                return Err(InterpreterError::TypeError(format!(
+                    "type() bases must be types, not '{}'",
+                    other.type_name()
+                ))
+                .into());
+            }
+        }
+    }
+    let mut class_attrs = BTreeMap::new();
+    if let Value::Dict(map) = dict_v {
+        for (k, v) in map {
+            if let crate::value::ValueKey::String(s) = k {
+                class_attrs.insert(s.to_string(), v.clone());
+            }
+        }
+    } else {
+        return Err(InterpreterError::TypeError("type() argument 3 must be a dict".into()).into());
+    }
+    let mro = build_mro(&class_name, &bases, &state.classes)?;
+    let (slots, slot_names) = parse_slots_attr(class_attrs.get("__slots__"));
+    state.classes.insert(
+        class_name.clone(),
+        ClassValue {
+            name: class_name.clone(),
+            methods: BTreeMap::new(),
+            class_attrs,
+            bases,
+            mro,
+            properties: BTreeMap::new(),
+            static_methods: BTreeMap::new(),
+            class_methods: BTreeMap::new(),
+            enum_kind: None,
+            annotations: Vec::new(),
+            dataclass_fields: None,
+            frozen: false,
+            order: false,
+            slots,
+            slot_names,
+        },
+    );
+    Ok(Value::Class(class_name))
+}
+
+/// Call `Meta.__new__(Meta, name, bases, namespace)` when present.
+async fn invoke_metaclass_new(
+    state: &mut InterpreterState,
+    class_name: &str,
+    meta: &str,
+    tools: &Tools,
+) -> Result<(), EvalError> {
+    let Some((_, method)) = lookup_method_in_mro(state, meta, "__new__") else {
+        return Ok(());
+    };
+    let class = state
+        .classes
+        .get(class_name)
+        .cloned()
+        .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
+    let mut ns = IndexMap::new();
+    for (k, v) in &class.class_attrs {
+        ns.insert(crate::value::ValueKey::String(k.as_str().into()), v.clone());
+    }
+    let bases_t = Value::Tuple(class.bases.iter().map(|b| Value::Class(b.clone())).collect());
+    let name_v = Value::String(class_name.into());
+    let ns_v = Value::Dict(ns);
+    let meta_v = Value::Class(meta.to_string());
+    // call_method prepends the receiver as `self`/`cls`.
+    let call = crate::eval::functions::CallArgs {
+        positional: &[name_v, bases_t, ns_v],
+        keyword: &IndexMap::new(),
+    };
+    let (returned, _) = call_method(state, &method, meta_v, call, tools).await?;
+    match returned {
+        Value::Class(n) => {
+            state.set_variable(class_name, Value::Class(n)).map_err(EvalError::Interpreter)?;
+        }
+        Value::None => {}
+        other => {
+            state.set_variable(class_name, other).map_err(EvalError::Interpreter)?;
+        }
+    }
+    Ok(())
+}
+
+/// Parse class-body `__slots__` into (enabled, names).
+fn parse_slots_attr(attr: Option<&Value>) -> (bool, Vec<String>) {
+    let Some(attr) = attr else {
+        return (false, Vec::new());
+    };
+    let names = match attr {
+        Value::String(s) => vec![s.to_string()],
+        Value::Tuple(items) => items
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect(),
+        Value::List(shared) => {
+            let guard = shared.lock();
+            guard
+                .iter()
+                .filter_map(|v| match v {
+                    Value::String(s) => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+        _ => return (false, Vec::new()),
+    };
+    (true, names)
 }

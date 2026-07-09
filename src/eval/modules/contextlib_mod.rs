@@ -134,6 +134,7 @@ fn ensure_marker_classes(state: &mut InterpreterState) {
                 frozen: false,
                 order: false,
                 slots: false,
+                slot_names: Vec::new(),
             },
         );
     }

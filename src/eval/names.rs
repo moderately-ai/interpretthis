@@ -113,6 +113,8 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "NameError",
         "ArithmeticError",
         "LookupError",
+        "ExceptionGroup",
+        "BaseExceptionGroup",
     ];
     if exception_types.contains(&name) {
         return Ok(Value::ExceptionType(name.to_string()));
@@ -415,6 +417,14 @@ fn attribute_error(type_name: &str, attr_name: &str) -> EvalError {
 ///   the message body.
 fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
     match attr_name {
+        "exceptions" => {
+            let items = exc
+                .exceptions
+                .as_ref()
+                .map(|xs| xs.iter().cloned().map(Value::Exception).collect())
+                .unwrap_or_default();
+            Ok(Value::Tuple(items))
+        }
         // `args` is the truth — ExceptionValue::new defaults it from
         // the message (empty message → empty tuple, non-empty →
         // (message,)) so this never needs a synthesis fallback. Multi-

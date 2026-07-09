@@ -168,6 +168,7 @@ pub fn eval_stmt<'a>(
             }
             Stmt::FunctionDef(node) => functions::eval_function_def(state, node, tools).await,
             Stmt::Try(node) => exceptions::eval_try(state, node, tools).await,
+            Stmt::TryStar(node) => exceptions::eval_try_star(state, node, tools).await,
             Stmt::Raise(node) => exceptions::eval_raise(state, node, tools).await,
             Stmt::Assert(node) => exceptions::eval_assert(state, node, tools).await,
             Stmt::Delete(node) => delete::eval_delete(state, node, tools).await,

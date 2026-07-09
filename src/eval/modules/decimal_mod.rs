@@ -171,6 +171,7 @@ fn ensure_context_class(state: &mut crate::state::InterpreterState) {
             frozen: false,
             order: false,
             slots: false,
+            slot_names: Vec::new(),
         },
     );
 }

@@ -551,12 +551,15 @@ pub async fn eval_call(
     // this arm covers the direct-call form where `name` is the raw
     // identifier from the AST. Args are preserved for `e.args`.
     if is_exception_type_name(name) {
-        let message = match args.len() {
-            0 => String::new(),
-            1 => format!("{}", args[0]),
-            _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
-        };
-        return Ok(Value::Exception(ExceptionValue::new(name, message).with_args(args.clone())));
+        // Funnel through the same ExceptionType constructor used for
+        // indirect calls so ExceptionGroup gets the PEP 654 shape.
+        return call_value_as_function(
+            state,
+            &Value::ExceptionType(name.to_string()),
+            &args,
+            tools,
+        )
+        .await;
     }
 
     // `NameError`'s Display already renders `name '{0}' is not defined`, so the

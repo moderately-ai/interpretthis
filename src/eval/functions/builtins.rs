@@ -45,6 +45,8 @@ pub fn is_exception_type_name(name: &str) -> bool {
             | "NameError"
             | "ArithmeticError"
             | "LookupError"
+            | "ExceptionGroup"
+            | "BaseExceptionGroup"
     )
 }
 
@@ -209,6 +211,12 @@ pub(super) async fn try_builtin(
             Ok(Some(Value::Bool(truthy)))
         }
         "type" => {
+            // One-arg: type(x). Three-arg: type(name, bases, dict) dynamic class.
+            if args.len() == 3 {
+                return Ok(Some(crate::eval::classes::dynamic_type_new(
+                    state, &args[0], &args[1], &args[2],
+                )?));
+            }
             check_arg_count(name, args, 1, 1)?;
             // `type(x)` yields a type object: the class object for an instance
             // (so `type(p) is P` and `type(p).__name__ == 'P'`), and a built-in

@@ -397,13 +397,13 @@ pub fn assign_target<'a>(
                                     ),
                                 ));
                             }
-                            // `@dataclass(slots=True)` — only declared fields.
+                            // `__slots__` / `@dataclass(slots=True)` allowlist.
                             if let Some(class) = state.classes.get(&class_name) {
                                 if class.slots {
-                                    let allowed = class
-                                        .dataclass_fields
-                                        .as_ref()
-                                        .is_some_and(|fs| fs.iter().any(|f| f.name == attr_name));
+                                    let allowed = class.slot_names.iter().any(|n| n == &attr_name)
+                                        || class.dataclass_fields.as_ref().is_some_and(|fs| {
+                                            fs.iter().any(|f| f.name == attr_name)
+                                        });
                                     if !allowed {
                                         return Err(InterpreterError::AttributeError(format!(
                                             "'{class_name}' object has no attribute '{attr_name}'"

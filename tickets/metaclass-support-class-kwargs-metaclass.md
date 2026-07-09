@@ -1,7 +1,7 @@
 ---
 id: metaclass-support-class-kwargs-metaclass
 title: Metaclass support (class kwargs / metaclass=)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

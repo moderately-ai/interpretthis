@@ -367,6 +367,7 @@ pub(crate) fn call_namedtuple_with_state(
             frozen: false,
             order: false,
             slots: false,
+            slot_names: Vec::new(),
         },
     );
     Ok(Value::Class(class_name_str))

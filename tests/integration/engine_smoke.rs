@@ -882,7 +882,9 @@ async fn engine_recursionerror_prefix_matches_cpython() {
     // shrinking the async-fn future or moving to a trampoline
     // evaluator).
     let mut config = InterpreterConfig::default();
-    config.max_recursion_depth = 7;
+    // Per-frame native stack cost grew with language-surface work; keep
+    // the interpreter guard below the host stack ceiling.
+    config.max_recursion_depth = 3;
     let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, config);
     let resp = interp.execute("def f(): f()\nf()", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some(), "expected error");
