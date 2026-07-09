@@ -1,7 +1,7 @@
 ---
 id: perf-investigate-eval-branch-float-regression
 title: "Performance: investigate eval branch/float loop regression"
-status: ready
+status: done
 priority: p1
 dependencies: []
 related: []

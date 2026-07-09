@@ -270,8 +270,115 @@ pub fn try_eval_expr_sync(
             }
             Some(names::eval_name(state, node, tools))
         }
+        Expr::BinOp(_) | Expr::Compare(_) => try_eval_numeric_expr_sync(state, expr),
         _ => None,
     }
+}
+
+/// Evaluate a numeric-only expression tree without allocating boxed futures.
+///
+/// This deliberately fires only for trees made of numeric constants/current
+/// numeric variables plus `BinOp`/non-membership `Compare`. Names that resolve
+/// to user instances, lazy proxies, strings/containers, builtins, or anything
+/// else return `None` so the async path can preserve dunder/proxy semantics.
+fn try_eval_numeric_expr_sync(state: &mut InterpreterState, expr: &Expr) -> Option<EvalResult> {
+    let outcome = eval_numeric_unmetered(state, expr)?;
+    let op_count = match &outcome {
+        Ok((_, count)) | Err((_, count)) => *count,
+    };
+    for _ in 0..op_count {
+        if let Err(e) = state.increment_ops() {
+            return Some(Err(EvalError::Interpreter(e)));
+        }
+    }
+    Some(match outcome {
+        Ok((value, _)) => Ok(value),
+        Err((err, _)) => Err(err),
+    })
+}
+
+type NumericSync = Result<(Value, usize), (EvalError, usize)>;
+
+fn eval_numeric_unmetered(state: &InterpreterState, expr: &Expr) -> Option<NumericSync> {
+    match expr {
+        Expr::Constant(node) => {
+            let value = literals::eval_constant(&node.value);
+            is_sync_numeric(&value).then_some(Ok((value, 1)))
+        }
+        Expr::Name(node) => {
+            let value = state.get_variable(node.id.as_str())?.clone();
+            is_sync_numeric(&value).then_some(Ok((value, 1)))
+        }
+        Expr::BinOp(node) => {
+            let left = eval_numeric_unmetered(state, &node.left)?;
+            let (left, left_count) = match left {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let right = eval_numeric_unmetered(state, &node.right)?;
+            let (right, right_count) = match right {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let count = left_count + right_count + 1;
+            Some(
+                operations::apply_binop(
+                    &left,
+                    &right,
+                    node.op,
+                    state.decimal_prec,
+                    state.config.max_int_bits,
+                )
+                .map(|value| (value, count))
+                .map_err(|err| (err, count)),
+            )
+        }
+        Expr::Compare(node) => eval_numeric_compare_unmetered(state, node),
+        _ => None,
+    }
+}
+
+fn eval_numeric_compare_unmetered(
+    state: &InterpreterState,
+    node: &rustpython_parser::ast::ExprCompare,
+) -> Option<NumericSync> {
+    if node.ops.iter().any(|op| {
+        matches!(op, rustpython_parser::ast::CmpOp::In | rustpython_parser::ast::CmpOp::NotIn)
+    }) {
+        return None;
+    }
+    let left = eval_numeric_unmetered(state, &node.left)?;
+    let (mut left, mut count) = match left {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    for (op, comparator) in node.ops.iter().zip(node.comparators.iter()) {
+        let right = eval_numeric_unmetered(state, comparator)?;
+        let (right, right_count) = match right {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        count += right_count + 1;
+        let result = match op {
+            rustpython_parser::ast::CmpOp::Is => {
+                Ok(std::mem::discriminant(&left) == std::mem::discriminant(&right) && left == right)
+            }
+            rustpython_parser::ast::CmpOp::IsNot => Ok(!(std::mem::discriminant(&left)
+                == std::mem::discriminant(&right)
+                && left == right)),
+            _ => operations::compare_builtin(state, *op, &left, &right),
+        };
+        match result {
+            Ok(true) => left = right,
+            Ok(false) => return Some(Ok((Value::Bool(false), count))),
+            Err(err) => return Some(Err((err, count))),
+        }
+    }
+    Some(Ok((Value::Bool(true), count)))
+}
+
+const fn is_sync_numeric(value: &Value) -> bool {
+    matches!(value, Value::Bool(_) | Value::Int(_) | Value::BigInt(_) | Value::Float(_))
 }
 
 /// Evaluate a single expression.
