@@ -247,11 +247,12 @@ async fn assign_unpacking(
     // the Lazy cursor and matches CPython's one-shot semantics.
     // Falls back to value_to_iterable's sync paths for builtins by
     // way of dispatch_iter inside op::iter.
-    let items = if matches!(value, Value::Lazy { .. } | Value::Instance(_)) {
-        crate::eval::op::iter(state, &value, tools).await?
-    } else {
-        value_to_iterable(&value)?
-    };
+    let items =
+        if matches!(value, Value::Lazy { .. } | Value::Generator { .. } | Value::Instance(_)) {
+            crate::eval::op::iter(state, &value, tools).await?
+        } else {
+            value_to_iterable(&value)?
+        };
 
     // PEP 3132 starred unpacking: `a, *b, c = ...` — exactly one `*`
     // target consumes the middle slice. CPython's invariant: there

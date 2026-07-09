@@ -170,6 +170,31 @@ fn namedtuple_items(state: &InterpreterState, value: &Value) -> Option<Vec<Value
 /// configured while-iteration budget so a runaway iterator fails
 /// LimitExceeded rather than hanging); falls through to the sync
 /// `types::dispatch_iter` for builtin iterables.
+async fn drain_generator(
+    state: &mut InterpreterState,
+    id: u64,
+    tools: &Tools,
+) -> Result<Vec<Value>, EvalError> {
+    let mut out = Vec::new();
+    loop {
+        match crate::eval::functions::dispatch_generator_method(
+            state,
+            &Value::Generator { id },
+            "__next__",
+            &[],
+            &indexmap::IndexMap::new(),
+            tools,
+        )
+        .await
+        {
+            Ok(v) => out.push(v),
+            Err(EvalError::Exception(exc)) if exc.type_name == "StopIteration" => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
 pub async fn iter(
     state: &mut InterpreterState,
     value: &Value,
@@ -183,6 +208,10 @@ pub async fn iter(
         let remaining: Vec<Value> = items.iter().skip(cursor).cloned().collect();
         state.lazy_cursors.insert(*cursor_id, items.len());
         return Ok(remaining);
+    }
+    if let Value::Generator { id } = value {
+        // Boxed to satisfy async recursion rules (iter → next → body → iter).
+        return Box::pin(drain_generator(state, *id, tools)).await;
     }
     // namedtuple: iterate field values in `_fields` order (CPython
     // inherits tuple iteration). Checked before generic Instance

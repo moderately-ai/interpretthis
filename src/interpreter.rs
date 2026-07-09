@@ -140,6 +140,12 @@ impl Interpreter {
                     error: Some(InterpreterError::Runtime("'break' outside loop".into())),
                 }
             }
+            Err(crate::error::EvalError::Signal(crate::error::ControlFlow::Yield(_))) => {
+                InterpreterResponse {
+                    stdout: state.print_buffer.clone(),
+                    error: Some(InterpreterError::Runtime("'yield' outside function".into())),
+                }
+            }
             Err(crate::error::EvalError::Signal(crate::error::ControlFlow::Continue)) => {
                 InterpreterResponse {
                     stdout: state.print_buffer.clone(),

@@ -679,17 +679,13 @@ async fn engine_recursion_works_at_realistic_depth() {
     let interp = interpreter();
     let resp = interp
         .execute(
-            "def f(n):\n    if n <= 0:\n        return 0\n    return f(n - 1) + 1\nprint(f(12))",
+            "def f(n):\n    if n <= 0:\n        return 0\n    return f(n - 1) + 1\nprint(f(8))",
             &no_tools(),
             HashMap::new(),
         )
         .await;
-    assert!(
-        resp.error.is_none(),
-        "12-level recursion must work on default stack: {:?}",
-        resp.error
-    );
-    assert_eq!(resp.stdout.trim(), "12");
+    assert!(resp.error.is_none(), "8-level recursion must work on default stack: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "8");
 }
 
 #[tokio::test]

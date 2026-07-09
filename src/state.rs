@@ -13,6 +13,43 @@ use crate::{
     value::{ClassValue, Value},
 };
 
+/// Suspended generator function frame (true yield/resume, not eager buffer).
+#[derive(Debug, Clone)]
+pub struct GeneratorFrame {
+    #[allow(dead_code)]
+    pub func_name: String,
+    pub source: String,
+    /// Body AST (shared with function_bodies cache).
+    pub body: std::sync::Arc<Vec<rustpython_parser::ast::Stmt>>,
+    /// Names this frame may touch (for capture/restore).
+    pub touched: Vec<String>,
+    /// Frame-local bindings at last suspend (or initial args).
+    pub locals: rustc_hash::FxHashMap<String, crate::value::Value>,
+    pub started: bool,
+    pub finished: bool,
+    pub closed: bool,
+    /// Result of the `yield` expression on resume (`send` value).
+    pub send_value: crate::value::Value,
+    /// When true, the next `yield` expression returns `send_value` instead of suspending.
+    pub resume_at_yield: bool,
+    /// Next top-level statement index in `body`.
+    pub stmt_index: usize,
+    /// Nested for-loop / yield-from resume states (innermost last).
+    pub for_stack: Vec<GeneratorForState>,
+}
+
+/// Resume state for a `for` loop that suspended on `yield` in its body.
+#[derive(Debug, Clone)]
+pub struct GeneratorForState {
+    pub items: Vec<crate::value::Value>,
+    /// Index of the current item (the one whose body is in progress).
+    pub pos: usize,
+    /// Next statement index in the for-body after a yield resume.
+    pub body_index: usize,
+    /// Simple name target only (`for x in ...`). Empty => yield-from drain.
+    pub target: String,
+}
+
 /// Internal state of the interpreter — variables, print buffer, limits.
 pub struct InterpreterState {
     pub variables: FxHashMap<String, Value>,
@@ -67,6 +104,10 @@ pub struct InterpreterState {
     /// wrapped as a `Value::List`. The stack lets nested generator
     /// calls keep their yields separate. Transient — not serialized.
     pub yield_stack: Vec<Vec<Value>>,
+    /// Active suspended generators keyed by `Value::Generator::id`.
+    pub generators: rustc_hash::FxHashMap<u64, GeneratorFrame>,
+    /// Stack of generators currently being stepped (supports yield-from).
+    pub active_generator_stack: Vec<u64>,
     /// Active-exception stack for exception-handler bodies. Pushed by
     /// `try_match_handlers` on entry to a matching handler, popped on
     /// exit. Bare `raise` re-raises the top; a new exception raised
@@ -152,6 +193,8 @@ impl InterpreterState {
             call_depth: 0,
             method_frame_stack: Vec::new(),
             yield_stack: Vec::new(),
+            generators: rustc_hash::FxHashMap::default(),
+            active_generator_stack: Vec::new(),
             active_exception_stack: Vec::new(),
             lazy_cursors: FxHashMap::default(),
             next_cursor_id: 0,
@@ -487,6 +530,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::BuiltinName(n) | Value::ToolName(n) | Value::ExceptionType(n) => 16 + n.len(),
         Value::UnboundClassMethod { class, method } => 16 + class.len() + method.len(),
         Value::Lazy { items, .. } => 24 + items.iter().map(estimate_value_size).sum::<usize>(),
+        Value::Generator { .. } => 16,
         Value::Partial(data) => {
             16 + estimate_value_size(&data.func)
                 + data.args.iter().map(estimate_value_size).sum::<usize>()

@@ -1,7 +1,7 @@
 ---
 id: generator-true-suspend-frames-not-eager-buffer
 title: "Generators: true suspend frames (not eager Lazy buffer)"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [epic-post-0-2-hardening-and-parity]

@@ -329,32 +329,69 @@ pub fn eval_expr<'a>(
         Expr::Starred(node) => eval_expr(state, &node.value, tools),
         Expr::Slice(node) => Box::pin(names::eval_slice(state, node, tools)),
         Expr::Yield(node) => Box::pin(async move {
+            // Resume: deliver send(value) as the result of this yield expr.
+            if let Some(&id) = state.active_generator_stack.last() {
+                if let Some(frame) = state.generators.get_mut(&id) {
+                    if frame.resume_at_yield {
+                        frame.resume_at_yield = false;
+                        return Ok(std::mem::replace(&mut frame.send_value, Value::None));
+                    }
+                }
+            }
             let value = if let Some(ref v) = node.value {
                 eval_expr(state, v, tools).await?
             } else {
                 Value::None
             };
-            let Some(buffer) = state.yield_stack.last_mut() else {
-                return Err(InterpreterError::Runtime(
-                    "'yield' outside function: yield can only appear inside a generator function"
-                        .into(),
-                )
-                .into());
-            };
-            buffer.push(value);
-            Ok(Value::None)
+            // Nested/eager path still uses yield_stack.
+            if let Some(buffer) = state.yield_stack.last_mut() {
+                buffer.push(value);
+                return Ok(Value::None);
+            }
+            if !state.active_generator_stack.is_empty() {
+                return Err(EvalError::Signal(ControlFlow::Yield(Box::new(value))));
+            }
+            Err(InterpreterError::Runtime(
+                "'yield' outside function: yield can only appear inside a generator function"
+                    .into(),
+            )
+            .into())
         }),
         Expr::YieldFrom(node) => Box::pin(async move {
             let source = eval_expr(state, &node.value, tools).await?;
             let items = crate::eval::op::iter(state, &source, tools).await?;
-            let Some(buffer) = state.yield_stack.last_mut() else {
-                return Err(InterpreterError::Runtime(
-                    "'yield from' outside function: yield from can only appear inside a generator function".into(),
-                )
-                .into());
-            };
-            buffer.extend(items);
-            Ok(Value::None)
+            if let Some(buffer) = state.yield_stack.last_mut() {
+                buffer.extend(items);
+                return Ok(Value::None);
+            }
+            // Streaming yield-from: materialise then yield first; rest via for_stack-like queue.
+            if let Some(&id) = state.active_generator_stack.last() {
+                if let Some(frame) = state.generators.get_mut(&id) {
+                    if frame.resume_at_yield {
+                        frame.resume_at_yield = false;
+                        return Ok(std::mem::replace(&mut frame.send_value, Value::None));
+                    }
+                    if items.is_empty() {
+                        return Ok(Value::None);
+                    }
+                    let mut rest = items;
+                    let first = rest.remove(0);
+                    // Reuse for_stack as a synthetic loop over remaining items.
+                    if !rest.is_empty() {
+                        frame.for_stack.push(crate::state::GeneratorForState {
+                            items: rest,
+                            pos: 0,
+                            body_index: 0,
+                            target: String::new(), // empty => pure yield-from drain
+                        });
+                    }
+                    return Err(EvalError::Signal(ControlFlow::Yield(Box::new(first))));
+                }
+            }
+            Err(InterpreterError::Runtime(
+                "'yield from' outside function: yield from can only appear inside a generator function".into(),
+            )
+            .into())
         }),
         Expr::Await(_) => Box::pin(async move {
             Err(InterpreterError::Runtime(

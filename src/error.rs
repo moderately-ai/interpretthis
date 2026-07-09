@@ -116,6 +116,9 @@ pub(crate) enum ControlFlow {
     Break,
     Continue,
     Return(Box<crate::value::Value>),
+    /// Generator suspended at `yield` / `yield from` with the yielded value.
+    /// Unwound to the generator driver (not catchable by user `try`).
+    Yield(Box<crate::value::Value>),
 }
 
 /// Internal error type used throughout the evaluator layer.

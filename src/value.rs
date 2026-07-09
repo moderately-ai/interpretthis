@@ -257,6 +257,9 @@ pub enum Value {
     /// stored in two variables shares one cursor — matching CPython's
     /// reference semantics for generators bound to multiple names).
     Lazy { items: Vec<Self>, cursor_id: u64 },
+    /// Suspended generator function (`def g(): yield ...`). Frame state
+    /// lives in `InterpreterState::generators` keyed by `id`.
+    Generator { id: u64 },
     /// A type object — `type(x)` for a built-in type, or a built-in type name.
     /// Carries the type name surfaced by `.__name__` and `repr` (`<class 'int'>`).
     Type(String),
@@ -1261,6 +1264,7 @@ impl Value {
             | Self::ExceptionType(_)
             | Self::UnboundClassMethod { .. }
             | Self::Lazy { .. }
+            | Self::Generator { .. }
             | Self::Partial { .. }
             | Self::LruCache(_) => true,
             // Counter, TimeDelta: zero is falsy (matches CPython's
@@ -1337,7 +1341,7 @@ impl Value {
             Self::EnumMember { .. } => "enum",
             Self::Decimal(_) => "Decimal",
             Self::Fraction(_) => "Fraction",
-            Self::Lazy { .. } => "generator",
+            Self::Lazy { .. } | Self::Generator { .. } => "generator",
             Self::Partial { .. } => "functools.partial",
             Self::LruCache(_) => "functools._lru_cache_wrapper",
         }
@@ -1685,6 +1689,7 @@ impl fmt::Display for Value {
             // — we don't track the source name or address so a stable
             // placeholder suffices for printing.
             Self::Lazy { .. } => write!(f, "<generator object>"),
+            Self::Generator { .. } => write!(f, "<generator object>"),
             Self::Partial(data) => write!(f, "functools.partial({})", data.func),
             Self::LruCache(_) => write!(f, "<functools._lru_cache_wrapper>"),
         }

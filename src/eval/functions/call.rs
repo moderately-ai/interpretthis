@@ -243,7 +243,7 @@ pub async fn eval_call(
                                 type_name: name.clone(),
                             }),
                             Value::Class(class_name) => Ok(Dispatch::Class(class_name.clone())),
-                            Value::Lazy { .. }
+                            Value::Lazy { .. } | Value::Generator { .. }
                                 if super::generators::is_generator_method(method_name) =>
                             {
                                 Ok(Dispatch::Generator {
@@ -278,7 +278,9 @@ pub async fn eval_call(
                                     &method,
                                     &resolved_args,
                                     &kwargs,
-                                );
+                                    tools,
+                                )
+                                .await;
                             }
                             Dispatch::Exception { receiver, method } => {
                                 let Value::Exception(exc) = receiver else {
@@ -417,7 +419,7 @@ pub async fn eval_call(
             // discarded value, matching CPython where `[1, 2].append(3)` mutates
             // an object that is immediately thrown away.
             let mut temp = eval_expr(state, obj_expr, tools).await?;
-            if matches!(temp, Value::Lazy { .. })
+            if matches!(temp, Value::Lazy { .. } | Value::Generator { .. })
                 && super::generators::is_generator_method(method_name)
             {
                 return super::generators::dispatch_generator_method(
@@ -426,7 +428,9 @@ pub async fn eval_call(
                     method_name,
                     &resolved_args,
                     &kwargs,
-                );
+                    tools,
+                )
+                .await;
             }
             if matches!(temp, Value::Instance(_)) {
                 let call = CallArgs { positional: &resolved_args, keyword: &kwargs };

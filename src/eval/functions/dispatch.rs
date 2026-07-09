@@ -158,7 +158,7 @@ pub(crate) async fn call_user_function(
         .chain(func_def.assigned_names.iter().cloned())
         .filter(|n| !func_def.global_names.contains(n) && !func_def.nonlocal_names.contains(n))
         .collect();
-    let checkpoint = VariableCheckpoint::capture(state, touched);
+    let checkpoint = VariableCheckpoint::capture(state, touched.clone());
 
     // Apply closure + nonlocal cell + local-scope bindings as a sync
     // helper call. The helper's stack frame is released before any
@@ -203,22 +203,44 @@ pub(crate) async fn call_user_function(
 
     let exec_result = if let Some(body_stmts) = body {
         if is_generator {
+            // Prefer true suspend frames; fall back to eager Lazy buffer when
+            // the body uses `while` (suspend state for while not yet modelled).
+            let use_suspend = !super::generators::body_has_while(body_stmts.as_slice());
+            if use_suspend {
+                let mut locals = rustc_hash::FxHashMap::default();
+                for name in &touched {
+                    if let Some(v) = state.variables.get(name) {
+                        locals.insert(name.clone(), v.clone());
+                    }
+                }
+                let generator = super::generators::create_generator(
+                    state,
+                    func_def,
+                    body_stmts,
+                    locals,
+                    touched.clone(),
+                );
+                writeback_nonlocal_cell(state, func_def);
+                checkpoint.restore(state);
+                state.frame_cell_owners.pop();
+                state.exit_call();
+                state.body_source_stack.pop();
+                return Ok(generator);
+            }
+            // Eager buffer fallback (while-based generators).
             state.yield_stack.push(Vec::new());
             let body_result = execute_body(state, body_stmts.as_slice(), tools).await;
             let collected = state.yield_stack.pop().unwrap_or_default();
-            // A bare `return` from a generator body is fine; the
-            // collected yields are what the caller sees regardless.
             match body_result {
                 Ok(_) | Err(EvalError::Signal(ControlFlow::Return(_))) => {
-                    // Wrap the eagerly-collected yields in a stateful
-                    // iterator so `next(g)` advances one element at a
-                    // time across calls and `for x in g` consumes the
-                    // remaining items. Without this, `next(g)` would
-                    // always return the first element.
                     let cursor_id = state.next_cursor_id;
                     state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
                     state.lazy_cursors.insert(cursor_id, 0);
                     Ok(Value::Lazy { items: collected, cursor_id })
+                }
+                Err(EvalError::Signal(ControlFlow::Yield(_))) => {
+                    // Should not happen with yield_stack path.
+                    Err(InterpreterError::Runtime("internal yield without stack".into()).into())
                 }
                 Err(e) => Err(e),
             }
@@ -408,7 +430,7 @@ pub(crate) async fn call_value_as_function(
             match receiver {
                 crate::value::BoundMethodReceiver::Snapshot(value) => {
                     let empty_kwargs = IndexMap::new();
-                    if matches!(**value, Value::Lazy { .. })
+                    if matches!(**value, Value::Lazy { .. } | Value::Generator { .. })
                         && super::generators::is_generator_method(method)
                     {
                         return super::generators::dispatch_generator_method(
@@ -417,7 +439,9 @@ pub(crate) async fn call_value_as_function(
                             method,
                             args,
                             &empty_kwargs,
-                        );
+                            tools,
+                        )
+                        .await;
                     }
                     let mut recv = (**value).clone();
                     Ok(dispatch_method(&mut recv, method, args, &empty_kwargs)?.value)
@@ -444,7 +468,7 @@ pub(crate) async fn call_value_as_function(
                             EvalError::from(InterpreterError::name_not_defined(root))
                         })?;
                         with_navigate_mut(root_slot, &pl_steps, |target| {
-                            if matches!(target, Value::Lazy { .. })
+                            if matches!(target, Value::Lazy { .. } | Value::Generator { .. })
                                 && super::generators::is_generator_method(method)
                             {
                                 Ok::<Option<Value>, EvalError>(Some(target.clone()))
@@ -460,7 +484,9 @@ pub(crate) async fn call_value_as_function(
                             method,
                             args,
                             &empty_kwargs,
-                        );
+                            tools,
+                        )
+                        .await;
                     }
                     let outcome = {
                         let root_slot = state.variables.get_mut(root).ok_or_else(|| {

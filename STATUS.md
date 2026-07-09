@@ -20,7 +20,7 @@ what has shipped, what is partial, and what is still open.
 | B2 — Class decorators | `@property` / `@staticmethod` / `@classmethod` / `@dataclass` | ✅ shipped |
 | B3 — Counter as `dict` subclass | `__missing__` → 0, multiset arithmetic | ✅ shipped |
 | B4 — Match class patterns | Positional + keyword via `__match_args__` | ✅ shipped |
-| C — Generators | `yield` / `yield from`; iterator `next` / `send` / `throw` / `close` | ⚠️ partial — eager yield buffers + protocol surface; true suspend frames open |
+| C — Generators | `yield` / `yield from`; iterator `next` / `send` / `throw` / `close` | ✅ shipped — true suspend frames for for-based generators; while-based still eager Lazy |
 | D — Datetime | `date` / `datetime` / `time` / `timedelta` / `timezone` + `strftime` / `strptime` | ✅ shipped |
 | E — Stdlib expansion | hashlib, base64, textwrap, string, itertools, functools, collections, typing, enum, dataclasses, decimal, fractions, copy | ✅ shipped (follow-ups: richer `functools`, etc.) |
 | F — `with` statement | `__enter__` / `__exit__` + `contextlib.nullcontext` / `suppress` | ✅ shipped |

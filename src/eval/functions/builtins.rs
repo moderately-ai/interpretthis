@@ -1057,6 +1057,29 @@ pub(super) async fn try_builtin(
                     Err(EvalError::Exception(ExceptionValue::new("StopIteration", String::new())))
                 };
             }
+            if let Value::Generator { id } = &args[0] {
+                let id = *id;
+                match super::generators::dispatch_generator_method(
+                    state,
+                    &Value::Generator { id },
+                    "__next__",
+                    &[],
+                    &IndexMap::new(),
+                    tools,
+                )
+                .await
+                {
+                    Ok(v) => return Ok(Some(v)),
+                    Err(EvalError::Exception(exc)) if exc.type_name == "StopIteration" => {
+                        return if args.len() >= 2 {
+                            Ok(Some(args[1].clone()))
+                        } else {
+                            Err(EvalError::Exception(exc))
+                        };
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             // For user-class iterators, call __next__ directly so we
             // get exactly one item without materialising the whole
             // sequence. For builtin iterables, materialise and return
