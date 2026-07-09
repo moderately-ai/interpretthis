@@ -27,28 +27,23 @@ fn interpreter() -> Interpreter {
     Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default())
 }
 
-/// CONFORMANCE.md#int-power-i64-overflow
-/// CPython returns an arbitrary-precision int for `2**100`. We raise
-/// OverflowError once the result exceeds i64 (prefer loud failure over
-/// the previous silent f64 precision loss).
+/// CONFORMANCE.md#int-power-i64-overflow — superseded: BigInt promotion.
 #[tokio::test]
-async fn int_pow_overflow_is_error_not_float() {
+async fn int_pow_promotes_beyond_i64() {
     let interp = interpreter();
     let resp = interp
         .execute(
             r#"
 print(2 ** 10)
-try:
-    print(2 ** 100)
-except OverflowError:
-    print("overflow")
+print(2 ** 100)
+print(9223372036854775807 + 1)
 "#,
             &Tools::new(),
             HashMap::new(),
         )
         .await;
     assert!(resp.error.is_none(), "{:?}", resp.error);
-    assert_eq!(resp.stdout.trim(), "1024\noverflow");
+    assert_eq!(resp.stdout.trim(), "1024\n1267650600228229401496703205376\n9223372036854775808");
 }
 
 /// interpretthis accepts 2-D list `@` as matrix multiply (numpy-like).

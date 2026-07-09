@@ -170,6 +170,7 @@ fn json_key(key: &ValueKey) -> String {
     match key {
         ValueKey::String(s) => s.to_string(),
         ValueKey::Int(i) => i.to_string(),
+        ValueKey::BigInt(i) => i.to_string(),
         ValueKey::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         ValueKey::None => "null".to_string(),
         ValueKey::Float(bits) => float_repr(f64::from_bits(*bits)),

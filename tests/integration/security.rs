@@ -292,9 +292,10 @@ async fn security_format_width_limit() {
 
 #[tokio::test]
 async fn security_integer_overflow_detected() {
+    // Arbitrary-precision ints: max_i64+1 is valid. Cap absurd powers instead.
     let interp = interpreter();
-    let resp = interp.execute("x = 9223372036854775807 + 1", &no_tools(), HashMap::new()).await;
-    assert!(resp.error.is_some(), "should detect integer overflow");
+    let resp = interp.execute("x = 2 ** 2000000", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "should reject absurdly large integer power");
 }
 
 #[tokio::test]

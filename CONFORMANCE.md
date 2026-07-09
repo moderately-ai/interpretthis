@@ -269,8 +269,15 @@ Binding uses `bind_method_params` in `src/eval/functions/method_dispatch.rs`.
 <a id="int-power-i64-overflow"></a>
 
 CPython `int` is arbitrary-precision: `2**100` returns a big integer.
-`interpretthis` stores `Value::Int` as `i64`. Integer power is computed
-exactly via `BigInt`, then **narrowed** to `i64`. Results that do not fit
+`interpretthis` stores small ints as `Value::Int(i64)` and promotes to
+`Value::BigInt` when values leave the i64 range (literals, arithmetic,
+power). Extremely large exponents (`> 1_000_000`) still raise
+`OverflowError` as a resource guard.
+
+**Status**: Shipped (hybrid i64 + BigInt).
+
+_Legacy note (pre-promotion):_
+Integer power was computed exactly via `BigInt`, then **narrowed** to `i64`. Results that did not fit
 raise `OverflowError` rather than coercing to an imprecise `float`
 (the previous behaviour). Full bigint `Value` support is tracked separately.
 

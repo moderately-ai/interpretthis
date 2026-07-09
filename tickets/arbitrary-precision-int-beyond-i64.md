@@ -1,7 +1,7 @@
 ---
 id: arbitrary-precision-int-beyond-i64
 title: Arbitrary-precision int (beyond i64)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [epic-full-gap-and-divergence-inventory]

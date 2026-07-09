@@ -76,29 +76,33 @@ pub async fn eval_binop(
     let right = resolve_proxy(&right).await?;
 
     // Int+Int / Int-Int / Int*Int fast path — the dominant case in
-    // tight numeric loops (`total + i * 3`, `total - 1`, etc.).
-    // Skips the full `op::binop` dispatch chain (Instance slot
-    // lookup, reflected dunder fallback, type-object slot dispatch)
-    // for the case where both operands are concrete `Value::Int`.
-    // Falls through to the general path on overflow so the existing
-    // OverflowError is raised — `security_integer_overflow_detected`
-    // covers this contract.
+    // tight numeric loops. On overflow, promote to BigInt rather than
+    // raising OverflowError (CPython arbitrary-precision ints).
     if let (Value::Int(a), Value::Int(b)) = (&left, &right) {
         match node.op {
             ast::Operator::Add => {
-                if let Some(v) = a.checked_add(*b) {
-                    return Ok(Value::Int(v));
-                }
+                return Ok(match a.checked_add(*b) {
+                    Some(v) => Value::Int(v),
+                    None => crate::value::int_from_bigint(
+                        num_bigint::BigInt::from(*a) + num_bigint::BigInt::from(*b),
+                    ),
+                });
             }
             ast::Operator::Sub => {
-                if let Some(v) = a.checked_sub(*b) {
-                    return Ok(Value::Int(v));
-                }
+                return Ok(match a.checked_sub(*b) {
+                    Some(v) => Value::Int(v),
+                    None => crate::value::int_from_bigint(
+                        num_bigint::BigInt::from(*a) - num_bigint::BigInt::from(*b),
+                    ),
+                });
             }
             ast::Operator::Mult => {
-                if let Some(v) = a.checked_mul(*b) {
-                    return Ok(Value::Int(v));
-                }
+                return Ok(match a.checked_mul(*b) {
+                    Some(v) => Value::Int(v),
+                    None => crate::value::int_from_bigint(
+                        num_bigint::BigInt::from(*a) * num_bigint::BigInt::from(*b),
+                    ),
+                });
             }
             _ => {}
         }
@@ -194,6 +198,15 @@ fn unwrap_enum_for_arith(value: &Value) -> &Value {
 fn to_float(v: &Value) -> Result<f64, EvalError> {
     match v {
         Value::Int(i) => Ok(*i as f64),
+        Value::BigInt(b) => {
+            use num_traits::ToPrimitive as _;
+            b.to_f64().ok_or_else(|| {
+                EvalError::Exception(crate::value::ExceptionValue::new(
+                    "OverflowError",
+                    "int too large to convert to float",
+                ))
+            })
+        }
         Value::Float(f) => Ok(*f),
         Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
         _ => Err(InterpreterError::TypeError(format!(
@@ -204,17 +217,60 @@ fn to_float(v: &Value) -> Result<f64, EvalError> {
     }
 }
 
-/// Coerce a Value to an i64.
+/// Coerce a Value to an i64 (fails if BigInt is out of range).
 fn to_int(v: &Value) -> Result<i64, EvalError> {
-    match v {
-        Value::Int(i) => Ok(*i),
-        Value::Bool(b) => Ok(i64::from(*b)),
-        _ => Err(InterpreterError::TypeError(format!(
+    crate::value::value_as_i64(v).ok_or_else(|| {
+        if matches!(v, Value::BigInt(_)) {
+            EvalError::Exception(crate::value::ExceptionValue::new(
+                "OverflowError",
+                "Python int too large to convert to C long",
+            ))
+        } else {
+            InterpreterError::TypeError(format!(
+                "unsupported operand type for integer operation: '{}'",
+                v.type_name()
+            ))
+            .into()
+        }
+    })
+}
+
+/// Coerce a Value to BigInt for arbitrary-precision arithmetic.
+fn to_bigint(v: &Value) -> Result<num_bigint::BigInt, EvalError> {
+    crate::value::value_as_bigint(v).ok_or_else(|| {
+        InterpreterError::TypeError(format!(
             "unsupported operand type for integer operation: '{}'",
             v.type_name()
         ))
-        .into()),
+        .into()
+    })
+}
+
+fn int_add(left: &Value, right: &Value) -> Result<Value, EvalError> {
+    if let (Value::Int(a), Value::Int(b)) = (left, right) {
+        if let Some(v) = a.checked_add(*b) {
+            return Ok(Value::Int(v));
+        }
     }
+    Ok(crate::value::int_from_bigint(to_bigint(left)? + to_bigint(right)?))
+}
+
+fn int_sub(left: &Value, right: &Value) -> Result<Value, EvalError> {
+    if let (Value::Int(a), Value::Int(b)) = (left, right) {
+        if let Some(v) = a.checked_sub(*b) {
+            return Ok(Value::Int(v));
+        }
+    }
+    Ok(crate::value::int_from_bigint(to_bigint(left)? - to_bigint(right)?))
+}
+
+fn int_mul(left: &Value, right: &Value) -> Result<Value, EvalError> {
+    if let (Value::Int(a), Value::Int(b)) = (left, right) {
+        if let Some(v) = a.checked_mul(*b) {
+            return Ok(Value::Int(v));
+        }
+    }
+    Ok(crate::value::int_from_bigint(to_bigint(left)? * to_bigint(right)?))
 }
 
 /// Check if either operand is float (requiring float arithmetic).
@@ -253,11 +309,7 @@ fn add_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
             if either_is_float(left, right) {
                 Ok(Value::Float(to_float(left)? + to_float(right)?))
             } else {
-                let l = to_int(left)?;
-                let r = to_int(right)?;
-                Ok(Value::Int(l.checked_add(r).ok_or_else(|| {
-                    EvalError::from(InterpreterError::Runtime("integer overflow".into()))
-                })?))
+                int_add(left, right)
             }
         }
     }
@@ -278,11 +330,7 @@ fn sub_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if either_is_float(left, right) {
         Ok(Value::Float(to_float(left)? - to_float(right)?))
     } else {
-        let l = to_int(left)?;
-        let r = to_int(right)?;
-        Ok(Value::Int(l.checked_sub(r).ok_or_else(|| {
-            EvalError::from(InterpreterError::Runtime("integer overflow".into()))
-        })?))
+        int_sub(left, right)
     }
 }
 
@@ -406,11 +454,7 @@ fn mult_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
             if either_is_float(left, right) {
                 Ok(Value::Float(to_float(left)? * to_float(right)?))
             } else {
-                let l = to_int(left)?;
-                let r = to_int(right)?;
-                Ok(Value::Int(l.checked_mul(r).ok_or_else(|| {
-                    EvalError::from(InterpreterError::Runtime("integer overflow".into()))
-                })?))
+                int_mul(left, right)
             }
         }
     }
@@ -600,34 +644,46 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         let r = to_float(right)?;
         Ok(Value::Float(l.powf(r)))
     } else {
-        let l = to_int(left)?;
-        let r = to_int(right)?;
-        if r < 0 {
-            // Negative exponent => float result (CPython returns float for ints).
-            let l_f = l as f64;
-            let r_f = r as f64;
+        let l = crate::value::value_as_bigint(left).ok_or_else(|| {
+            InterpreterError::TypeError(format!(
+                "unsupported operand type(s) for **: '{}' and '{}'",
+                left.type_name(),
+                right.type_name()
+            ))
+        })?;
+        let r = crate::value::value_as_bigint(right).ok_or_else(|| {
+            InterpreterError::TypeError(format!(
+                "unsupported operand type(s) for **: '{}' and '{}'",
+                left.type_name(),
+                right.type_name()
+            ))
+        })?;
+        if r < num_bigint::BigInt::from(0) {
+            use num_traits::ToPrimitive as _;
+            let l_f = l.to_f64().unwrap_or(f64::INFINITY);
+            let r_f = r.to_f64().unwrap_or(f64::NEG_INFINITY);
             Ok(Value::Float(l_f.powf(r_f)))
-        } else if r == 0 {
+        } else if {
+            use num_traits::Zero as _;
+            r.is_zero()
+        } {
             Ok(Value::Int(1))
         } else {
-            // Exact integer power via BigInt. Narrow to i64 when possible;
-            // otherwise OverflowError (no silent f64 precision loss).
-            // Full arbitrary-precision `Value::Int` is a separate ticket.
             use num_traits::Pow;
-            let exp = u32::try_from(r).map_err(|_| {
+            let exp = u32::try_from(&r).map_err(|_| {
                 EvalError::Exception(crate::value::ExceptionValue::new(
                     "OverflowError",
                     "exponent too large for integer power",
                 ))
             })?;
-            let big = num_bigint::BigInt::from(l).pow(exp);
-            match i64::try_from(&big) {
-                Ok(n) => Ok(Value::Int(n)),
-                Err(_) => Err(EvalError::Exception(crate::value::ExceptionValue::new(
+            // Cap absurd exponents that would OOM (security).
+            if exp > 1_000_000 {
+                return Err(EvalError::Exception(crate::value::ExceptionValue::new(
                     "OverflowError",
-                    "integer power result exceeds i64 range (arbitrary-precision int not yet enabled)",
-                ))),
+                    "exponent too large for integer power",
+                )));
             }
+            Ok(crate::value::int_from_bigint(l.pow(exp)))
         }
     }
 }

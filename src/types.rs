@@ -522,7 +522,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
     match value {
         Value::None => &NONE_TYPE,
         Value::Bool(_) => &BOOL_TYPE,
-        Value::Int(_) => &INT_TYPE,
+        Value::Int(_) | Value::BigInt(_) => &INT_TYPE,
         Value::Float(_) => &FLOAT_TYPE,
         Value::String(_) => &STR_TYPE,
         Value::Bytes(_) => &BYTES_TYPE,
@@ -1026,6 +1026,7 @@ fn bool_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
         Value::Bool(b) => Some(a == b),
         // Cross-type: `True == 1` and `False == 0` (CPython treats bool as int subclass).
         Value::Int(i) => Some(*i == i64::from(*a)),
+        Value::BigInt(i) => Some(i.as_ref() == &num_bigint::BigInt::from(i64::from(*a))),
         Value::Float(f) => Some(*f == if *a { 1.0 } else { 0.0 }),
         _ => None,
     }
@@ -1036,11 +1037,16 @@ fn bool_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     reason = "Python int↔float eq matches CPython's lossy compare; the parity corpus pins the cases that matter"
 )]
 fn int_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
-    let Value::Int(a) = lhs else { return None };
+    let a = crate::value::value_as_bigint(lhs)?;
     match rhs {
-        Value::Int(b) => Some(a == b),
-        Value::Bool(b) => Some(*a == i64::from(*b)),
-        Value::Float(f) => Some(*f == (*a as f64)),
+        Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => {
+            let b = crate::value::value_as_bigint(rhs)?;
+            Some(a == b)
+        }
+        Value::Float(f) => {
+            use num_traits::ToPrimitive as _;
+            Some(a.to_f64().is_some_and(|af| *f == af))
+        }
         _ => None,
     }
 }
@@ -1169,15 +1175,16 @@ fn bool_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
 }
 
 fn int_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
-    let Value::Int(a) = lhs else { return None };
+    let a = crate::value::value_as_bigint(lhs)?;
     match rhs {
-        Value::Int(b) => Some(a < b),
-        Value::Bool(b) => Some(*a < i64::from(*b)),
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "Python int↔float compare matches CPython's lossy compare"
-        )]
-        Value::Float(b) => Some((*a as f64) < *b),
+        Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => {
+            let b = crate::value::value_as_bigint(rhs)?;
+            Some(a < b)
+        }
+        Value::Float(b) => {
+            use num_traits::ToPrimitive as _;
+            Some(a.to_f64().is_some_and(|af| af < *b))
+        }
         _ => None,
     }
 }
@@ -1192,6 +1199,10 @@ fn float_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
             reason = "Python int↔float compare matches CPython's lossy compare"
         )]
         Value::Int(b) => Some(*a < (*b as f64)),
+        Value::BigInt(b) => {
+            use num_traits::ToPrimitive as _;
+            Some(b.to_f64().is_some_and(|bf| *a < bf))
+        }
         _ => None,
     }
 }
@@ -1425,7 +1436,7 @@ fn set_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalEr
 }
 
 const fn is_numeric(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+    matches!(v, Value::Int(_) | Value::BigInt(_) | Value::Float(_) | Value::Bool(_))
 }
 
 // ---------------------------------------------------------------------------
@@ -1583,8 +1594,20 @@ fn bool_hash(value: &Value) -> i64 {
 }
 
 fn int_hash_slot(value: &Value) -> i64 {
-    let Value::Int(n) = value else { unreachable!("int_hash_slot sees only Value::Int") };
-    finalize_hash(int_hash_impl(*n))
+    match value {
+        Value::Int(n) => finalize_hash(int_hash_impl(*n)),
+        Value::BigInt(n) => {
+            // Reduce modulo HASH_MODULUS like CPython's long_hash.
+            use num_traits::{Signed, ToPrimitive as _};
+            let modulus = num_bigint::BigInt::from(HASH_MODULUS);
+            let mut rem = n.abs() % &modulus;
+            if n.sign() == num_bigint::Sign::Minus {
+                rem = -rem;
+            }
+            finalize_hash(rem.to_i64().unwrap_or(0))
+        }
+        _ => unreachable!("int_hash_slot sees only int variants"),
+    }
 }
 
 #[expect(
@@ -2411,6 +2434,7 @@ fn decimal_to_bigdecimal(value: &Value) -> Option<bigdecimal::BigDecimal> {
     match value {
         Value::Decimal(d) => Some((**d).clone()),
         Value::Int(i) => Some(bigdecimal::BigDecimal::from(*i)),
+        Value::BigInt(i) => Some(bigdecimal::BigDecimal::from(i.as_ref().clone())),
         Value::Bool(b) => Some(bigdecimal::BigDecimal::from(i64::from(*b))),
         _ => None,
     }
@@ -2475,6 +2499,7 @@ fn fraction_to_bigrational(value: &Value) -> Option<num_rational::BigRational> {
     match value {
         Value::Fraction(f) => Some((**f).clone()),
         Value::Int(i) => Some(num_rational::BigRational::from_integer(BigInt::from(*i))),
+        Value::BigInt(i) => Some(num_rational::BigRational::from_integer(i.as_ref().clone())),
         Value::Bool(b) => {
             Some(num_rational::BigRational::from_integer(BigInt::from(i64::from(*b))))
         }
@@ -2496,6 +2521,7 @@ fn fraction_to_f64(value: &Value) -> Option<f64> {
         Value::Float(f) => Some(*f),
         Value::Fraction(f) => f.to_f64(),
         Value::Int(i) => Some(*i as f64),
+        Value::BigInt(i) => i.to_f64(),
         Value::Bool(b) => Some(f64::from(*b)),
         _ => None,
     }

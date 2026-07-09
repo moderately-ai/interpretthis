@@ -39,6 +39,38 @@ pub fn shared_fields(fields: BTreeMap<String, Value>) -> SharedFields {
     Arc::new(Mutex::new(fields))
 }
 
+/// Build a Python int value, using [`Value::Int`] when it fits in i64.
+#[inline]
+#[must_use]
+pub fn int_from_bigint(n: num_bigint::BigInt) -> Value {
+    match i64::try_from(&n) {
+        Ok(v) => Value::Int(v),
+        Err(_) => Value::BigInt(Box::new(n)),
+    }
+}
+
+/// Lift a Python numeric value to `BigInt` (int / bigint / bool).
+#[must_use]
+pub fn value_as_bigint(v: &Value) -> Option<num_bigint::BigInt> {
+    match v {
+        Value::Int(i) => Some(num_bigint::BigInt::from(*i)),
+        Value::BigInt(b) => Some((**b).clone()),
+        Value::Bool(b) => Some(num_bigint::BigInt::from(i64::from(*b))),
+        _ => None,
+    }
+}
+
+/// Narrow to i64 when the value is a small int (or bool).
+#[must_use]
+pub fn value_as_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(i) => Some(*i),
+        Value::Bool(b) => Some(i64::from(*b)),
+        Value::BigInt(b) => i64::try_from(b.as_ref()).ok(),
+        _ => None,
+    }
+}
+
 /// Serialize a `SharedList` as if it were `Vec<Value>` (locking the
 /// inner mutex for the duration of the seq emission). The wire format
 /// matches what the old un-shared `Value::List(Vec<Value>)` produced,
@@ -125,8 +157,12 @@ pub enum Value {
     NotImplemented,
     /// Python `bool`.
     Bool(bool),
-    /// Python `int` (represented as i64; overflows are detected at runtime).
+    /// Python `int` that fits in i64 (fast path).
     Int(i64),
+    /// Python `int` outside the i64 range (arbitrary precision).
+    /// Always boxed; use [`int_from_bigint`] so values that fit i64
+    /// stay on the fast [`Self::Int`] path.
+    BigInt(Box<num_bigint::BigInt>),
     /// Python `float` (IEEE 754 f64).
     Float(f64),
     /// Python `str`. Backed by [`CompactString`] — strings up to 24 B
@@ -618,6 +654,13 @@ impl PartialEq for Value {
             (Self::None, Self::None) => true,
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::BigInt(a), Self::BigInt(b)) => a == b,
+            (Self::Int(a), Self::BigInt(b)) | (Self::BigInt(b), Self::Int(a)) => {
+                b.as_ref() == &num_bigint::BigInt::from(*a)
+            }
+            (Self::Bool(b), Self::BigInt(i)) | (Self::BigInt(i), Self::Bool(b)) => {
+                i.as_ref() == &num_bigint::BigInt::from(i64::from(*b))
+            }
             (Self::Float(a), Self::Float(b)) => a.to_bits() == b.to_bits(),
             // String compares its inner CompactString; type/class/module compare
             // their inner String names.
@@ -678,10 +721,16 @@ impl PartialEq for Value {
             (Self::Decimal(d), Self::Int(i)) | (Self::Int(i), Self::Decimal(d)) => {
                 d.as_ref() == &bigdecimal::BigDecimal::from(*i)
             }
+            (Self::Decimal(d), Self::BigInt(i)) | (Self::BigInt(i), Self::Decimal(d)) => {
+                d.as_ref() == &bigdecimal::BigDecimal::from(i.as_ref().clone())
+            }
             // Fraction == int / Fraction == Fraction-of-int: lift int
             // into a denom=1 Rational.
             (Self::Fraction(f), Self::Int(i)) | (Self::Int(i), Self::Fraction(f)) => {
                 f.as_ref() == &num_rational::BigRational::from_integer(num_bigint::BigInt::from(*i))
+            }
+            (Self::Fraction(f), Self::BigInt(i)) | (Self::BigInt(i), Self::Fraction(f)) => {
+                f.as_ref() == &num_rational::BigRational::from_integer(i.as_ref().clone())
             }
             // Functions, lambdas, proxies, and instances (no __eq__ / identity)
             // are never equal.
@@ -709,6 +758,8 @@ pub enum ValueKey {
     None,
     Bool(bool),
     Int(i64),
+    /// Arbitrary-precision int key (outside i64).
+    BigInt(num_bigint::BigInt),
     /// Non-integral float key, stored as raw IEEE-754 bits so the key derives
     /// `Eq`/`Hash` (which `f64` cannot). Integral floats never reach this
     /// variant: dict-key coercion folds `2.0` into
@@ -744,6 +795,13 @@ impl PartialEq for ValueKey {
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Bool(b), Self::Int(i)) | (Self::Int(i), Self::Bool(b)) => *i == i64::from(*b),
             (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::BigInt(a), Self::BigInt(b)) => a == b,
+            (Self::Int(a), Self::BigInt(b)) | (Self::BigInt(b), Self::Int(a)) => {
+                b == &num_bigint::BigInt::from(*a)
+            }
+            (Self::Bool(b), Self::BigInt(i)) | (Self::BigInt(i), Self::Bool(b)) => {
+                i == &num_bigint::BigInt::from(i64::from(*b))
+            }
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Tuple(a), Self::Tuple(b)) => a == b,
@@ -784,6 +842,16 @@ impl core::hash::Hash for ValueKey {
             Self::Int(i) => {
                 NUMERIC_TAG.hash(state);
                 i.hash(state);
+            }
+            Self::BigInt(i) => {
+                // Prefer numeric tag when value fits i64 so it collides
+                // with Int/Bool keys of the same magnitude.
+                NUMERIC_TAG.hash(state);
+                if let Ok(n) = i64::try_from(i) {
+                    n.hash(state);
+                } else {
+                    i.hash(state);
+                }
             }
             Self::Float(bits) => {
                 FLOAT_TAG.hash(state);
@@ -1063,6 +1131,10 @@ impl Value {
             Self::None | Self::NotImplemented => false,
             Self::Bool(b) => *b,
             Self::Int(i) => *i != 0,
+            Self::BigInt(i) => {
+                use num_traits::Zero as _;
+                !i.is_zero()
+            }
             Self::Float(f) => *f != 0.0,
             Self::String(s) => !s.is_empty(),
             Self::Bytes(b) => !b.is_empty(),
@@ -1128,7 +1200,7 @@ impl Value {
             Self::None => "NoneType",
             Self::NotImplemented => "NotImplementedType",
             Self::Bool(_) => "bool",
-            Self::Int(_) => "int",
+            Self::Int(_) | Self::BigInt(_) => "int",
             Self::Float(_) => "float",
             Self::String(_) => "str",
             Self::Bytes(_) => "bytes",
@@ -1287,6 +1359,7 @@ impl fmt::Display for Value {
             Self::Bool(true) => write!(f, "True"),
             Self::Bool(false) => write!(f, "False"),
             Self::Int(i) => write!(f, "{i}"),
+            Self::BigInt(i) => write!(f, "{i}"),
             Self::Float(v) => write_python_float(f, *v),
             Self::String(s) => write!(f, "{s}"),
             // CPython bytes repr — `b'...'` (or `b"..."` if the
@@ -1518,7 +1591,6 @@ impl fmt::Display for Value {
             Self::Lazy { .. } => write!(f, "<generator object>"),
             Self::Partial(data) => write!(f, "functools.partial({})", data.func),
             Self::LruCache(_) => write!(f, "<functools._lru_cache_wrapper>"),
-            Self::NotImplemented => write!(f, "NotImplemented"),
         }
     }
 }
@@ -1570,9 +1642,10 @@ impl Value {
 
     /// Get as i64 if this is a `Value::Int`.
     #[must_use]
-    pub const fn as_int(&self) -> Option<i64> {
+    pub fn as_int(&self) -> Option<i64> {
         match self {
             Self::Int(i) => Some(*i),
+            Self::BigInt(b) => i64::try_from(b.as_ref()).ok(),
             _ => None,
         }
     }
@@ -1582,7 +1655,7 @@ impl Value {
     /// Int-to-float conversion can lose precision for values beyond
     /// 2^53; this matches Python's `float(int)` semantics.
     #[must_use]
-    pub const fn as_float(&self) -> Option<f64> {
+    pub fn as_float(&self) -> Option<f64> {
         match self {
             Self::Float(f) => Some(*f),
             #[expect(
@@ -1592,6 +1665,11 @@ impl Value {
                           reproduce that"
             )]
             Self::Int(i) => Some(*i as f64),
+            Self::BigInt(b) => {
+                // Lossy for huge ints — matches CPython float(int).
+                use num_traits::ToPrimitive as _;
+                b.to_f64()
+            }
             _ => None,
         }
     }
@@ -1767,6 +1845,8 @@ impl Value {
         match self {
             Self::Bool(b) => serde_json::Value::Bool(*b),
             Self::Int(i) => serde_json::json!(*i),
+            // JSON numbers are f64; huge ints stringify to preserve digits.
+            Self::BigInt(i) => serde_json::Value::String(i.to_string()),
             Self::Float(f) => serde_json::json!(*f),
             Self::String(s) => serde_json::Value::String(s.to_string()),
             Self::Bytes(b) => serde_json::json!(b),
@@ -1813,6 +1893,7 @@ impl ValueKey {
             Self::None => Value::None,
             Self::Bool(b) => Value::Bool(*b),
             Self::Int(i) => Value::Int(*i),
+            Self::BigInt(i) => crate::value::int_from_bigint(i.clone()),
             Self::Float(bits) => Value::Float(f64::from_bits(*bits)),
             Self::String(s) => Value::String(s.clone()),
             Self::Tuple(items) => Value::Tuple(items.iter().map(Self::to_value).collect()),
@@ -1828,6 +1909,7 @@ impl fmt::Display for ValueKey {
             Self::Bool(true) => write!(f, "True"),
             Self::Bool(false) => write!(f, "False"),
             Self::Int(i) => write!(f, "{i}"),
+            Self::BigInt(i) => write!(f, "{i}"),
             // Integral floats never reach this variant (folded to Int); the
             // shared formatter still handles them for parity if one is built
             // directly.

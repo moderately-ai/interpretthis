@@ -22,8 +22,17 @@ pub fn eval_constant(constant: &Constant) -> Value {
         Constant::None | Constant::Ellipsis => Value::None,
         Constant::Bool(b) => Value::Bool(*b),
         Constant::Int(i) => {
-            // Try to convert BigInt to i64; fall back to 0 for huge numbers
-            Value::Int(i64::try_from(i).unwrap_or(0))
+            // rustpython's BigInt is malachite-backed; convert via decimal
+            // string so we stay on num_bigint for the runtime Value.
+            if let Ok(n) = i64::try_from(i) {
+                Value::Int(n)
+            } else {
+                use std::str::FromStr as _;
+                let s = i.to_string();
+                let big = num_bigint::BigInt::from_str(&s)
+                    .unwrap_or_else(|_| num_bigint::BigInt::from(0));
+                crate::value::int_from_bigint(big)
+            }
         }
         Constant::Float(f) => Value::Float(*f),
         Constant::Str(s) => Value::String(s.as_str().into()),
@@ -168,6 +177,7 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
         Value::None => Ok(ValueKey::None),
         Value::Bool(b) => Ok(ValueKey::Bool(*b)),
         Value::Int(i) => Ok(ValueKey::Int(*i)),
+        Value::BigInt(i) => Ok(ValueKey::BigInt((**i).clone())),
         Value::Float(f) => Ok(float_to_key(*f)),
         Value::String(s) => Ok(ValueKey::String(s.clone())),
         Value::Tuple(items) => {

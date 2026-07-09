@@ -365,6 +365,8 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::Bool(_) => 1,
         // i64 and f64 are both 8 bytes.
         Value::Int(_) | Value::Float(_) => 8,
+        // Approximate limb storage for big integers.
+        Value::BigInt(b) => 16 + (b.bits() as usize / 8).saturating_add(8),
         Value::String(s) => STRING_HEADER_BYTES + s.len(),
         Value::Bytes(b) => STRING_HEADER_BYTES + b.len(),
         // List is shared via Arc<Mutex<Vec>>; lock to walk under the
@@ -501,6 +503,7 @@ pub fn estimate_key_size(key: &crate::value::ValueKey) -> usize {
         ValueKey::None => 0,
         ValueKey::Bool(_) => 1,
         ValueKey::Int(_) | ValueKey::Float(_) => 8,
+        ValueKey::BigInt(b) => 16 + (b.bits() as usize / 8).saturating_add(8),
         ValueKey::String(s) => s.len(),
         ValueKey::Tuple(items) => 24 + items.iter().map(estimate_key_size).sum::<usize>(),
         ValueKey::Instance { value, .. } => 8 + estimate_value_size(value),
