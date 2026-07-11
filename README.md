@@ -1,5 +1,7 @@
 # interpretthis
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/moderately-ai/interpretthis?utm_source=badge)
+
 Sandboxed Python AST interpreter for Rust.
 
 Runs untrusted or LLM-generated Python by evaluating a

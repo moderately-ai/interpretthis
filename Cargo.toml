@@ -93,7 +93,7 @@ bench-alloc-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 bench-alloc-mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
-criterion = { version = "=0.7.0", features = ["html_reports"] }
+criterion = { version = "=5.0.1", features = ["html_reports"], package = "codspeed-criterion-compat" }
 
 # One consolidated integration-test binary: every separate `[[test]]`
 # re-type-checks the crate's full transitive closure, so collapsing the
