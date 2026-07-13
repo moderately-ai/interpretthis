@@ -31,6 +31,16 @@ common_args=(
   -f license-header.txt
   # Generated / dependency trees
   -ignore 'target/**'
+  # Python binding: virtualenvs, build output, and tool caches. site-packages
+  # carries third-party C sources that addlicense would otherwise try to stamp.
+  -ignore '**/.venv/**'
+  -ignore '**/dist/**'
+  -ignore '**/__pycache__/**'
+  -ignore '**/.pytest_cache/**'
+  -ignore '**/.mypy_cache/**'
+  -ignore '**/.ruff_cache/**'
+  # Node binding: installed packages and build output.
+  -ignore '**/node_modules/**'
   # Test fixtures (not project source)
   -ignore 'crates/interpretthis/tests/integration/parity_corpus/**'
   -ignore 'crates/interpretthis/tests/integration/cpython_vendored/**'

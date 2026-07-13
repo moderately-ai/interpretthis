@@ -1,0 +1,75 @@
+[package]
+name = "interpretthis-python"
+description = "Python bindings for interpretthis — a sandboxed Python AST interpreter"
+# Ships to PyPI as the `interpretthis` distribution, never to crates.io.
+publish = false
+
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "interpretthis_python"
+# cdylib only. Adding `rlib` stops cargo uplifting the cdylib to the profile
+# root, which breaks maturin's artifact staging, and nothing consumes this crate
+# as a Rust library. `test`/`doctest` off: with `extension-module` on, the cdylib
+# deliberately does not link libpython, so a cargo test binary could not resolve
+# the interpreter symbols. The binding contract is pytest against the built
+# module (see python/tests/).
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[features]
+# NON-default on purpose. Enabling it tells PyO3 to omit libpython — symbols
+# resolve against the host interpreter at import time, which on macOS needs
+# maturin's `-undefined dynamic_lookup` link arg. A bare `cargo check -p
+# interpretthis-python` (the cheap per-OS CI gate) builds WITHOUT it, so PyO3
+# links libpython normally and the link succeeds. Maturin turns it on for the
+# wheel via `[tool.maturin] features`.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+interpretthis = { workspace = true }
+
+# Pinned exactly. 0.28.x carries a soundness advisory; `abi3-py311` builds one
+# stable-ABI module usable across CPython >= 3.11, so the wheel matrix is one
+# wheel per platform rather than one per platform per minor version.
+#
+# The num-bigint / num-rational / bigdecimal / chrono features are what let the
+# converter be exact rather than lossy: they supply conversions for the very
+# types `Value` already carries, against the SAME crate versions the core pins
+# (pyo3's ranges are semver-compatible with our `=` pins, so cargo unifies to
+# one copy). Without them, `Value::BigInt`, `Decimal`, `Fraction`, and the four
+# datetime variants would each need a hand-rolled bridge.
+pyo3 = { version = "=0.29.0", features = [
+    "abi3",
+    "abi3-py311",
+    "num-bigint",
+    "num-rational",
+    "bigdecimal",
+    "chrono",
+] }
+# Bridges a Rust future onto Python's asyncio. This is what makes an `async def`
+# tool callable from a tokio worker: `into_future_with_locals` schedules the
+# coroutine onto a Python event loop via `call_soon_threadsafe` from any thread
+# and hands back a `Send` future. Apache-2.0.
+pyo3-async-runtimes = { version = "=0.29.0", features = ["tokio-runtime"] }
+
+async-trait = { workspace = true }
+bigdecimal = { workspace = true }
+chrono = { workspace = true }
+compact_str = { workspace = true }
+indexmap = { workspace = true }
+num-bigint = { workspace = true }
+num-rational = { workspace = true }
+tokio = { workspace = true }
+
+# Local, NOT `workspace = true`: the workspace lints deny `unsafe_code`, and
+# pyo3's macro expansions emit `unsafe`. See the note in the root manifest.
+[lints.clippy]
+all = { level = "deny", priority = -1 }

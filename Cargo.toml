@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/interpretthis"]
+members = ["crates/interpretthis", "crates/interpretthis-python"]
 # Everyday lanes (bare `cargo build/check/clippy/test`) resolve to the core crate
 # only. The binding crates carry expensive, single-purpose graphs (pyo3 + maturin,
 # napi + node) that nothing else depends on, so they stay off the hot path. They
@@ -21,6 +21,10 @@ repository = "https://github.com/moderately-ai/interpretthis"
 homepage = "https://github.com/moderately-ai/interpretthis"
 
 [workspace.dependencies]
+# The core crate, as consumed by the binding crates. `version` alongside `path`
+# keeps it publishable as-is.
+interpretthis = { path = "crates/interpretthis", version = "0.3.0" }
+
 rustpython-parser = "=0.4.0"
 tokio = { version = "=1.50.0", features = [
     "rt",

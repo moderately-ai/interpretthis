@@ -1,0 +1,10 @@
+# maturin develop builds the extension into the source tree
+/python/interpretthis/*.so
+/python/interpretthis/*.pyd
+/python/interpretthis/*.dylib
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+/dist/

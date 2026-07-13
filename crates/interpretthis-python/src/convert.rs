@@ -1,0 +1,275 @@
+// Copyright 2026 Thomas Santerre and Moderately AI Inc.
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! `Value` <-> Python object conversion.
+//!
+//! Native, not JSON. `Value::to_json` exists and is tempting, but it is lossy in
+//! ways that would surface as user-visible bugs here: `BigInt` stringifies,
+//! `Bytes` becomes an array of ints, `List`/`Tuple`/`Set` all collapse to one
+//! array, non-string dict keys are `Display`-stringified, and its catch-all arm
+//! turns `Decimal`, `Date`, and every user object into `null`. Python has an
+//! exact analogue for nearly every portable variant, so we use it.
+//!
+//! What has no analogue — a sandbox function, class, instance, generator, or
+//! pending tool proxy — raises `TypeError` naming the variant. It never
+//! degrades to `None`: silently handing back `None` for a value that *is*
+//! something turns a boundary error into a wrong answer several lines later.
+//!
+//! # Copy, not alias
+//!
+//! `Value::List` is an `Arc<Mutex<Vec<Value>>>` with CPython reference identity
+//! *inside* the sandbox. Crossing this boundary **copies**. A list a host passes
+//! in as a variable is not aliased by sandboxed code, and mutations the script
+//! makes are not visible to the caller's object — read results back with
+//! `get_variable`. The alternative (aliasing host objects into the sandbox)
+//! would hand sandboxed code a live handle on host memory, which is precisely
+//! what this interpreter exists to prevent.
+
+use bigdecimal::BigDecimal;
+use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta};
+use indexmap::IndexMap;
+use interpretthis::{Value, ValueKey, shared_list};
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use pyo3::{
+    exceptions::PyTypeError,
+    prelude::*,
+    types::{
+        PyBool, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString, PyTuple,
+    },
+};
+
+/// A `Value` the sandbox can hold but Python cannot receive.
+fn unsupported_outbound(value: &Value) -> PyErr {
+    PyTypeError::new_err(format!(
+        "interpretthis: cannot convert sandbox value of type '{}' to a Python object; \
+         it exists only inside the interpreter",
+        value.type_name()
+    ))
+}
+
+/// A Python object the sandbox cannot accept.
+fn unsupported_inbound(ob: &Bound<'_, PyAny>) -> PyErr {
+    let type_name = ob
+        .get_type()
+        .name()
+        .map_or_else(|_| "?".to_string(), |name| name.to_string_lossy().into_owned());
+    PyTypeError::new_err(format!(
+        "interpretthis: cannot pass a Python object of type '{type_name}' into the sandbox; \
+         supported types are None, bool, int, float, str, bytes, list, tuple, set, frozenset, \
+         dict, range, Decimal, Fraction, date, datetime, time, timedelta and timezone"
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Value -> Python
+// ---------------------------------------------------------------------------
+
+/// Convert an interpreter [`Value`] into a Python object.
+///
+/// # Errors
+///
+/// Returns `TypeError` for variants with no Python analogue (functions,
+/// classes, instances, generators, pending tool proxies, ...).
+pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match value {
+        Value::None => py.None().into_bound(py),
+        Value::NotImplemented => py.NotImplemented().into_bound(py),
+        Value::Bool(b) => b.into_pyobject(py)?.to_owned().into_any(),
+        Value::Int(i) => i.into_pyobject(py)?.into_any(),
+        Value::BigInt(i) => (**i).clone().into_pyobject(py)?.into_any(),
+        Value::Float(f) => f.into_pyobject(py)?.into_any(),
+        Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
+        Value::Bytes(b) => PyBytes::new(py, b).into_any(),
+
+        Value::List(items) => {
+            // Lock scope ends before the list is built, so a tool callback that
+            // re-enters the interpreter cannot deadlock against this guard.
+            let snapshot: Vec<Value> = items.lock().clone();
+            let converted =
+                snapshot.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
+            PyList::new(py, converted)?.into_any()
+        }
+        Value::Tuple(items) => {
+            let converted =
+                items.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
+            PyTuple::new(py, converted)?.into_any()
+        }
+        Value::Set(items) => {
+            let converted =
+                items.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
+            PySet::new(py, converted)?.into_any()
+        }
+        Value::Dict(map) => {
+            let dict = PyDict::new(py);
+            for (key, val) in map {
+                // Keys round-trip through `ValueKey::to_value`, so a folded
+                // integral-float key (`{2.0: x}` is stored as `Int(2)`) comes
+                // back as `2` — the documented, deliberate coercion.
+                dict.set_item(value_to_py(py, &key.to_value())?, value_to_py(py, val)?)?;
+            }
+            dict.into_any()
+        }
+
+        Value::Range { start, stop, step } => {
+            py.import("builtins")?.getattr("range")?.call1((*start, *stop, *step))?
+        }
+
+        Value::Decimal(d) => (**d).clone().into_pyobject(py)?.into_any(),
+        Value::Fraction(f) => (**f).clone().into_pyobject(py)?.into_any(),
+
+        Value::Date(d) => d.into_pyobject(py)?.into_any(),
+        Value::Time(t) => t.into_pyobject(py)?.into_any(),
+        Value::DateTime { dt, tz_offset_secs } => match tz_offset_secs {
+            Some(secs) => {
+                let offset = FixedOffset::east_opt(*secs).ok_or_else(|| {
+                    PyTypeError::new_err(format!("invalid UTC offset: {secs} seconds"))
+                })?;
+                dt.and_local_timezone(offset)
+                    .single()
+                    .ok_or_else(|| {
+                        PyTypeError::new_err("datetime is not representable at that UTC offset")
+                    })?
+                    .into_pyobject(py)?
+                    .into_any()
+            }
+            None => dt.into_pyobject(py)?.into_any(),
+        },
+        Value::TimeDelta(micros) => TimeDelta::microseconds(*micros).into_pyobject(py)?.into_any(),
+        Value::TimeZone(secs) => FixedOffset::east_opt(*secs)
+            .ok_or_else(|| PyTypeError::new_err(format!("invalid UTC offset: {secs} seconds")))?
+            .into_pyobject(py)?
+            .into_any(),
+
+        // Value is #[non_exhaustive]; everything else is interpreter-internal
+        // (Function, Lambda, Class, Instance, Generator, LazyProxy, Counter, ...).
+        other => return Err(unsupported_outbound(other)),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Python -> Value
+// ---------------------------------------------------------------------------
+
+/// Convert a Python object into an interpreter [`Value`].
+///
+/// # Errors
+///
+/// Returns `TypeError` for Python objects with no sandbox analogue, and for
+/// unhashable dict/set keys.
+pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
+    if ob.is_none() {
+        return Ok(Value::None);
+    }
+
+    // bool BEFORE int: in Python `bool` is a subclass of `int`, so an `isinstance`
+    // check against int would swallow True/False and turn them into 1/0.
+    if ob.is_instance_of::<PyBool>() {
+        return Ok(Value::Bool(ob.extract::<bool>()?));
+    }
+    if ob.is_instance_of::<PyInt>() {
+        // Fast path for the common case; promote only when it does not fit,
+        // which mirrors the interpreter's own hybrid int representation.
+        return Ok(match ob.extract::<i64>() {
+            Ok(i) => Value::Int(i),
+            Err(_) => Value::BigInt(Box::new(ob.extract::<BigInt>()?)),
+        });
+    }
+    if ob.is_instance_of::<PyFloat>() {
+        return Ok(Value::Float(ob.extract::<f64>()?));
+    }
+    if ob.is_instance_of::<PyString>() {
+        return Ok(Value::String(ob.extract::<String>()?.into()));
+    }
+    if ob.is_instance_of::<PyBytes>() {
+        return Ok(Value::Bytes(ob.extract::<Vec<u8>>()?));
+    }
+
+    if let Ok(list) = ob.cast::<PyList>() {
+        let items = list.iter().map(|v| py_to_value(&v)).collect::<PyResult<Vec<_>>>()?;
+        return Ok(Value::List(shared_list(items)));
+    }
+    if let Ok(tuple) = ob.cast::<PyTuple>() {
+        let items = tuple.iter().map(|v| py_to_value(&v)).collect::<PyResult<Vec<_>>>()?;
+        return Ok(Value::Tuple(items));
+    }
+    if let Ok(set) = ob.cast::<PySet>() {
+        let items = set.iter().map(|v| py_to_value(&v)).collect::<PyResult<Vec<_>>>()?;
+        return Ok(Value::Set(items));
+    }
+    if let Ok(set) = ob.cast::<PyFrozenSet>() {
+        let items = set.iter().map(|v| py_to_value(&v)).collect::<PyResult<Vec<_>>>()?;
+        return Ok(Value::Set(items));
+    }
+    if let Ok(dict) = ob.cast::<PyDict>() {
+        let mut map: IndexMap<ValueKey, Value> = IndexMap::new();
+        for (key, val) in dict {
+            let key = py_to_value(&key)?;
+            // Delegates to the evaluator's own key coercion rather than
+            // re-deriving it here; a second implementation would drift.
+            let key = key.to_key().map_err(|e| PyTypeError::new_err(e.to_string()))?;
+            map.insert(key, py_to_value(&val)?);
+        }
+        return Ok(Value::Dict(map));
+    }
+
+    // datetime BEFORE date: `datetime.datetime` subclasses `datetime.date`, so
+    // checking date first would truncate every datetime to midnight.
+    if let Ok(dt) = ob.extract::<chrono::DateTime<FixedOffset>>() {
+        return Ok(Value::DateTime {
+            dt: dt.naive_local(),
+            tz_offset_secs: Some(dt.offset().local_minus_utc()),
+        });
+    }
+    if let Ok(dt) = ob.extract::<NaiveDateTime>() {
+        return Ok(Value::DateTime { dt, tz_offset_secs: None });
+    }
+    if let Ok(d) = ob.extract::<NaiveDate>() {
+        return Ok(Value::Date(d));
+    }
+    if let Ok(t) = ob.extract::<NaiveTime>() {
+        return Ok(Value::Time(t));
+    }
+    if let Ok(delta) = ob.extract::<TimeDelta>() {
+        return Ok(Value::TimeDelta(delta.num_microseconds().ok_or_else(|| {
+            PyTypeError::new_err("timedelta is too large to represent in microseconds")
+        })?));
+    }
+    if let Ok(offset) = ob.extract::<FixedOffset>() {
+        return Ok(Value::TimeZone(offset.local_minus_utc()));
+    }
+
+    // Decimal and Fraction are checked after the numeric primitives (they are
+    // neither int nor float, so no subclass shadowing applies) but before the
+    // catch-all.
+    if let Ok(d) = ob.extract::<BigDecimal>() {
+        return Ok(Value::Decimal(Box::new(d)));
+    }
+    if let Ok(f) = ob.extract::<BigRational>() {
+        return Ok(Value::Fraction(Box::new(f)));
+    }
+
+    if let Some(range) = extract_range(ob)? {
+        return Ok(range);
+    }
+
+    Err(unsupported_inbound(ob))
+}
+
+/// Recognise a builtin `range` object.
+///
+/// Matched by exact type rather than by duck-typing on `.start`/`.stop`/`.step`,
+/// so an unrelated object that happens to carry those attributes is rejected by
+/// the catch-all instead of being silently reinterpreted as a range.
+fn extract_range(ob: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
+    let range_type = ob.py().import("builtins")?.getattr("range")?;
+    if !ob.is_instance(&range_type)? {
+        return Ok(None);
+    }
+    Ok(Some(Value::Range {
+        start: ob.getattr("start")?.extract()?,
+        stop: ob.getattr("stop")?.extract()?,
+        step: ob.getattr("step")?.extract()?,
+    }))
+}

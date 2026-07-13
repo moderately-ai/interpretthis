@@ -31,3 +31,7 @@
 
 # Coding harness
 .pi-subagents/
+
+# Python binding: local venv + build output
+/crates/interpretthis-python/.venv/
+/crates/interpretthis-python/dist/

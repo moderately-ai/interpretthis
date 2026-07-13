@@ -1,0 +1,92 @@
+# Copyright 2026 Thomas Santerre and Moderately AI Inc.
+#
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+[project]
+name = "interpretthis"
+dynamic = ["version"]
+description = "Sandboxed Python interpreter for untrusted and LLM-generated code"
+readme = "README.md"
+requires-python = ">=3.11"
+# PEP 639 SPDX expression + licence files. This supersedes the deprecated
+# `License :: OSI Approved ::` classifier: Metadata 2.4 emits a
+# `License-Expression` field, and PyPI REJECTS an upload carrying both that and a
+# licence classifier. So no licence classifier appears below — that omission is
+# deliberate, not an oversight.
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
+authors = [
+    { name = "Thomas Santerre", email = "opensource@moderately.ai" },
+    { name = "Moderately AI Inc.", email = "opensource@moderately.ai" },
+]
+keywords = ["python", "interpreter", "sandbox", "ast", "llm", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+    "Topic :: Software Development :: Interpreters",
+    # OS classifiers match the wheels the release workflow actually builds AND
+    # install-smokes. An OS is never advertised here ahead of a green lane.
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+# No runtime dependencies. The wheel is the compiled extension plus a thin pure
+# Python wrapper, and that is the whole point — a sandbox that dragged in a
+# dependency tree would be a strange thing to trust.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/moderately-ai/interpretthis"
+Repository = "https://github.com/moderately-ai/interpretthis"
+Changelog = "https://github.com/moderately-ai/interpretthis/blob/main/CHANGELOG.md"
+Issues = "https://github.com/moderately-ai/interpretthis/issues"
+
+[dependency-groups]
+# PEP 735 dev tooling: `uv sync --group dev`. Build/test/lint only; never shipped.
+dev = [
+    "maturin>=1.7,<2.0",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.15",
+]
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name = "interpretthis._native"
+# `extension-module` is a NON-default cargo feature (see Cargo.toml). Enabling it
+# here makes PyO3 omit libpython for the wheel and lets maturin add the macOS
+# dynamic-lookup link arg, while a bare `cargo check -p interpretthis-python`
+# keeps it off so the CI gate links libpython normally.
+features = ["extension-module"]
+# No custom cargo profile is set, on purpose. PyO3 needs `panic = "unwind"` to
+# turn a Rust panic into a Python exception, and the release profile already
+# unwinds. If one is ever added it must NOT be named `maturin` — that collides
+# with maturin's own `target/maturin/` staging directory.
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["python/interpretthis"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+"*.pyi" = ["F401"]
