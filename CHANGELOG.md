@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Value::to_key` — the public inverse of `ValueKey::to_value`, deriving the
+  hashable dict/set key for a value (and `Err(TypeError: unhashable type)` for
+  those that have none). Any host building a `Value::Dict` from outside the
+  crate needs to construct keys; without this it would have to re-implement the
+  evaluator's key coercion — notably the integral-float fold that keeps
+  `{2: x}[2.0]` on one slot — and a second implementation would silently
+  diverge.
 - `Tools::try_insert` — registers a tool, returning `Err(ToolError)` instead of
   panicking when the name is a dangerous builtin (`eval`, `exec`, `os`, …).
   `Tools::insert` / `Tools::with` keep panicking and stay the ergonomic form for

@@ -1981,6 +1981,40 @@ impl Value {
     }
 }
 
+impl Value {
+    /// Derive the hashable dict/set key for this value.
+    ///
+    /// The public inverse of [`ValueKey::to_value`]. Applies the same key
+    /// coercion the evaluator does — notably, an integral float folds into
+    /// [`ValueKey::Int`], so `{2: x}[2.0]` hits one slot, matching CPython's
+    /// `hash(2.0) == hash(2)`.
+    ///
+    /// Exposed because any host that builds a [`Value::Dict`] from outside the
+    /// crate — the language bindings, chiefly — needs to construct keys, and a
+    /// second hand-rolled implementation of the folding rules would silently
+    /// diverge from the evaluator's: a dict holding two equal-but-distinct keys
+    /// corrupts `in` / `len` / lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InterpreterError::TypeError`] (`unhashable type: '...'`) for
+    /// values Python cannot use as a key — `list`, `dict`, `set`, and the
+    /// interpreter's internal variants.
+    pub fn to_key(&self) -> Result<ValueKey, crate::error::InterpreterError> {
+        match crate::eval::literals::value_to_key(self) {
+            Ok(key) => Ok(key),
+            Err(crate::error::EvalError::Interpreter(e)) => Err(e),
+            // `value_to_key` only ever fails as Interpreter(TypeError): it
+            // raises no Python exception and emits no control-flow signal.
+            // The arm exists because EvalError is #[non_exhaustive] to us.
+            Err(_) => Err(crate::error::InterpreterError::TypeError(format!(
+                "unhashable type: '{}'",
+                self.type_name()
+            ))),
+        }
+    }
+}
+
 impl ValueKey {
     /// Reconstruct the `Value` this key was derived from.
     ///

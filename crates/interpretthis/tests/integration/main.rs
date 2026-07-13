@@ -14,6 +14,7 @@ mod parity_corpus_runner;
 mod cpython_imported;
 mod divergences;
 mod engine_smoke;
+mod host_value_api;
 mod parallelization;
 mod resource_limits;
 mod security;
