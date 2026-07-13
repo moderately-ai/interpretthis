@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Tools::try_insert` — registers a tool, returning `Err(ToolError)` instead of
+  panicking when the name is a dangerous builtin (`eval`, `exec`, `os`, …).
+  `Tools::insert` / `Tools::with` keep panicking and stay the ergonomic form for
+  a fixed startup tool set. The fallible form exists for callers that cannot
+  absorb a panic: language bindings (where the name arrives from Python or
+  JavaScript and a panic would cross an FFI boundary) and hosts registering
+  tools from user-supplied config.
 - `NOTICE` documenting the one non-permissive transitive dependency
   (`malachite`, LGPL-3.0-only, reached via `rustpython-parser`) and how the
   LGPL-3.0 §4 relink obligation is met for distributed binaries. Inert for

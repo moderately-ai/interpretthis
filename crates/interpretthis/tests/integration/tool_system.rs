@@ -204,6 +204,18 @@ fn tool_cannot_provide_dangerous_tool_name() {
     tools.insert("eval", echo_tool());
 }
 
+#[test]
+fn tool_try_insert_rejects_dangerous_name_without_panicking() {
+    let mut tools = Tools::new();
+
+    let err = tools.try_insert("eval", echo_tool()).expect_err("'eval' must be rejected");
+    assert!(err.message.contains("dangerous builtin"), "unexpected message: {}", err.message);
+    assert!(!tools.contains_key("eval"), "a rejected tool must not be registered");
+
+    tools.try_insert("echo", echo_tool()).expect("'echo' is a permitted tool name");
+    assert!(tools.contains_key("echo"));
+}
+
 // --- Tools not in state ---
 
 #[tokio::test]

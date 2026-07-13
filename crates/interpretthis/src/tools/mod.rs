@@ -151,6 +151,7 @@ impl Tools {
     /// # Panics
     ///
     /// Panics if the tool name is a dangerous builtin (e.g. `eval`, `exec`).
+    /// Use [`Tools::try_insert`] where a panic is not an acceptable outcome.
     #[must_use]
     pub fn with(mut self, name: &str, config: ToolDefinition) -> Self {
         self.insert(name, config);
@@ -160,13 +161,44 @@ impl Tools {
     /// Insert a tool into the set.
     ///
     /// # Panics
-    /// Panics if the tool name is a dangerous builtin.
+    /// Panics if the tool name is a dangerous builtin. This is the ergonomic
+    /// form for hosts that register a fixed, known-good tool set at startup —
+    /// a bad name there is a programming error. Callers that route a tool name
+    /// from outside Rust (a language binding, a config file) want
+    /// [`Tools::try_insert`] instead.
     pub fn insert(&mut self, name: &str, config: ToolDefinition) {
         assert!(
             crate::security::validator::is_name_allowed(name),
             "tool name '{name}' is a dangerous builtin and cannot be registered"
         );
         self.0.insert(name.to_string(), config);
+    }
+
+    /// Insert a tool into the set, reporting a rejected name as an error
+    /// rather than a panic.
+    ///
+    /// Same validation as [`Tools::insert`]: names in the sandbox's dangerous
+    /// builtin list (`eval`, `exec`, `os`, …) are refused, because a tool that
+    /// shadowed one would be unreachable from user code anyway — the security
+    /// layer rejects the name before dispatch ever sees it.
+    ///
+    /// This exists for callers that cannot absorb a panic: language bindings
+    /// (where a name arrives from Python or JavaScript and a panic would cross
+    /// an FFI boundary) and any host that registers tools from untrusted or
+    /// user-supplied configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ToolError`] naming the offending tool if `name` is a
+    /// dangerous builtin.
+    pub fn try_insert(&mut self, name: &str, config: ToolDefinition) -> Result<(), ToolError> {
+        if !crate::security::validator::is_name_allowed(name) {
+            return Err(ToolError::new(format!(
+                "tool name '{name}' is a dangerous builtin and cannot be registered"
+            )));
+        }
+        self.0.insert(name.to_string(), config);
+        Ok(())
     }
 
     /// Look up a tool by name.
