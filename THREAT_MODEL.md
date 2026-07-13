@@ -22,26 +22,26 @@ AST nodes that parse, but the evaluator refuses to execute. Most return `Interpr
 
 | Construct | Source location |
 |---|---|
-| `await` (no coroutine machinery) | `src/eval/mod.rs::eval_expr` `Expr::Await` arm |
-| `async def`, `async for`, `async with` | `src/eval/mod.rs::eval_stmt` catch-all |
-| `class` keyword arguments (e.g. `metaclass=`) | `src/eval/classes.rs::eval_class_def` keyword-args check |
-| Computed class bases (e.g. `class Foo(f()):`) | `src/eval/classes.rs::eval_class_def` base-expr check — only bare-name bases accepted |
-| `from module import *` | `src/eval/modules/mod.rs::eval_import_from` star-import branch |
-| Relative imports (`from .module`) | `src/eval/modules/mod.rs::eval_import_from` |
-| Dotted imports (`import a.b`) | `src/eval/modules/mod.rs::eval_import` |
-| Augmented assignment to a slice target | `src/eval/statements.rs::eval_aug_assign` |
-| Matrix multiplication (`@`) | `src/eval/operations.rs::apply_binop` MatMult arm |
-| Complex `del` attribute / subscript target | `src/eval/delete.rs::delete_target` |
+| `await` (no coroutine machinery) | `crates/interpretthis/src/eval/mod.rs::eval_expr` `Expr::Await` arm |
+| `async def`, `async for`, `async with` | `crates/interpretthis/src/eval/mod.rs::eval_stmt` catch-all |
+| `class` keyword arguments (e.g. `metaclass=`) | `crates/interpretthis/src/eval/classes.rs::eval_class_def` keyword-args check |
+| Computed class bases (e.g. `class Foo(f()):`) | `crates/interpretthis/src/eval/classes.rs::eval_class_def` base-expr check — only bare-name bases accepted |
+| `from module import *` | `crates/interpretthis/src/eval/modules/mod.rs::eval_import_from` star-import branch |
+| Relative imports (`from .module`) | `crates/interpretthis/src/eval/modules/mod.rs::eval_import_from` |
+| Dotted imports (`import a.b`) | `crates/interpretthis/src/eval/modules/mod.rs::eval_import` |
+| Augmented assignment to a slice target | `crates/interpretthis/src/eval/statements.rs::eval_aug_assign` |
+| Matrix multiplication (`@`) | `crates/interpretthis/src/eval/operations.rs::apply_binop` MatMult arm |
+| Complex `del` attribute / subscript target | `crates/interpretthis/src/eval/delete.rs::delete_target` |
 
-Supported (not in this rejection table): multi-level classes + C3 MRO + `super()`, class decorators (`@property` / `@staticmethod` / `@classmethod` / `@dataclass`), `match` class patterns, eager `yield` / `yield from`, and user-class `with` / `__enter__` / `__exit__` (`src/eval/control_flow.rs::eval_with`). Generator *iterator* protocol (`next` / `send` / `throw` / `close`) remains partial — see [`CONFORMANCE.md`](./CONFORMANCE.md).
+Supported (not in this rejection table): multi-level classes + C3 MRO + `super()`, class decorators (`@property` / `@staticmethod` / `@classmethod` / `@dataclass`), `match` class patterns, eager `yield` / `yield from`, and user-class `with` / `__enter__` / `__exit__` (`crates/interpretthis/src/eval/control_flow.rs::eval_with`). Generator *iterator* protocol (`next` / `send` / `throw` / `close`) remains partial — see [`CONFORMANCE.md`](./CONFORMANCE.md).
 
 ### 3. Allowlist-gated
 
 The construct is supported in principle, but execution checks against a vetted whitelist.
 
-- **Imports** — `src/eval/modules/mod.rs::MODULES` is the registry of every shippable stdlib module (including `copy`). The registry IS the allowlist; `is_known_module` reads from it. Any other module raises `ModuleNotFoundError`.
-- **Bare-name resolution** — `DANGEROUS_NAMES` at `src/security/names.rs` rejects `eval`, `exec`, `compile`, `getattr`, `setattr`, `delattr`, `__import__`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, `shutil` even though the parser accepts them as identifiers. Checked in `src/security/validator.rs`.
-- **Attribute access** — `BLOCKED_ATTRIBUTES` at `src/security/names.rs` rejects `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. Single-underscore names (`obj._field`) are allowed; only the explicit dunder list is gated.
+- **Imports** — `crates/interpretthis/src/eval/modules/mod.rs::MODULES` is the registry of every shippable stdlib module (including `copy`). The registry IS the allowlist; `is_known_module` reads from it. Any other module raises `ModuleNotFoundError`.
+- **Bare-name resolution** — `DANGEROUS_NAMES` at `crates/interpretthis/src/security/names.rs` rejects `eval`, `exec`, `compile`, `getattr`, `setattr`, `delattr`, `__import__`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, `shutil` even though the parser accepts them as identifiers. Checked in `crates/interpretthis/src/security/validator.rs`.
+- **Attribute access** — `BLOCKED_ATTRIBUTES` at `crates/interpretthis/src/security/names.rs` rejects `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. Single-underscore names (`obj._field`) are allowed; only the explicit dunder list is gated.
 
 ### 4. Dynamically validated
 
@@ -54,13 +54,13 @@ These are intentional DoS controls — the operations themselves are legal in th
 - **Memory** — `max_memory_bytes`, default 128 MiB (accounted state size).
 - **Total operation count** — `max_operations`, default 10 M.
 - **While-loop iterations** — `max_while_iterations`, default 100 K.
-- **Recursion depth** — `max_recursion_depth`, default 1000 (matches CPython). Enforced at `src/state.rs::enter_call`.
+- **Recursion depth** — `max_recursion_depth`, default 1000 (matches CPython). Enforced at `crates/interpretthis/src/state.rs::enter_call`.
 - **Stdout** — `max_stdout_bytes`, default 64 KiB.
 - **Wall-clock** — optional `max_execution_time`; checked cooperatively every 100 ops (does not pre-empt a blocked tool future).
-- **Collection / string multiply caps** — fixed ceilings on list/string repetition size (`MAX_COLLECTION_SIZE` / `MAX_STRING_SIZE` in `src/eval/operations.rs`), independent of the memory budget.
+- **Collection / string multiply caps** — fixed ceilings on list/string repetition size (`MAX_COLLECTION_SIZE` / `MAX_STRING_SIZE` in `crates/interpretthis/src/eval/operations.rs`), independent of the memory budget.
 - **Integer overflow** — arithmetic uses `checked_*` ops where applicable; overflow surfaces as a typed error, not a panic or wrap. Very large integer exponents may take a float fast-path rather than counting ops.
 
-Defaults live in `src/config.rs`; `InterpreterConfig` lets callers tighten or loosen each independently.
+Defaults live in `crates/interpretthis/src/config.rs`; `InterpreterConfig` lets callers tighten or loosen each independently.
 
 ## What's relied on (assumptions, not enforced)
 
@@ -76,7 +76,7 @@ Open parity work (not security blockers by themselves) is tracked in tickets and
 
 ## Cross-reference: `CONFORMANCE.md`
 
-This document is the security-side view of what is rejected at parse / eval time and why each rejection exists in attacker-model terms. The user-side catalogue of what the interpreter does or does not support — across both security and parity dimensions, with stable section anchors that every "not supported" error string in `src/` points at — lives in `CONFORMANCE.md` next to this file. Distinction: this doc explains *why* things are blocked from a security standpoint; `CONFORMANCE.md` is the user-facing catalogue of *what* the interpreter does or does not support. A user reading an `InterpreterError` message follows the `(see CONFORMANCE.md#...)` pointer in the error string to the relevant anchor; a security reviewer auditing the sandbox boundary reads this file.
+This document is the security-side view of what is rejected at parse / eval time and why each rejection exists in attacker-model terms. The user-side catalogue of what the interpreter does or does not support — across both security and parity dimensions, with stable section anchors that every "not supported" error string in `crates/interpretthis/src/` points at — lives in `CONFORMANCE.md` next to this file. Distinction: this doc explains *why* things are blocked from a security standpoint; `CONFORMANCE.md` is the user-facing catalogue of *what* the interpreter does or does not support. A user reading an `InterpreterError` message follows the `(see CONFORMANCE.md#...)` pointer in the error string to the relevant anchor; a security reviewer auditing the sandbox boundary reads this file.
 
 ## Concrete attack → mitigation
 

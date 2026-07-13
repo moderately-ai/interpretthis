@@ -3,9 +3,10 @@ tickets_dir = "tickets"
 default_base = "main"
 
 [language]
-# Single-crate library. File-glob scopes drive parallel dispatch; reverse-dep
-# expansion would collapse every scope into one crate-level collision, so it
-# stays off.
+# Cargo workspace: the `interpretthis` core plus its language-binding crates.
+# File-glob scopes drive parallel dispatch; reverse-dep expansion would collapse
+# every core scope into one crate-level collision (and drag the bindings in with
+# it, since they depend on the core), so it stays off.
 backend = "rust"
 reverse_dep_expansion = false
 
@@ -15,53 +16,59 @@ reverse_dep_expansion = false
 [scopes]
 # Public surface + orchestration
 "core" = [
-    "src/lib.rs",
-    "src/config.rs",
-    "src/error.rs",
-    "src/interpreter.rs",
-    "src/parser.rs",
-    "src/state.rs",
-    "src/serialize.rs",
-    "src/value.rs",
-    "src/types.rs",
+    "crates/interpretthis/src/lib.rs",
+    "crates/interpretthis/src/config.rs",
+    "crates/interpretthis/src/error.rs",
+    "crates/interpretthis/src/interpreter.rs",
+    "crates/interpretthis/src/parser.rs",
+    "crates/interpretthis/src/state.rs",
+    "crates/interpretthis/src/serialize.rs",
+    "crates/interpretthis/src/value.rs",
+    "crates/interpretthis/src/types.rs",
 ]
 
 # Expression / statement evaluation spine (not modules or function dispatch)
 "eval" = [
-    "src/eval/mod.rs",
-    "src/eval/classes.rs",
-    "src/eval/comprehensions.rs",
-    "src/eval/control_flow.rs",
-    "src/eval/delete.rs",
-    "src/eval/exceptions.rs",
-    "src/eval/literals.rs",
-    "src/eval/match_stmt.rs",
-    "src/eval/names.rs",
-    "src/eval/op.rs",
-    "src/eval/operations.rs",
-    "src/eval/place.rs",
-    "src/eval/render.rs",
-    "src/eval/statements.rs",
-    "src/eval/strings.rs",
+    "crates/interpretthis/src/eval/mod.rs",
+    "crates/interpretthis/src/eval/classes.rs",
+    "crates/interpretthis/src/eval/comprehensions.rs",
+    "crates/interpretthis/src/eval/control_flow.rs",
+    "crates/interpretthis/src/eval/delete.rs",
+    "crates/interpretthis/src/eval/exceptions.rs",
+    "crates/interpretthis/src/eval/literals.rs",
+    "crates/interpretthis/src/eval/match_stmt.rs",
+    "crates/interpretthis/src/eval/names.rs",
+    "crates/interpretthis/src/eval/op.rs",
+    "crates/interpretthis/src/eval/operations.rs",
+    "crates/interpretthis/src/eval/place.rs",
+    "crates/interpretthis/src/eval/render.rs",
+    "crates/interpretthis/src/eval/statements.rs",
+    "crates/interpretthis/src/eval/strings.rs",
 ]
 
 # Call / method / builtin dispatch
-"eval/functions" = ["src/eval/functions/**"]
+"eval/functions" = ["crates/interpretthis/src/eval/functions/**"]
 
 # Stdlib module registry + implementations
-"eval/modules" = ["src/eval/modules/**"]
+"eval/modules" = ["crates/interpretthis/src/eval/modules/**"]
 
 # Sandbox blocklists + AST validation
-"security" = ["src/security/**"]
+"security" = ["crates/interpretthis/src/security/**"]
 
 # Host tool injection / lazy proxies
-"tools" = ["src/tools/**"]
+"tools" = ["crates/interpretthis/src/tools/**"]
 
 # Integration suite + parity corpus
-"tests" = ["tests/**", "build.rs"]
+"tests" = ["crates/interpretthis/tests/**", "crates/interpretthis/build.rs"]
 
 # Criterion benches + baseline
-"benches" = ["benches/**"]
+"benches" = ["crates/interpretthis/benches/**"]
+
+# Python (pyo3 / maturin) binding: Rust boundary + the thin Python wrapper package
+"bindings/python" = ["crates/interpretthis-python/**"]
+
+# Node (napi-rs) binding: Rust boundary + the npm package
+"bindings/node" = ["crates/interpretthis-node/**"]
 
 # User-facing docs
 "docs" = [
@@ -81,6 +88,9 @@ reverse_dep_expansion = false
 "meta" = [
     "Cargo.toml",
     "Cargo.lock",
+    "crates/interpretthis/Cargo.toml",
+    "deny.toml",
+    "NOTICE",
     "rustfmt.toml",
     ".gitignore",
     ".github/**",
@@ -91,8 +101,8 @@ reverse_dep_expansion = false
     ".ticketsplease/**",
 ]
 
-# Single crate — kept for language backend awareness; reverse-dep expansion
-# is disabled so multi-scope tickets don't all collide via the crate graph.
+# Maps each scope to its owning crate for language-backend awareness. Reverse-dep
+# expansion is disabled, so multi-scope tickets don't all collide via the graph.
 [scope_crates]
 "core" = "interpretthis"
 "eval" = "interpretthis"
@@ -100,6 +110,8 @@ reverse_dep_expansion = false
 "eval/modules" = "interpretthis"
 "security" = "interpretthis"
 "tools" = "interpretthis"
+"bindings/python" = "interpretthis-python"
+"bindings/node" = "interpretthis-node"
 
 [external_scopes]
 # "rustpython-parser" = { repo = "RustPython/RustPython", paths = [] }

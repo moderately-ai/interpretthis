@@ -14,9 +14,13 @@ Short checklist for a crates.io release. Always cut from `main`.
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo nextest run --all-targets
-cargo package --list    # review contents
-cargo package           # build + verify the tarball
+cargo package -p interpretthis --list    # review contents
+cargo package -p interpretthis           # build + verify the tarball
 ```
+
+The root is a virtual workspace, so `-p` is required: only `crates/interpretthis`
+is published to crates.io. The binding crates are `publish = false` and ship to
+PyPI and npm on their own tags.
 
 ## Tag and publish
 
@@ -25,7 +29,7 @@ cargo package           # build + verify the tarball
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin main --tags
 
-cargo publish           # from a clean tree; do not use --allow-dirty
+cargo publish -p interpretthis   # from a clean tree; do not use --allow-dirty
 ```
 
 After the first publish, docs.rs builds automatically from crates.io.
@@ -52,6 +56,6 @@ live in `deny.toml` with reasons — re-evaluate when the parser upgrades.
 
 ## Benchmark baselines
 
-`benches/baseline.json` records criterion medians for regression envelopes.
+`crates/interpretthis/benches/baseline.json` records criterion medians for regression envelopes.
 After material interpreter changes, run `cargo bench --bench interpreter` and
 update the file (see `_comment` / `_comment_refresh` inside the JSON).

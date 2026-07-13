@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Repository is now a Cargo workspace.** The library moved from the repo root
+  to `crates/interpretthis/`; the root manifest is a virtual workspace. This
+  makes room for the Python (PyPI) and Node (npm) binding crates. No source or
+  behaviour change — the published crate builds from the same files, and the
+  `.crate` tarball differs only by dropping repo-root metadata (`deny.toml`,
+  `rustfmt.toml`, CI config, and the top-level docs) that was previously swept
+  in because the package root *was* the repo root.
+- `cargo package` / `cargo publish` now need `-p interpretthis` (see
+  `RELEASING.md`).
+- `Cargo.lock` is now committed. The workspace will ship prebuilt binaries, and
+  those must build from a pinned, auditable dependency graph.
+
+### Added
+
+- `NOTICE` documenting the one non-permissive transitive dependency
+  (`malachite`, LGPL-3.0-only, reached via `rustpython-parser`) and how the
+  LGPL-3.0 §4 relink obligation is met for distributed binaries. Inert for
+  source distribution; it governs the forthcoming wheels and Node addons.
+
 ## [0.3.0] — 2026-07-09
 
 Post-0.2 hardening: true generator frames, eval stack, security/docs, and

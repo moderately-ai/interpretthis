@@ -32,8 +32,8 @@ common_args=(
   # Generated / dependency trees
   -ignore 'target/**'
   # Test fixtures (not project source)
-  -ignore 'tests/integration/parity_corpus/**'
-  -ignore 'tests/integration/cpython_vendored/**'
+  -ignore 'crates/interpretthis/tests/integration/parity_corpus/**'
+  -ignore 'crates/interpretthis/tests/integration/cpython_vendored/**'
   # Non-Rust project files addlicense would otherwise touch
   -ignore '**/*.json'
   -ignore '**/*.md'

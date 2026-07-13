@@ -12,12 +12,12 @@ boundary.
 
 ## What you change
 
-1. Create `src/eval/modules/<name>.rs` with `impl Module for XModule`.
-2. Add `pub mod <name>;` in `src/eval/modules/mod.rs`.
+1. Create `crates/interpretthis/src/eval/modules/<name>.rs` with `impl Module for XModule`.
+2. Add `pub mod <name>;` in `crates/interpretthis/src/eval/modules/mod.rs`.
 3. Register `&name::XModule` in the `MODULES` array (same file). The array
    length must match the number of entries.
 4. Add differential snippets under
-   `tests/integration/parity_corpus/modules/<name>/*.py`.
+   `crates/interpretthis/tests/integration/parity_corpus/modules/<name>/*.py`.
 
 The `MODULES` registry **is** the import allowlist. There is no second list.
 
@@ -26,11 +26,11 @@ historical carve-out and closed).
 
 ## Module skeleton
 
-Follow an existing small module (e.g. `src/eval/modules/textwrap.rs` or
+Follow an existing small module (e.g. `crates/interpretthis/src/eval/modules/textwrap.rs` or
 `hashlib.rs`) for the full `async_trait` + `Module` impl. Minimal shape:
 
 ```rust
-// src/eval/modules/urllib_parse.rs
+// crates/interpretthis/src/eval/modules/urllib_parse.rs
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -104,7 +104,7 @@ imports).
 ## Parity corpus
 
 Put one focused `.py` file per behaviour under
-`tests/integration/parity_corpus/modules/<name>/`. The runner byte-diffs
+`crates/interpretthis/tests/integration/parity_corpus/modules/<name>/`. The runner byte-diffs
 stdout against host `python3.12`.
 
 Hygiene:

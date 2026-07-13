@@ -1,7 +1,10 @@
 # Rust / Cargo
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed. The workspace ships prebuilt binaries (PyPI wheels,
+# npm addons), so the dependency graph must be pinned for a release to be
+# reproducible and auditable — an unlocked graph would re-resolve transitive
+# deps on every release build.
 
 # Editor / OS
 .DS_Store

@@ -38,7 +38,7 @@ This file remains the divergence catalogue and stable error anchors only.
 ## Reference Python version
 <a id="reference-python-version"></a>
 
-Parity is asserted against **`python3.12.x`**. The choice is driven by stability, full PEP 634 match-statement support, and the absence of PEG-parser quirks that surfaced in earlier releases. CI provisions exactly that minor release; the differential corpus runner in `tests/integration/parity_corpus_runner.rs` invokes the host `python3` and byte-diffs stdout, so a minor-version drift on locally-installed Python can produce false negatives on float repr, dict iteration corners, or error messages.
+Parity is asserted against **`python3.12.x`**. The choice is driven by stability, full PEP 634 match-statement support, and the absence of PEG-parser quirks that surfaced in earlier releases. CI provisions exactly that minor release; the differential corpus runner in `crates/interpretthis/tests/integration/parity_corpus_runner.rs` invokes the host `python3` and byte-diffs stdout, so a minor-version drift on locally-installed Python can produce false negatives on float repr, dict iteration corners, or error messages.
 
 CI provisions `python3.12` via `actions/setup-python` (see `.github/workflows/ci.yml`). Locally, use a 3.12.x host `python3` for parity runs; a minor-version drift can produce false negatives on float repr or error wording.
 
@@ -104,16 +104,16 @@ Corpus snippets that compare set output across the two interpreters should still
 ## Import allowlist
 <a id="import-allowlist"></a>
 
-Only a curated set of stdlib modules is importable; arbitrary `import` of any other name raises `ModuleNotFoundError`. The allowlist lives in `src/eval/modules/mod.rs` as the `MODULES` registry; it IS the single registration point for module availability.
+Only a curated set of stdlib modules is importable; arbitrary `import` of any other name raises `ModuleNotFoundError`. The allowlist lives in `crates/interpretthis/src/eval/modules/mod.rs` as the `MODULES` registry; it IS the single registration point for module availability.
 
 Module surfaces are split into two tiers:
 
 - **Auto-imported** (no `import` statement required, bound in the default namespace): `json`, `re`, `datetime`. Historical artefact of the initial release; the carve-out is closed and does not grow.
 - **Require-import** (must appear in an `import` or `from ... import` statement): every other module shipped today — `math`, `statistics`, `collections`, `string`, `textwrap`, `base64`, `hashlib`, `itertools`, `functools`, `typing`, `enum`, `dataclasses`, `decimal`, `fractions`, `copy`.
 
-Single source of truth: every module ships a `pub struct XModule;` + `impl Module for XModule` (per `MODULE_TEMPLATE.md`) and registers itself in the `static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>>` in `src/eval/modules/mod.rs`. There is no second list — the registry IS the allowlist; `is_known_module` reads from it directly.
+Single source of truth: every module ships a `pub struct XModule;` + `impl Module for XModule` (per `MODULE_TEMPLATE.md`) and registers itself in the `static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>>` in `crates/interpretthis/src/eval/modules/mod.rs`. There is no second list — the registry IS the allowlist; `is_known_module` reads from it directly.
 
-The allowlist is **closed by default**: an `import` of a name not in the registry raises a `ModuleNotFoundError`. Submodule imports (`import foo.bar`), `from <name> import *`, and relative imports remain unsupported regardless of registry membership; those rejections live in `src/eval/modules/mod.rs`.
+The allowlist is **closed by default**: an `import` of a name not in the registry raises a `ModuleNotFoundError`. Submodule imports (`import foo.bar`), `from <name> import *`, and relative imports remain unsupported regardless of registry membership; those rejections live in `crates/interpretthis/src/eval/modules/mod.rs`.
 
 Cross-link: [`THREAT_MODEL.md`](./THREAT_MODEL.md) covers the attack framing (`__import__('os').system(...)`, etc.).
 
@@ -126,9 +126,9 @@ Cross-link: [`THREAT_MODEL.md`](./THREAT_MODEL.md) covers the attack framing (`_
 ## Blocked dunders and attributes
 <a id="blocked-dunders"></a>
 
-The following attribute names are rejected by `src/security/validator.rs` regardless of the object they're accessed on: `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. Accessing any of them raises `InterpreterError::Security`.
+The following attribute names are rejected by `crates/interpretthis/src/security/validator.rs` regardless of the object they're accessed on: `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. Accessing any of them raises `InterpreterError::Security`.
 
-Single-underscore names (`obj._field`) are **allowed** — in Python they are a naming convention, not a sandbox boundary. Only the explicit `BLOCKED_ATTRIBUTES` list is gated (see `src/security/names.rs`).
+Single-underscore names (`obj._field`) are **allowed** — in Python they are a naming convention, not a sandbox boundary. Only the explicit `BLOCKED_ATTRIBUTES` list is gated (see `crates/interpretthis/src/security/names.rs`).
 
 These dunders form the standard CPython sandbox-escape chain — `().__class__.__bases__[0].__subclasses__()` walks from any object to every loaded class.
 
@@ -143,7 +143,7 @@ Cross-link: [`THREAT_MODEL.md`](./THREAT_MODEL.md) documents validator entry poi
 ## `eval` / `exec`
 <a id="eval-exec"></a>
 
-`eval`, `exec`, and `compile` are in the `DANGEROUS_NAMES` set at `src/security/names.rs` and cannot be referenced from user code. Calling them raises `InterpreterError::Security`. The same applies to `__import__`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, and `shutil`. The const in `src/security/names.rs` is the source of truth.
+`eval`, `exec`, and `compile` are in the `DANGEROUS_NAMES` set at `crates/interpretthis/src/security/names.rs` and cannot be referenced from user code. Calling them raises `InterpreterError::Security`. The same applies to `__import__`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, and `shutil`. The const in `crates/interpretthis/src/security/names.rs` is the source of truth.
 
 `getattr` / `setattr` / `delattr` are **bounded builtins**: the attribute name must be a string and is checked against `BLOCKED_ATTRIBUTES` (class-walk dunders like `__class__` / `__bases__` stay forbidden). Three-arg `getattr(o, name, default)` returns the default only on `AttributeError`, never on a security rejection. Instance field storage is shared (`SharedFields`), so `setattr`/`delattr` mutate by identity like CPython.
 
@@ -240,7 +240,7 @@ Method calls thread kwargs through `dispatch_method` → per-type dispatchers. B
 - **Accept kwargs**: `str.split` / `rsplit` (`sep`, `maxsplit`), `str.encode` (`encoding`, `errors`), `str.expandtabs` (`tabsize`), `dict.update(**kwargs)`, `OrderedDict.move_to_end` (`key`, `last`), `list.sort` (`key`, `reverse` — special-cased in `eval_call`), `str.format` / `format_map` (free-form field names).
 - **Positional-only** (unexpected kwargs → `TypeError`, never silent drop): most other methods, including `dict.get` / `pop` / `setdefault`, `str.replace` / `center` / `strip` / …, and list mutators.
 
-Binding uses `bind_method_params` in `src/eval/functions/method_dispatch.rs`.
+Binding uses `bind_method_params` in `crates/interpretthis/src/eval/functions/method_dispatch.rs`.
 
 **Status**: Shipped for the CPython 3.12 keyword surface above. Additional methods gain named kwargs on demand when CPython accepts them.
 

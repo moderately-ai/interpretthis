@@ -33,14 +33,14 @@ repos:
       - id: trailing-whitespace
         exclude: |
           (?x)^(
-            tests/integration/parity_corpus/.*|
-            tests/integration/cpython_vendored/.*
+            crates/interpretthis/tests/integration/parity_corpus/.*|
+            crates/interpretthis/tests/integration/cpython_vendored/.*
           )$
       - id: end-of-file-fixer
         exclude: |
           (?x)^(
-            tests/integration/parity_corpus/.*|
-            tests/integration/cpython_vendored/.*
+            crates/interpretthis/tests/integration/parity_corpus/.*|
+            crates/interpretthis/tests/integration/cpython_vendored/.*
           )$
       - id: check-yaml
       - id: check-toml

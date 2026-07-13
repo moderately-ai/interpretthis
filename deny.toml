@@ -21,15 +21,31 @@ ignore = [
 [licenses]
 version = 2
 confidence-threshold = 0.8
+# A dependency whose license falls outside this set fails the gate, forcing a
+# deliberate review. The OSI-permissive set is kept broad because the binding
+# crates (pyo3, napi) pull a wider graph than the core interpreter does.
+unused-allowed-license = "allow"
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    # File-level weak copyleft; standard to allow for an unmodified dependency.
+    "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "CC0-1.0",
-    # malachite (via rustpython-parser / malachite-bigint) is LGPL-3.0-only.
+    # malachite (via rustpython-parser / malachite-bigint) is LGPL-3.0-only, and
+    # is statically linked into every binary we build. Harmless while crates.io
+    # ships source; it carries LGPL-3.0 §4 obligations onto any *binary* we
+    # distribute (PyPI wheels, npm .node addons) — see NOTICE. The tracked exit
+    # is migrating to `ruff_python_parser` (MIT).
     "LGPL-3.0-only",
 ]
 

@@ -1,0 +1,94 @@
+[package]
+name = "interpretthis"
+description = "Sandboxed Python AST interpreter for untrusted and LLM-generated code"
+# The repo README is the crates.io long description. It lives at the workspace
+# root (it is also the GitHub landing page) and cargo copies it into the tarball.
+readme = "../../README.md"
+keywords = ["python", "interpreter", "sandbox", "ast", "llm"]
+categories = ["compilers", "parser-implementations", "asynchronous"]
+documentation = "https://docs.rs/interpretthis"
+
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Paths are relative to this manifest. `cargo package` walks the crate directory,
+# so repo-root files (tickets/, scripts/, ...) are already outside the tarball and
+# need no exclusion — only in-crate fixtures do.
+exclude = [
+    "benches/baseline.json",
+    "tests/integration/cpython_vendored/**",
+]
+
+# Bench tree is one consolidated `[[bench]] name = "interpreter"` target
+# rooted at `benches/main.rs`; sibling files (`eval.rs`, `frames.rs`, ...)
+# are mod-included from there. Turn off cargo's auto-discovery so it
+# doesn't try to build each sibling as a standalone bench too.
+autobenches = false
+
+[dependencies]
+rustpython-parser = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+indexmap = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+bigdecimal = { workspace = true }
+num-rational = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+rustc-hash = { workspace = true }
+compact_str = { workspace = true }
+
+# Optional alternative global allocators for the bench harness.
+# Activated only via the corresponding feature flag. The crate itself
+# stays allocator-neutral for downstream consumers — only the bench
+# binaries opt in.
+tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
+
+[features]
+# Use jemalloc as the global allocator in this crate's bench binaries.
+# Recommended for published-perf runs on Linux.
+bench-alloc-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+# Alternative: mimalloc. Sometimes wins on macOS for the small-alloc
+# patterns the interpreter generates. A/B against jemalloc when in doubt.
+bench-alloc-mimalloc = ["dep:mimalloc"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+# One consolidated integration-test binary: every separate `[[test]]`
+# re-type-checks the crate's full transitive closure, so collapsing the
+# per-file targets shaves the parallel fan-out off `cargo check --tests`.
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+# One consolidated criterion bench binary. Each layer/dimension lives
+# in its own module under `benches/`, but they share a single
+# `benches/main.rs` entry point. Individual benches stay runnable via
+# criterion's filter args (e.g. `cargo bench -- 'eval/int_loop_2k'`).
+#
+# `harness = false` lets criterion install its own `main` instead of
+# the default libtest one. Baseline numbers + per-group regression
+# envelopes are recorded in `benches/baseline.json`.
+[[bench]]
+name = "interpreter"
+path = "benches/main.rs"
+harness = false
+
+[lints]
+workspace = true

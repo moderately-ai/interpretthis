@@ -1,0 +1,54 @@
+interpretthis
+Copyright 2026 Thomas Santerre and Moderately AI Inc.
+
+This product is licensed under either of
+
+  * Apache License, Version 2.0 (LICENSE-APACHE)
+  * MIT license (LICENSE-MIT)
+
+at your option.
+
+--------------------------------------------------------------------------------
+Third-party components in distributed binaries
+--------------------------------------------------------------------------------
+
+Source distributions (the crates.io `.crate` tarball, the PyPI sdist) contain
+only the files in this repository and are covered solely by the licences above.
+
+Binary distributions — the PyPI wheels and the npm Node-API (`.node`) addons —
+are STATICALLY LINKED and therefore embed object code from the dependencies
+below. Their licences travel with those binaries.
+
+  malachite, malachite-base, malachite-nz, malachite-q   LGPL-3.0-only
+      https://crates.io/crates/malachite
+
+      Reached transitively, not chosen directly:
+
+          interpretthis
+            -> rustpython-parser
+              -> rustpython-ast
+                -> malachite-bigint
+                  -> malachite
+
+      RustPython's AST represents Python integer literals with malachite's
+      arbitrary-precision integers, so malachite is linked into every build
+      even when no large integer is ever evaluated.
+
+      Under LGPL-3.0 section 4, a recipient of a binary that statically links
+      malachite is entitled to relink that binary against a modified version of
+      malachite. We satisfy this by publishing the complete corresponding source
+      of interpretthis under the permissive licences above, at
+
+          https://github.com/moderately-ai/interpretthis
+
+      together with the exact dependency graph (`Cargo.lock`) and the release
+      workflows used to build each published artifact, so any recipient can
+      substitute their own malachite and rebuild. The malachite sources are
+      available from crates.io at the versions pinned in `Cargo.lock`.
+
+      Nothing here places LGPL terms on interpretthis's own source, which
+      remains MIT OR Apache-2.0.
+
+Every other dependency is under a permissive licence (MIT, Apache-2.0, BSD,
+ISC, Zlib, Unicode, or similar); the allowed set is enforced in CI by
+`cargo deny` (see `deny.toml`).

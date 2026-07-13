@@ -92,7 +92,7 @@ scripts/license-headers.sh check
 ```
 
 Parity tests compare against host `python3.12` when available
-(`tests/integration/parity_corpus/`).
+(`crates/interpretthis/tests/integration/parity_corpus/`).
 
 ## License
 

@@ -7,7 +7,7 @@ dependencies: []
 related: []
 scopes: []
 shared_scopes: []
-paths: [src/value.rs, src/state.rs, src/serialize.rs, tests/integration/resource_limits.rs, benches/memory.rs]
+paths: [crates/interpretthis/src/value.rs, crates/interpretthis/src/state.rs, crates/interpretthis/src/serialize.rs, crates/interpretthis/tests/integration/resource_limits.rs, crates/interpretthis/benches/memory.rs]
 tags: [perf, audit, memory]
 ---
 Audit found `std::mem::size_of::<Value>() == 136` while memory accounting uses `VALUE_SLOT_BYTES = 64`. Decide whether to (a) box large variants to reduce every container slot, (b) update accounting to match reality and refresh memory expectations, or (c) document the approximation. This is high-impact for list/dict-heavy memory and cache behavior but requires careful state serialization/resource-limit validation.

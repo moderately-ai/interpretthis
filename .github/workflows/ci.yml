@@ -96,6 +96,8 @@ jobs:
         with:
           toolchain: ${{ env.MSRV }}
       - uses: Swatinem/rust-cache@v2
-      # Builds the crates.io tarball (excludes tickets/scripts via Cargo.toml).
+      # Builds and verifies the crates.io tarball. `-p` is explicit: the root is a
+      # virtual workspace, and only the core crate is published (the binding
+      # crates are `publish = false`).
       - name: cargo package
-        run: cargo package
+        run: cargo package -p interpretthis

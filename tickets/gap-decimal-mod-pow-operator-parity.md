@@ -7,7 +7,7 @@ dependencies: []
 related: []
 scopes: []
 shared_scopes: []
-paths: [src/types.rs, src/eval/modules/decimal_mod.rs, tests/integration/parity_corpus/modules/decimal/**, CONFORMANCE.md]
+paths: [crates/interpretthis/src/types.rs, crates/interpretthis/src/eval/modules/decimal_mod.rs, crates/interpretthis/tests/integration/parity_corpus/modules/decimal/**, CONFORMANCE.md]
 tags: [gap, stdlib, decimal, parity]
 ---
 Audit comments/docs: Decimal Mod/Pow are not wired, and Decimal-vs-float TypeError wording is generic rather than operator-specific. Implement Decimal % / ** parity where feasible and improve TypeError messages to match CPython operator names, or document any permanent divergence.
