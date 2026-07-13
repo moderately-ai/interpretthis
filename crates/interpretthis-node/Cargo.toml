@@ -1,0 +1,51 @@
+[package]
+name = "interpretthis-node"
+description = "Node.js bindings for interpretthis — a sandboxed Python interpreter"
+# Ships to npm as the `interpretthis` package, never to crates.io.
+publish = false
+
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+interpretthis = { workspace = true }
+
+# Pinned exactly, matching the versions squonk ships.
+#
+# `napi8` is the Node-API ABI level (Node >= 22, the `engines` floor in
+# package.json). `async` pulls in `tokio_rt`, which is what makes `#[napi] async
+# fn` return a real Promise driven on a tokio runtime — mandatory here, not a
+# nicety: a JS tool callback can only resolve if the event loop is free to run
+# it, so a blocking execute would deadlock every async tool.
+napi = { version = "=3.4.0", default-features = false, features = [
+    "napi8",
+    "async",
+    "chrono_date",
+] }
+napi-derive = { version = "=3.2.5", default-features = false, features = [
+    "strict",
+    "type-def",
+] }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+indexmap = { workspace = true }
+num-bigint = { workspace = true }
+tokio = { workspace = true }
+
+[build-dependencies]
+napi-build = "=2.2.4"
+
+# Local, NOT `workspace = true`: the workspace lints deny `unsafe_code`, and
+# napi's conversion traits are unsafe by construction (they hand back raw
+# `napi_value` handles). See the note in the root manifest.
+[lints.clippy]
+all = { level = "deny", priority = -1 }

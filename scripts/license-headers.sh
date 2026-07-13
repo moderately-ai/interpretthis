@@ -39,8 +39,12 @@ common_args=(
   -ignore '**/.pytest_cache/**'
   -ignore '**/.mypy_cache/**'
   -ignore '**/.ruff_cache/**'
-  # Node binding: installed packages and build output.
+  # Node binding: installed packages and build output. index.js / index.d.ts are
+  # emitted by `napi build` (the .d.ts carries our header via dts-header.d.ts).
   -ignore '**/node_modules/**'
+  -ignore '**/index.js'
+  -ignore '**/index.d.ts'
+  -ignore '**/npm/**'
   # Test fixtures (not project source)
   -ignore 'crates/interpretthis/tests/integration/parity_corpus/**'
   -ignore 'crates/interpretthis/tests/integration/cpython_vendored/**'

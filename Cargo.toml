@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/interpretthis", "crates/interpretthis-python"]
+members = [
+    "crates/interpretthis",
+    "crates/interpretthis-python",
+    "crates/interpretthis-node",
+]
 # Everyday lanes (bare `cargo build/check/clippy/test`) resolve to the core crate
 # only. The binding crates carry expensive, single-purpose graphs (pyo3 + maturin,
 # napi + node) that nothing else depends on, so they stay off the hot path. They

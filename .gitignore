@@ -35,3 +35,10 @@
 # Python binding: local venv + build output
 /crates/interpretthis-python/.venv/
 /crates/interpretthis-python/dist/
+
+# Node binding: installed packages + napi build output
+/crates/interpretthis-node/node_modules/
+/crates/interpretthis-node/*.node
+/crates/interpretthis-node/index.js
+/crates/interpretthis-node/index.d.ts
+/crates/interpretthis-node/npm/

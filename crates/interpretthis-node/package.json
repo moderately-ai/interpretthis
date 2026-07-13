@@ -1,0 +1,62 @@
+{
+  "name": "interpretthis",
+  "version": "0.3.0",
+  "description": "Sandboxed Python interpreter for untrusted and LLM-generated code",
+  "keywords": [
+    "python",
+    "interpreter",
+    "sandbox",
+    "llm",
+    "agent",
+    "ast"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moderately-ai/interpretthis.git"
+  },
+  "homepage": "https://github.com/moderately-ai/interpretthis",
+  "bugs": {
+    "url": "https://github.com/moderately-ai/interpretthis/issues"
+  },
+  "author": "Moderately AI Inc. <opensource@moderately.ai>",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">= 22"
+  },
+  "napi": {
+    "binaryName": "interpretthis",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release --manifest-path Cargo.toml --dts-header dts-header.d.ts",
+    "build:debug": "napi build --platform --manifest-path Cargo.toml --dts-header dts-header.d.ts",
+    "test": "node --test \"__test__/**/*.test.mjs\"",
+    "prepublishOnly": "napi prepublish -t npm"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
