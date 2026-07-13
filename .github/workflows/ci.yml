@@ -64,6 +64,77 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets
 
+      # `default-members` is the core crate, so the lanes above never see the
+      # binding crates. Compile-check them explicitly — and do it on every OS in
+      # this matrix, because the pyo3 link boundary is exactly where a
+      # platform-specific break shows up, and it must be caught here rather than
+      # in a wheel job.
+      #
+      # NOTE the absence of `--features extension-module`: without it PyO3 links
+      # libpython normally and this succeeds anywhere. Maturin turns it on for
+      # the wheel.
+      - name: cargo clippy (bindings)
+        run: cargo clippy -p interpretthis-python -p interpretthis-node --all-targets -- -D warnings
+
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11" # the abi3 floor
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install tooling
+        run: python -m pip install 'maturin>=1.7,<2.0' 'pytest>=8' 'pytest-asyncio>=0.24' 'ruff>=0.6' 'mypy>=1.15'
+
+      - name: Build and install the wheel
+        working-directory: crates/interpretthis-python
+        run: |
+          maturin build --out dist
+          python -m pip install dist/*.whl
+
+      - name: Lint, typecheck, and test
+        working-directory: crates/interpretthis-python
+        run: |
+          ruff check python
+          ruff format --check python
+          mypy
+          pytest
+          # Run from outside the crate so its `python/` source directory cannot
+          # shadow the installed wheel that stubtest is meant to inspect.
+          (cd /tmp && python -m mypy.stubtest interpretthis._native)
+
+  node:
+    name: node bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # the engines floor
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the addon and run the suite
+        working-directory: crates/interpretthis-node
+        run: |
+          npm install
+          npm run build:debug
+          npm test
+
   docs:
     name: docs
     runs-on: ubuntu-latest

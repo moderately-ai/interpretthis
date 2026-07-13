@@ -1,6 +1,12 @@
 # interpretthis
 
-Sandboxed Python AST interpreter for Rust.
+Sandboxed Python AST interpreter for **Rust, Python, and TypeScript**.
+
+```bash
+cargo add interpretthis     # crates.io
+pip install interpretthis   # PyPI
+npm install interpretthis   # npm
+```
 
 Runs untrusted or LLM-generated Python by evaluating a
 [`rustpython-parser`](https://crates.io/crates/rustpython-parser) AST under
@@ -56,6 +62,41 @@ async fn main() {
 ```
 
 Requires Rust 1.85+ and Tokio.
+
+## From Python
+
+```python
+from interpretthis import Interpreter
+
+interp = Interpreter(tools={"double": lambda n: n * 2})
+result = interp.execute("answer = double(n=x)\nprint(answer)", {"x": 21})
+
+result.stdout                  # '42\n'
+interp.get_variable("answer")  # 42
+```
+
+Tools may be `async def`; from async code use `await interp.execute_async(...)`, and
+tool coroutines run on your own event loop. See
+[`crates/interpretthis-python/README.md`](./crates/interpretthis-python/README.md).
+
+## From TypeScript
+
+```js
+import { Interpreter } from 'interpretthis'
+
+const interp = new Interpreter({ double: ({ n }) => n * 2 })
+const result = await interp.execute('answer = double(n=x)\nprint(answer)', { x: 21 })
+
+result.stdout                    // '42\n'
+interp.getVariable('answer')     // 42
+```
+
+Tools may be `async`. See
+[`crates/interpretthis-node/README.md`](./crates/interpretthis-node/README.md).
+
+In every language, a failing run is **data, not an exception**: you get `stdout`
+*and* the error, because a script that prints and then breaks has told you
+something useful in both — and that pair is what you feed back to a model.
 
 ## Limits (honest)
 

@@ -1,6 +1,36 @@
 # Releasing
 
-Short checklist for a crates.io release. Always cut from `main`.
+Three registries ship from this repo, from one version:
+
+| Registry | Package | Tag | Workflow |
+| --- | --- | --- | --- |
+| crates.io | `interpretthis` (source) | `v*` | manual `cargo publish` |
+| PyPI | `interpretthis` (wheels + sdist) | `python-v*` | `release-python.yml` |
+| npm | `interpretthis` (native addons) | `npm-v*` | `release-npm.yml` |
+
+Keep the version in `[workspace.package]`, `crates/interpretthis-node/package.json`,
+and the changelog in step. Always cut from `main`.
+
+**Neither binding workflow publishes on its own.** A pushed tag builds and smokes
+the artifacts and stops there. Publishing needs a `workflow_dispatch` with
+`publish: true` **and** approval on the protected `pypi` / `npm` environment —
+that required reviewer is the human gate. Configure both environments with a
+required reviewer before the first release, or the gate does not exist.
+
+## Before the first binary publish
+
+Binary artifacts statically link `malachite` (LGPL-3.0-only), reached transitively
+through `rustpython-parser`. This is inert for crates.io (source), but it attaches
+LGPL-3.0 §4 obligations to every wheel and `.node` we distribute. See `NOTICE`,
+which ships inside both packages.
+
+- [ ] Legal sign-off on the LGPL position
+- [ ] `interpretthis` claimed on PyPI and npm
+- [ ] PyPI Trusted Publishing configured for this repo + workflow (no API token)
+- [ ] npm Trusted Publishing configured (no `NPM_TOKEN`)
+- [ ] `pypi` and `npm` GitHub Environments exist, each with a required reviewer
+
+## crates.io
 
 ## Preconditions
 
@@ -33,6 +63,54 @@ cargo publish -p interpretthis   # from a clean tree; do not use --allow-dirty
 ```
 
 After the first publish, docs.rs builds automatically from crates.io.
+
+## PyPI
+
+Rehearse locally first — the same smoke CI runs, against a wheel installed into a
+throwaway venv with no index, so it cannot silently exercise the source tree:
+
+```bash
+cd crates/interpretthis-python
+uv venv .venv && source .venv/bin/activate
+uv pip install 'maturin>=1.7,<2.0' pytest pytest-asyncio ruff mypy
+maturin develop && pytest && mypy && ruff check python
+(cd /tmp && python -m mypy.stubtest interpretthis._native)
+
+maturin build --release --out dist
+python -m venv /tmp/smoke && /tmp/smoke/bin/pip install --find-links dist --no-index interpretthis
+/tmp/smoke/bin/python ../../docs/release/smoke_python.py    # must print SMOKE OK
+```
+
+Then:
+
+1. Dispatch `release-python` with `publish: false`. Every matrix leg must build
+   *and* install-smoke green on its native runner.
+2. Re-dispatch with `publish: true` and approve the `pypi` environment.
+3. Tag: `git tag -a python-v0.4.0 -m "python-v0.4.0" && git push --tags`.
+
+## npm
+
+```bash
+cd crates/interpretthis-node
+npm install && npm run build:debug && npm test
+```
+
+Then the same two-step: dispatch with `publish: false`, confirm all eight platform
+addons built and smoked (musl inside Alpine, the rest natively), re-dispatch with
+`publish: true`, approve the `npm` environment, tag `npm-v0.4.0`.
+
+## Rollback
+
+**Yank, never delete.** A deleted version breaks every lockfile that pinned it.
+
+- crates.io: `cargo yank --version X.Y.Z interpretthis`
+- PyPI: yank the release in the web UI (it stays installable by exact pin, and
+  stops being selected by a range)
+- npm: `npm deprecate interpretthis@X.Y.Z "…"`; `npm unpublish` only within 72h and
+  only if nothing depends on it
+
+Then ship a fixed patch version. Do not re-use a version number: the registries
+reject it, and any consumer who already fetched the bad one keeps it.
 
 ## GitHub
 

@@ -1,0 +1,174 @@
+# Python wheel + sdist release for the `interpretthis` distribution (crate
+# `interpretthis-python`).
+#
+# This workflow BUILDS and INSTALL-SMOKES the full wheel matrix and the sdist,
+# uploads them as run artifacts, and — only behind a manual gate — publishes to
+# PyPI. It never publishes automatically: the `publish` job targets a protected
+# GitHub Environment (`pypi`) whose required-reviewer rule IS the human approval,
+# so a tag build stops at green artifacts until a maintainer approves.
+#
+# Every entry is a single `cp311-abi3` wheel (PyO3 `abi3`/`abi3-py311`: one
+# stable-ABI module per platform, usable on CPython >= 3.11), and every entry is
+# built and install-smoked on a NATIVE runner — no shipped wheel rests on
+# emulation:
+#
+#   manylinux x86_64   ubuntu-latest    manylinux2014 container, host-native smoke
+#   macOS arm64        macos-14         Apple silicon, native
+#   macOS x86_64       macos-15-intel   Intel, native
+#   Windows x86_64     windows-latest   native
+#
+# Linux aarch64 (manylinux/musllinux) and musllinux x86_64 are deliberately NOT in
+# this set: they would need a QEMU-emulated install-smoke, which is weaker evidence
+# than the native lanes above. They are the documented growth path — add them here
+# with their own smoke lane before advertising them. An OS is never published ahead
+# of a green lane (see docs/platform-support.md), which is why the
+# `Operating System ::` classifiers in pyproject.toml match exactly this matrix.
+
+name: release-python
+
+on:
+  # Manual is the primary trigger: a release is a human-initiated event. A pushed
+  # `python-v*` tag also builds artifacts (a release candidate), but publishing
+  # still requires the `pypi` environment approval — the tag does not publish.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to PyPI after the build (still requires `pypi` environment approval)"
+        type: boolean
+        default: false
+  push:
+    tags: ["python-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-python-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-wheels:
+    name: wheel ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Independent failure domains: a Windows link break must not hide a macOS one.
+      fail-fast: false
+      matrix:
+        include:
+          - name: manylinux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2014"
+          - name: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            manylinux: auto
+          - name: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            manylinux: auto
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: auto
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (for the install smoke)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        # On Linux this runs inside a manylinux2014 container so the glibc floor
+        # is auditable; the wheel is manylinux-tagged and pip-installs on the
+        # plain ubuntu host, so the smoke below is still host-native.
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist --manifest-path crates/interpretthis-python/Cargo.toml
+          sccache: "true"
+
+      - name: Install-smoke the built wheel (native, clean venv)
+        # The release acceptance test. A throwaway venv holding ONLY the freshly
+        # built wheel, and a dependency-free smoke that refuses to pass if it
+        # imported the source tree instead of the installed artifact. It drives a
+        # sync tool, an async tool, parallel tools, the value round-trips, state
+        # export/import, a limit, and the reentrancy guard. Red here fails the leg
+        # before any artifact is trusted.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .smoke
+          if [ -f .smoke/bin/python ]; then PY=.smoke/bin/python; else PY=.smoke/Scripts/python; fi
+          "$PY" -m pip install --upgrade pip
+          "$PY" -m pip install --find-links dist --no-index interpretthis
+          "$PY" docs/release/smoke_python.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        # A source build of the sdist compiles the extension, so the host needs a
+        # toolchain (the wheel jobs get theirs from maturin-action's container).
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path crates/interpretthis-python/Cargo.toml
+
+      - name: Source-build-smoke the sdist (clean venv, compiles from source)
+        # Proves the sdist is self-contained: pip builds the extension from the
+        # tarball's vendored workspace sources, and the same smoke runs against it.
+        run: |
+          set -euo pipefail
+          python -m venv .sdist
+          .sdist/bin/pip install --upgrade pip
+          .sdist/bin/pip install dist/*.tar.gz
+          cd /tmp && "$GITHUB_WORKSPACE/.sdist/bin/python" "$GITHUB_WORKSPACE/docs/release/smoke_python.py"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    # HUMAN GATE. Runs only on an explicit dispatch with `publish: true`, and even
+    # then it is pinned to a protected Environment: configure `pypi` in repo
+    # settings with a required reviewer, so the run PAUSES for approval before
+    # this job starts. No token lives here — PyPI Trusted Publishing exchanges the
+    # OIDC id-token for a short-lived upload credential.
+    needs: [build-wheels, build-sdist]
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

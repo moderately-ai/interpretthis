@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Python bindings, shipping to PyPI as `interpretthis`.** A `cp311-abi3` wheel
+  per platform (CPython >= 3.11), no runtime dependencies. Tools may be sync
+  `def` or `async def`; `execute()` blocks, `await execute_async()` runs on the
+  caller's event loop and schedules tool coroutines there. Exceptions subclass
+  their builtin twin, so `except NameError` behaves as the name promises.
+- **Node bindings, shipping to npm as `interpretthis`.** Prebuilt Node-API addons
+  for macOS, Linux (glibc + musl), and Windows on x64 and arm64; Node 22+. Tools
+  may be `function` or `async function`. `execute()` is async by necessity: a JS
+  tool callback can only resolve while the event loop is free.
+- `release-python.yml` and `release-npm.yml`: every artifact is built *and*
+  install-smoked on a native runner, and publishing is gated behind a manual
+  dispatch plus a protected environment with a required reviewer. A tag builds; it
+  does not publish.
+- `docs/platform-support.md` — the tier policy, and the rule it enforces: a
+  registry must never advertise a platform CI does not build and smoke.
+
 ### Changed
 
 - **Repository is now a Cargo workspace.** The library moved from the repo root

@@ -1,0 +1,153 @@
+# npm release for the `interpretthis` package (crate `interpretthis-node`).
+#
+# Same discipline as release-python.yml: BUILD and SMOKE every native addon on a
+# native runner, then publish only behind a manual gate plus a protected
+# environment. A tag builds artifacts; it does not publish.
+#
+# Every platform package is built AND smoked on its own architecture — musl inside
+# an Alpine container, the rest natively — so no shipped binary rests on
+# emulation. An OS/arch is never published ahead of a green lane
+# (docs/platform-support.md).
+
+name: release-npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm after the build (still requires `npm` environment approval)"
+        type: boolean
+        default: false
+  push:
+    tags: ["npm-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: addon ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            musl: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            musl: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-arm64
+            runner: windows-11-arm
+            rust-target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        working-directory: crates/interpretthis-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target || matrix.target }}
+
+      - name: Install musl toolchain
+        if: ${{ matrix.musl == true }}
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm install
+
+      - name: Build the addon
+        run: npx napi build --platform --release --manifest-path Cargo.toml --dts-header dts-header.d.ts --target ${{ matrix.rust-target || matrix.target }}
+
+      - name: Smoke the addon (native)
+        if: ${{ matrix.musl != true }}
+        run: node --test "__test__/**/*.test.mjs"
+
+      - name: Smoke the addon (musl, inside Alpine)
+        # A glibc host cannot load a musl addon, so the only honest smoke is one
+        # that runs on musl.
+        if: ${{ matrix.musl == true }}
+        working-directory: .
+        run: |
+          docker run --rm \
+            --volume "$PWD:/work" --workdir /work/crates/interpretthis-node \
+            node:24-alpine node --test "__test__/**/*.test.mjs"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-${{ matrix.target }}
+          path: crates/interpretthis-node/*.node
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    # HUMAN GATE, as in release-python.yml: an explicit dispatch AND a protected
+    # `npm` environment with a required reviewer. No token — npm Trusted
+    # Publishing exchanges the OIDC id-token, and `--provenance` attests that this
+    # workflow built these exact bytes.
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: crates/interpretthis-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Install the OIDC-capable npm CLI
+        run: npm install --global npm@latest
+
+      - run: npm install
+
+      - name: Collect every addon built above
+        uses: actions/download-artifact@v4
+        with:
+          pattern: addon-*
+          merge-multiple: true
+          path: crates/interpretthis-node
+
+      - name: Stage the platform packages
+        # `napi prepublish` reads the `napi.targets` list in package.json and
+        # assembles one npm package per platform (each carrying its `os`, `cpu`,
+        # and `libc`), which the main package lists as optionalDependencies. npm
+        # then installs only the one matching the consumer's machine.
+        run: npx napi prepublish --skip-gh-release -t npm
+
+      - name: Review the exact publish manifest
+        run: npm publish --dry-run --provenance --access public
+
+      - name: Publish with OIDC provenance
+        # No NODE_AUTH_TOKEN: the package is configured for npm Trusted Publishing,
+        # so the OIDC id-token above is exchanged for a short-lived credential and
+        # no long-lived secret lives in this repo.
+        run: npm publish --provenance --access public
