@@ -68,8 +68,29 @@ The addon targets `napi8`, matching `"engines": { "node": ">= 22" }`. Prebuilt
 binaries ship for all eight platform triples above; npm installs only the one
 matching the consumer's machine via `optionalDependencies`.
 
-There is no wasm/browser build. The interpreter's tool system is async and rests on
-tokio (`tokio::spawn` for parallel tools, `tokio::time` for the wall-clock budget,
-and `std::time::Instant`, which *panics* on `wasm32-unknown-unknown`). A browser
-build is possible but is a real piece of work, not a feature flag — see the notes
-in `docs/release/npm-distribution.md`.
+## No wasm / browser build (and what it would take)
+
+Unsupported, deliberately. The interpreter's tool system is async and rests on
+tokio, and three things break on `wasm32-unknown-unknown`:
+
+1. **`std::time::Instant::now()` panics there**, and it is called unconditionally
+   on every run (`src/state.rs`, `src/interpreter.rs`) — so *every* `execute`
+   would abort. Fixable with the `web-time` crate, which is a drop-in that
+   re-exports std on native.
+2. **tokio features must split per target.** `rt-multi-thread` cannot build for
+   wasm; `tokio::spawn` (used for parallelizable tools) does work on a
+   current-thread runtime, but `tokio::time::timeout` — which enforces
+   `max_execution_time` — needs the timer driver, which on wasm requires
+   `--cfg tokio_unstable`.
+3. **`ToolHandler` requires `Send + Sync`, and `js_sys::Function` is `!Send`.**
+   This is what looks fatal and is not: wrapping the JS callback in
+   `send_wrapper::SendWrapper` *inside a wasm binding crate* is sound in
+   single-threaded wasm and leaves the core's `Send` bounds — and its
+   `unsafe_code = "deny"` — untouched. That is the difference between a
+   bindings-only change and refactoring every `Pin<Box<dyn Future + Send>>` in
+   `src/eval/**`.
+
+So it is tractable, but it is a real piece of work rather than a feature flag, and
+it should be gated behind a spike whose only deliverable is a green
+`cargo check --target wasm32-unknown-unknown -p interpretthis`. Native N-API is the
+Node story until then.
