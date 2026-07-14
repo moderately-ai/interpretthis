@@ -169,10 +169,26 @@ fn format_value_body(
         (Value::Bool(b), _) => {
             format_integer(&Value::Int(i64::from(*b)), type_char, precision, alternate)
         }
-        (Value::Float(f), Some('f' | 'F') | None) => {
+        (Value::Float(f), Some('f' | 'F')) => {
             let p = prec();
             Ok(format!("{f:.p$}"))
         }
+        // No presentation type: with no precision, the float keeps its natural
+        // repr (`f"{3.14:10}"` is "      3.14", not "3.140000"); with a
+        // precision it behaves like the general (`g`) format.
+        (Value::Float(f), None) => match precision {
+            None => Ok(format!("{value}")),
+            Some(p) => {
+                let rendered = format_general(*f, spec_usize(p, 6), false, alternate);
+                // Unlike `g`, the no-type float keeps at least one fractional
+                // digit when fixed notation is used (`f"{1.0:.3}"` is "1.0").
+                if rendered.contains(['.', 'e', 'E']) {
+                    Ok(rendered)
+                } else {
+                    Ok(format!("{rendered}.0"))
+                }
+            }
+        },
         (Value::Float(f), Some('e')) => Ok(format_scientific(*f, prec(), false)),
         (Value::Float(f), Some('E')) => Ok(format_scientific(*f, prec(), true)),
         (Value::Float(f), Some('g' | 'G')) => Ok(format_general(
