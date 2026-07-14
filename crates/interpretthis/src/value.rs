@@ -2026,45 +2026,82 @@ impl Value {
 
     /// Convert an interpreter `Value` to a `serde_json::Value`.
     ///
-    /// Non-JSON-representable types (Function, Lambda, Range, Exception,
-    /// `LazyProxy`) are converted to `null`.
-    #[must_use]
-    pub fn to_json(&self) -> serde_json::Value {
-        match self {
-            Self::Bool(b) => serde_json::Value::Bool(*b),
+    /// Data-bearing types are encoded (dict-likes as objects, list-likes as
+    /// arrays, `Decimal` as an exact number, dates as ISO strings, `timedelta`
+    /// as seconds, an int/str enum member as its value). Types with no JSON
+    /// form — callables, ranges, exceptions, proxies, singletons, `complex` —
+    /// raise `TypeError`, rather than silently collapsing to `null` (the old
+    /// `_ => Null` lost `Decimal`/date/`Counter` data without warning).
+    ///
+    /// # Errors
+    /// Returns `TypeError("Object of type <t> is not JSON serializable")` for a
+    /// value (or nested element) with no JSON representation.
+    pub fn to_json(&self) -> Result<serde_json::Value, crate::error::InterpreterError> {
+        use serde_json::Value as J;
+        let array = |items: &[Self]| -> Result<J, crate::error::InterpreterError> {
+            Ok(J::Array(items.iter().map(Self::to_json).collect::<Result<_, _>>()?))
+        };
+        Ok(match self {
+            Self::None => J::Null,
+            Self::Bool(b) => J::Bool(*b),
             Self::Int(i) => serde_json::json!(*i),
             // JSON numbers are f64; huge ints stringify to preserve digits.
-            Self::BigInt(i) => serde_json::Value::String(i.to_string()),
+            Self::BigInt(i) => J::String(i.to_string()),
             Self::Float(f) => serde_json::json!(*f),
-            Self::String(s) => serde_json::Value::String(s.to_string()),
+            Self::String(s) => J::String(s.to_string()),
             Self::Bytes(b) => serde_json::json!(b),
-            // List, Tuple, and Set all become JSON arrays. JSON has no
-            // distinct set/tuple, so we project all three to Array. List
-            // is shared via Arc<Mutex<Vec>>, so it locks for the
-            // projection — Tuple/Set still wrap a plain Vec.
-            Self::List(items) => {
-                let guard = items.lock();
-                serde_json::Value::Array(guard.iter().map(Self::to_json).collect())
+            // List / Tuple / Set / Deque all project to a JSON array.
+            Self::List(items) => array(&items.lock())?,
+            Self::Tuple(items) | Self::Set(items) => array(items)?,
+            Self::Deque { items, .. } => {
+                J::Array(items.iter().map(Self::to_json).collect::<Result<_, _>>()?)
             }
-            Self::Tuple(items) | Self::Set(items) => {
-                serde_json::Value::Array(items.iter().map(Self::to_json).collect())
+            // Dict / Counter / defaultdict project to a JSON object.
+            Self::Dict(map) => json_object(map.iter())?,
+            Self::Counter(map) => json_object(map.iter())?,
+            Self::DefaultDict(data) => json_object(data.items.iter())?,
+            // Decimal keeps its exact digits via arbitrary_precision; Fraction
+            // has no JSON form, so its float value is used.
+            Self::Decimal(d) => {
+                serde_json::from_str(&d.to_string()).unwrap_or_else(|_| J::String(d.to_string()))
             }
-            Self::Dict(map) => {
-                let mut obj = serde_json::Map::new();
-                for (k, v) in map {
-                    let key = match k {
-                        ValueKey::String(s) => s.to_string(),
-                        other => format!("{other}"),
-                    };
-                    obj.insert(key, v.to_json());
-                }
-                serde_json::Value::Object(obj)
+            Self::Fraction(fr) => {
+                use num_traits::ToPrimitive as _;
+                serde_json::json!(fr.to_f64().unwrap_or(f64::NAN))
             }
-            // None plus the non-JSON-representable variants (Function,
-            // Lambda, Range, Exception, LazyProxy) all project to `null`.
-            _ => serde_json::Value::Null,
-        }
+            // An int/str enum member serialises as its underlying value.
+            Self::EnumMember { value, .. } => value.to_json()?,
+            // Dates/times as ISO strings; timedelta as fractional seconds.
+            Self::Date(d) => J::String(d.format("%Y-%m-%d").to_string()),
+            Self::DateTime { dt, .. } => J::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
+            Self::Time(t) => J::String(t.format("%H:%M:%S").to_string()),
+            #[expect(clippy::cast_precision_loss, reason = "seconds as f64 is the host JSON form")]
+            Self::TimeDelta(us) => serde_json::json!(*us as f64 / 1_000_000.0),
+            other => {
+                return Err(crate::error::InterpreterError::TypeError(format!(
+                    "Object of type {} is not JSON serializable",
+                    other.type_name()
+                )));
+            }
+        })
     }
+}
+
+/// Project a `ValueKey`-keyed map into a JSON object, stringifying non-string
+/// keys the way CPython's json encoder coerces scalar keys.
+fn json_object<'a, I>(entries: I) -> Result<serde_json::Value, crate::error::InterpreterError>
+where
+    I: Iterator<Item = (&'a ValueKey, &'a Value)>,
+{
+    let mut obj = serde_json::Map::new();
+    for (k, v) in entries {
+        let key = match k {
+            ValueKey::String(s) => s.to_string(),
+            other => format!("{other}"),
+        };
+        obj.insert(key, v.to_json()?);
+    }
+    Ok(serde_json::Value::Object(obj))
 }
 
 impl Value {

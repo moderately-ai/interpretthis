@@ -354,21 +354,45 @@ fn engine_value_from_json_nested() {
 
 #[test]
 fn engine_value_to_json_primitives() {
-    assert_eq!(Value::None.to_json(), serde_json::Value::Null);
-    assert_eq!(Value::Bool(true).to_json(), serde_json::json!(true));
-    assert_eq!(Value::Int(42).to_json(), serde_json::json!(42));
-    assert_eq!(Value::String("hi".into()).to_json(), serde_json::json!("hi"));
+    assert_eq!(Value::None.to_json().unwrap(), serde_json::Value::Null);
+    assert_eq!(Value::Bool(true).to_json().unwrap(), serde_json::json!(true));
+    assert_eq!(Value::Int(42).to_json().unwrap(), serde_json::json!(42));
+    assert_eq!(Value::String("hi".into()).to_json().unwrap(), serde_json::json!("hi"));
 }
 
 #[test]
 fn engine_value_to_json_collections() {
     let list = Value::List(shared_list(vec![Value::Int(1), Value::String("two".into())]));
-    assert_eq!(list.to_json(), serde_json::json!([1, "two"]));
+    assert_eq!(list.to_json().unwrap(), serde_json::json!([1, "two"]));
 
     let mut map = indexmap::IndexMap::new();
     map.insert(ValueKey::String("a".into()), Value::Int(1));
     let dict = Value::Dict(map);
-    assert_eq!(dict.to_json(), serde_json::json!({"a": 1}));
+    assert_eq!(dict.to_json().unwrap(), serde_json::json!({"a": 1}));
+}
+
+#[test]
+fn engine_value_to_json_encodes_data_types() {
+    // A data-bearing type is encoded, not silently nulled.
+    let d = Value::Decimal(Box::new("1.5".parse().unwrap()));
+    assert_eq!(d.to_json().unwrap(), serde_json::json!(1.5));
+
+    let date = Value::Date(chrono::NaiveDate::from_ymd_opt(2020, 1, 2).unwrap());
+    assert_eq!(date.to_json().unwrap(), serde_json::json!("2020-01-02"));
+
+    let mut counter = indexmap::IndexMap::new();
+    counter.insert(ValueKey::String("x".into()), Value::Int(3));
+    assert_eq!(Value::Counter(counter).to_json().unwrap(), serde_json::json!({"x": 3}));
+}
+
+#[test]
+fn engine_value_to_json_rejects_non_serializable() {
+    // A type with no JSON form raises instead of collapsing to null.
+    let r = Value::Range { start: 0, stop: 3, step: 1 };
+    assert!(r.to_json().is_err());
+    // A non-serializable element inside a container propagates the error.
+    let list = Value::List(shared_list(vec![Value::Range { start: 0, stop: 1, step: 1 }]));
+    assert!(list.to_json().is_err());
 }
 
 #[test]
@@ -379,7 +403,7 @@ fn engine_value_json_round_trip() {
         "nested": {"inner": [3, 4]}
     });
     let value = Value::from_json(original.clone());
-    let back = value.to_json();
+    let back = value.to_json().unwrap();
     assert_eq!(original, back);
 }
 
