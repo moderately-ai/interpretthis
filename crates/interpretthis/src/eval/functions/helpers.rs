@@ -82,6 +82,151 @@ pub(super) fn bytes_fromhex(args: &[Value]) -> EvalResult {
     Ok(Value::Bytes(out))
 }
 
+/// The `byteorder` argument (positional or keyword), returning whether the
+/// order is little-endian. Defaults to `"big"` (CPython 3.11+).
+fn parse_byteorder(
+    positional: Option<&Value>,
+    kwargs: &IndexMap<String, Value>,
+) -> Result<bool, EvalError> {
+    match positional.or_else(|| kwargs.get("byteorder")) {
+        None => Ok(false),
+        Some(Value::String(s)) => match s.as_str() {
+            "big" => Ok(false),
+            "little" => Ok(true),
+            _ => Err(InterpreterError::ValueError(
+                "byteorder must be either 'little' or 'big'".into(),
+            )
+            .into()),
+        },
+        Some(other) => Err(InterpreterError::TypeError(format!(
+            "byteorder must be str, not {}",
+            other.type_name()
+        ))
+        .into()),
+    }
+}
+
+/// `int.from_bytes(bytes, byteorder='big', *, signed=False)` — decode an
+/// integer from its byte representation. Accepts a `bytes`/`bytearray` value or
+/// any iterable of ints in `range(0, 256)`; the result promotes past `i64`.
+pub(super) fn int_from_bytes(args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
+    use num_bigint::{BigInt, Sign};
+    let Some(src) = args.first() else {
+        return Err(InterpreterError::TypeError(
+            "from_bytes() missing required argument 'bytes' (pos 1)".into(),
+        )
+        .into());
+    };
+    let byte_of = |v: &Value| -> Result<u8, EvalError> {
+        match v {
+            Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
+            Value::Bool(b) => Ok(u8::from(*b)),
+            Value::Int(_) => {
+                Err(InterpreterError::ValueError("bytes must be in range(0, 256)".into()).into())
+            }
+            other => Err(InterpreterError::TypeError(format!(
+                "'{}' object cannot be interpreted as an integer",
+                other.type_name()
+            ))
+            .into()),
+        }
+    };
+    let mut be: Vec<u8> = match src {
+        Value::Bytes(b) => b.clone(),
+        Value::List(l) => l.lock().iter().map(&byte_of).collect::<Result<_, _>>()?,
+        Value::Tuple(t) => t.iter().map(&byte_of).collect::<Result<_, _>>()?,
+        other => {
+            return Err(InterpreterError::TypeError(format!(
+                "cannot convert '{}' object to bytes",
+                other.type_name()
+            ))
+            .into());
+        }
+    };
+    if parse_byteorder(args.get(1), kwargs)? {
+        be.reverse();
+    }
+    let signed = kwargs.get("signed").is_some_and(Value::is_truthy);
+    let mut n = BigInt::from_bytes_be(Sign::Plus, &be);
+    if signed && be.first().is_some_and(|b| b & 0x80 != 0) {
+        // High bit set under signed interpretation → two's-complement negative.
+        n -= BigInt::from(1) << (8 * be.len());
+    }
+    Ok(crate::value::int_from_bigint(n))
+}
+
+/// `int.to_bytes(length=1, byteorder='big', *, signed=False)` — encode `value`
+/// into exactly `length` bytes, raising `OverflowError` when it does not fit
+/// (or is negative without `signed=True`), matching CPython.
+pub(super) fn int_to_bytes(
+    value: &num_bigint::BigInt,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> EvalResult {
+    use num_bigint::BigInt;
+    use num_traits::{Signed as _, Zero as _};
+    let length: usize = match args.first().or_else(|| kwargs.get("length")) {
+        None => 1,
+        Some(Value::Int(n)) if *n >= 0 => usize::try_from(*n).unwrap_or(usize::MAX),
+        Some(Value::Int(_)) => {
+            return Err(InterpreterError::ValueError(
+                "length argument must be non-negative".into(),
+            )
+            .into());
+        }
+        Some(other) => {
+            return Err(InterpreterError::TypeError(format!(
+                "'{}' object cannot be interpreted as an integer",
+                other.type_name()
+            ))
+            .into());
+        }
+    };
+    let little = parse_byteorder(args.get(1), kwargs)?;
+    let signed = kwargs.get("signed").is_some_and(Value::is_truthy);
+    if value.is_negative() && !signed {
+        return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+            "OverflowError",
+            "can't convert negative int to unsigned",
+        )));
+    }
+    let overflow = || {
+        EvalError::Exception(crate::value::ExceptionValue::new(
+            "OverflowError",
+            "int too big to convert",
+        ))
+    };
+    // Zero bytes can only encode zero; avoids the `8*length - 1` underflow.
+    if length == 0 {
+        if value.is_zero() {
+            return Ok(Value::Bytes(Vec::new()));
+        }
+        return Err(overflow());
+    }
+    let bits = 8 * length;
+    let modulus = BigInt::from(1) << bits;
+    // Representable window: signed is [-2^(bits-1), 2^(bits-1)), unsigned is
+    // [0, 2^bits).
+    let (lo, hi) = if signed {
+        let half = BigInt::from(1) << (bits - 1);
+        (-half.clone(), half)
+    } else {
+        (BigInt::from(0), modulus.clone())
+    };
+    if value < &lo || value >= &hi {
+        return Err(overflow());
+    }
+    let image = if value.is_negative() { &modulus + value } else { value.clone() };
+    let (_, mag) = image.to_bytes_be();
+    // Left-pad (big-endian) to `length`; `mag` is already <= length bytes.
+    let mut out = vec![0u8; length.saturating_sub(mag.len())];
+    out.extend_from_slice(&mag);
+    if little {
+        out.reverse();
+    }
+    Ok(Value::Bytes(out))
+}
+
 fn hex_digit(b: u8) -> Result<u8, EvalError> {
     match b {
         b'0'..=b'9' => Ok(b - b'0'),

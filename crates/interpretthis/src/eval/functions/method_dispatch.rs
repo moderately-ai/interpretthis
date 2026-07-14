@@ -288,6 +288,17 @@ fn int_methods(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
+    // `to_bytes` needs the full value (large ints included), so handle it here
+    // before the i64 narrowing below would reject a BigInt receiver.
+    if method == "to_bytes" {
+        let value = match obj {
+            Value::Int(i) => num_bigint::BigInt::from(*i),
+            Value::BigInt(b) => (**b).clone(),
+            Value::Bool(b) => num_bigint::BigInt::from(i64::from(*b)),
+            _ => return Err(type_mismatch("int")),
+        };
+        return super::helpers::int_to_bytes(&value, args, kwargs).map(MethodOutcome::pure);
+    }
     match obj {
         Value::Int(i) => {
             methods::int::dispatch_int_method(*i, method, args, kwargs).map(MethodOutcome::pure)
