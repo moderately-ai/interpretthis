@@ -572,29 +572,53 @@ pub(crate) async fn call_value_as_function(
             crate::eval::exceptions::construct_exception_type(type_name, args)
         }
         // `functools.partial` — prepend the bound args and forward to
-        // the bound function. The indirect-call path here doesn't
-        // carry call-site kwargs; bound keywords still propagate
-        // because the bound function's frame sees them via the
-        // module-call shape (kwargs flow into call_user_function
-        // via the direct call below). For partial wrapped in another
-        // partial (composition), the recursion drops both layers'
-        // bound state into the inner call.
+        // `functools.partial` — prepend the bound positional args and merge the
+        // bound keywords, then forward to the bound function. The bound keywords
+        // are defaults; a call-site keyword of the same name overrides them
+        // (`functools.partial` semantics). Previously `data.keywords` was never
+        // read, so `partial(f, mode="x")()` silently lost `mode`.
         Value::Partial(data) => {
-            let bound_args = &data.args;
             let target = &data.func;
-            let mut combined: Vec<Value> = Vec::with_capacity(bound_args.len() + args.len());
-            combined.extend(bound_args.iter().cloned());
+            let mut combined: Vec<Value> = Vec::with_capacity(data.args.len() + args.len());
+            combined.extend(data.args.iter().cloned());
             combined.extend_from_slice(args);
-            return Box::pin(call_value_as_function(state, target, &combined, kwargs, tools)).await;
+
+            let merged_kwargs = if data.keywords.is_empty() {
+                kwargs.clone()
+            } else {
+                let mut merged = data.keywords.clone();
+                for (k, v) in kwargs {
+                    merged.insert(k.clone(), v.clone());
+                }
+                merged
+            };
+            return Box::pin(call_value_as_function(
+                state,
+                target,
+                &combined,
+                &merged_kwargs,
+                tools,
+            ))
+            .await;
         }
         Value::LruCache(data) => {
-            // Memoize by positional ValueKeys only; keyword keying is tracked by
-            // gap-lru-cache-kwargs-memoization.
+            // Memoize by positional AND keyword ValueKeys. Keying on positionals
+            // only meant `f(1, b=2)` and `f(1, b=3)` collided on the same cache
+            // slot — the second call returned the first's result. The keyword
+            // half is sorted by name so call-order does not change the key.
             use crate::eval::literals::value_to_key;
-            let key: Result<Vec<_>, _> = args.iter().map(value_to_key).collect();
-            let key = key.map_err(|_| {
-                InterpreterError::TypeError("lru_cache arguments must be hashable".into())
-            })?;
+            let mut key: Vec<_> =
+                args.iter().map(value_to_key).collect::<Result<Vec<_>, _>>().map_err(|_| {
+                    InterpreterError::TypeError("lru_cache arguments must be hashable".into())
+                })?;
+            let mut kw: Vec<(&String, &Value)> = kwargs.iter().collect();
+            kw.sort_by(|a, b| a.0.cmp(b.0));
+            for (name, value) in kw {
+                key.push(crate::value::ValueKey::String(name.as_str().into()));
+                key.push(value_to_key(value).map_err(|_| {
+                    InterpreterError::TypeError("lru_cache arguments must be hashable".into())
+                })?);
+            }
             {
                 let mut cache = data.cache.lock();
                 if let Some(hit) = cache.get(&key) {
