@@ -56,6 +56,7 @@ pub(crate) fn construct_fraction(args: &[Value]) -> EvalResult {
 fn from_single(arg: &Value) -> EvalResult {
     let rational = match arg {
         Value::Int(i) => BigRational::from_integer(BigInt::from(*i)),
+        Value::BigInt(b) => BigRational::from_integer((**b).clone()),
         Value::Bool(b) => BigRational::from_integer(BigInt::from(i64::from(*b))),
         Value::Fraction(f) => (**f).clone(),
         Value::String(s) => parse_fraction_str(s)?,
@@ -88,15 +89,15 @@ fn from_pair(numer: &Value, denom: &Value) -> EvalResult {
 }
 
 fn value_to_bigint(value: &Value, field: &str) -> Result<BigInt, EvalError> {
-    match value {
-        Value::Int(i) => Ok(BigInt::from(*i)),
-        Value::Bool(b) => Ok(BigInt::from(i64::from(*b))),
-        other => Err(InterpreterError::TypeError(format!(
+    // int / bool / BigInt (arbitrary precision) all accepted — the storage is a
+    // BigRational, so a numerator/denominator beyond i64 is representable.
+    crate::value::value_as_bigint(value).ok_or_else(|| {
+        InterpreterError::TypeError(format!(
             "Fraction() {field} expects int, got '{}'",
-            other.type_name()
+            value.type_name()
         ))
-        .into()),
-    }
+        .into()
+    })
 }
 
 fn parse_fraction_str(s: &str) -> Result<BigRational, EvalError> {

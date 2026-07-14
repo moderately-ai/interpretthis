@@ -2709,8 +2709,9 @@ fn fraction_get_attr(value: &Value, name: &str) -> EvalResult {
 /// surface `.numerator` / `.denominator`; matches CPython's
 /// `float(Fraction)` lossy semantics past 2^53.
 fn bigint_to_value(value: &num_bigint::BigInt) -> Value {
-    use num_traits::ToPrimitive as _;
-    value.to_i64().map_or_else(|| value.to_f64().map_or(Value::None, Value::Float), Value::Int)
+    // Keep the i64 fast path, but promote past i64 to an exact BigInt rather
+    // than a lossy float — a Fraction numerator/denominator is an exact integer.
+    crate::value::int_from_bigint(value.clone())
 }
 
 // ---------------------------------------------------------------------------
