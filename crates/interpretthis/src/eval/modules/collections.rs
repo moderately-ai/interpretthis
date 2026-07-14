@@ -156,6 +156,88 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
     }
 }
 
+/// Render a namedtuple field value to its name string (CPython `str(name)`), so
+/// a non-string field is stringified rather than dropped.
+fn field_name_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.to_string(),
+        other => format!("{other}"),
+    }
+}
+
+/// Validate a namedtuple typename or field name (CPython rules): a valid
+/// identifier and not a keyword; a field name additionally must not start with
+/// an underscore.
+fn validate_namedtuple_name(name: &str, is_field: bool) -> Result<(), EvalError> {
+    use crate::eval::modules::value_error;
+    if !is_python_identifier(name) {
+        return Err(value_error(format!(
+            "Type names and field names must be valid identifiers: {name:?}"
+        )));
+    }
+    if is_python_keyword(name) {
+        return Err(value_error(format!(
+            "Type names and field names cannot be a keyword: {name:?}"
+        )));
+    }
+    if is_field && name.starts_with('_') {
+        return Err(value_error(format!("Field names cannot start with an underscore: {name:?}")));
+    }
+    Ok(())
+}
+
+/// A valid Python identifier: a leading letter or underscore, then letters,
+/// digits, or underscores. Unicode letters are accepted (Python 3 allows them).
+fn is_python_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_alphanumeric())
+}
+
+fn is_python_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "False"
+            | "None"
+            | "True"
+            | "and"
+            | "as"
+            | "assert"
+            | "async"
+            | "await"
+            | "break"
+            | "class"
+            | "continue"
+            | "def"
+            | "del"
+            | "elif"
+            | "else"
+            | "except"
+            | "finally"
+            | "for"
+            | "from"
+            | "global"
+            | "if"
+            | "import"
+            | "in"
+            | "is"
+            | "lambda"
+            | "nonlocal"
+            | "not"
+            | "or"
+            | "pass"
+            | "raise"
+            | "return"
+            | "try"
+            | "while"
+            | "with"
+            | "yield"
+    )
+}
+
 /// Track E batch 3: `namedtuple(name, fields)` — synthesises a class
 /// whose `__init__` binds positional args to the named fields. Field
 /// access via attribute works; subscript (`nt[i]`) is handled in
@@ -183,21 +265,10 @@ pub(crate) fn call_namedtuple_with_state(
                 .map(String::from)
                 .collect()
         }
-        Some(Value::List(items)) => items
-            .lock()
-            .iter()
-            .filter_map(|v| match v {
-                Value::String(s) => Some(s.to_string()),
-                _ => None,
-            })
-            .collect(),
-        Some(Value::Tuple(items)) => items
-            .iter()
-            .filter_map(|v| match v {
-                Value::String(s) => Some(s.to_string()),
-                _ => None,
-            })
-            .collect(),
+        // CPython stringifies each field (`list(map(str, field_names))`), so a
+        // non-string is rendered rather than dropped, then validated below.
+        Some(Value::List(items)) => items.lock().iter().map(field_name_str).collect(),
+        Some(Value::Tuple(items)) => items.iter().map(field_name_str).collect(),
         _ => {
             return Err(InterpreterError::TypeError(
                 "namedtuple() second argument must be a sequence of field names".into(),
@@ -205,6 +276,18 @@ pub(crate) fn call_namedtuple_with_state(
             .into());
         }
     };
+    // Validate the typename and every field name, matching CPython's namedtuple
+    // checks (identifier, not a keyword, no leading underscore, no duplicates).
+    validate_namedtuple_name(&class_name, false)?;
+    let mut seen = std::collections::HashSet::new();
+    for f in &fields {
+        validate_namedtuple_name(f, true)?;
+        if !seen.insert(f.as_str()) {
+            return Err(crate::eval::modules::value_error(format!(
+                "Encountered duplicate field name: {f}"
+            )));
+        }
+    }
     // Build a synthetic __init__ method that binds each positional
     // arg to the corresponding field. We do this by registering the
     // function bodies under qualified keys and adding the class to
