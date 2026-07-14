@@ -2,13 +2,6 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-#![expect(
-    clippy::cast_precision_loss,
-    reason = "Python format spec coerces Int -> Float when the type code is numeric (f/e/g/%); \
-              precision loss above 2^53 matches CPython's str(int) / f\"{x:.2f}\" behavior \
-              for very large ints. Scoped to this formatting module"
-)]
-
 use indexmap::IndexMap;
 use rustpython_parser::ast::{self, ConversionFlag, Expr};
 
@@ -162,70 +155,118 @@ fn format_value_body(
     type_char: Option<char>,
     precision: Option<i64>,
     alternate: bool,
-) -> String {
+) -> Result<String, EvalError> {
     let prec = || spec_usize(precision.unwrap_or(6), 6);
     match (value, type_char) {
-        (Value::Int(i), Some('d') | None) => format!("{i}"),
-        (Value::Int(i), Some('b')) => {
-            if alternate {
-                format!("{i:#b}")
-            } else {
-                format!("{i:b}")
-            }
+        // Ints (i64 or promoted BigInt) share one integer formatter, which
+        // raises on an unknown/incompatible code and on an out-of-range `:c`.
+        (Value::Int(_) | Value::BigInt(_), _) => {
+            format_integer(value, type_char, precision, alternate)
         }
-        (Value::Int(i), Some('o')) => {
-            if alternate {
-                format!("{i:#o}")
-            } else {
-                format!("{i:o}")
-            }
+        // A bare bool prints True/False; under a numeric code it is an int 0/1
+        // (bool is an int subclass): `f"{True:d}" == "1"`.
+        (Value::Bool(b), None) => Ok(if *b { "True" } else { "False" }.to_string()),
+        (Value::Bool(b), _) => {
+            format_integer(&Value::Int(i64::from(*b)), type_char, precision, alternate)
         }
-        (Value::Int(i), Some('x')) => {
-            if alternate {
-                format!("{i:#x}")
-            } else {
-                format!("{i:x}")
-            }
-        }
-        (Value::Int(i), Some('X')) => {
-            if alternate {
-                format!("{i:#X}")
-            } else {
-                format!("{i:X}")
-            }
-        }
-        // `:c` — render an int as the single Unicode code point it
-        // represents. CPython raises OverflowError on out-of-range
-        // codepoints; we degrade to the replacement char (U+FFFD)
-        // rather than panicking so the format path always returns a
-        // string. Out-of-range values are rare in practice.
-        (Value::Int(i), Some('c')) => {
-            let cp = u32::try_from(*i).ok().and_then(char::from_u32).unwrap_or('\u{FFFD}');
-            cp.to_string()
-        }
-        (Value::Int(i), Some('f' | 'F')) => format!("{:.*}", prec(), *i as f64),
-        (Value::Int(i), Some('e')) => format_scientific(*i as f64, prec(), false),
-        (Value::Int(i), Some('E')) => format_scientific(*i as f64, prec(), true),
         (Value::Float(f), Some('f' | 'F') | None) => {
             let p = prec();
-            format!("{f:.p$}")
+            Ok(format!("{f:.p$}"))
         }
-        (Value::Float(f), Some('e')) => format_scientific(*f, prec(), false),
-        (Value::Float(f), Some('E')) => format_scientific(*f, prec(), true),
+        (Value::Float(f), Some('e')) => Ok(format_scientific(*f, prec(), false)),
+        (Value::Float(f), Some('E')) => Ok(format_scientific(*f, prec(), true)),
         (Value::Float(f), Some('g' | 'G')) => {
             let p = prec();
             // Use shorter of %e and %f.
             let f_fmt = format!("{f:.p$}");
             let e_fmt = format_scientific(*f, p, type_char == Some('G'));
-            if f_fmt.len() <= e_fmt.len() { f_fmt } else { e_fmt }
+            Ok(if f_fmt.len() <= e_fmt.len() { f_fmt } else { e_fmt })
         }
-        (Value::Float(f), Some('%')) => format!("{:.*}%", prec(), f * 100.0),
-        (Value::String(s), _) => precision.map_or_else(
+        (Value::Float(f), Some('%')) => Ok(format!("{:.*}%", prec(), f * 100.0)),
+        // A float under a non-float code (e.g. `:d`, `:x`) is a ValueError.
+        (Value::Float(_), Some(c)) => Err(unknown_format_code(c, value)),
+        (Value::String(s), _) => Ok(precision.map_or_else(
             || s.to_string(),
             |p| s.chars().take(spec_usize(p, 0)).collect::<String>(),
-        ),
-        (Value::Bool(b), _) => if *b { "True" } else { "False" }.to_string(),
-        _ => format!("{value}"),
+        )),
+        // Remaining types (Decimal, Fraction, None, dates, …) render via
+        // Display when no type code is given.
+        (_, None) => Ok(format!("{value}")),
+        (_, Some(c)) => Err(unknown_format_code(c, value)),
+    }
+}
+
+/// `ValueError: Unknown format code '<c>' for object of type '<type>'` —
+/// CPython's wording for an incompatible presentation code.
+fn unknown_format_code(code: char, value: &Value) -> EvalError {
+    InterpreterError::ValueError(format!(
+        "Unknown format code '{code}' for object of type '{}'",
+        value.type_name()
+    ))
+    .into()
+}
+
+/// Format an integer value (`Int`/`BigInt`/coerced `Bool`) under a presentation
+/// code. Radix codes preserve the sign and operate on the magnitude (so a
+/// promoted BigInt and a negative both render as CPython does); float codes
+/// route through the f64 view; `:c` raises `OverflowError` outside
+/// `range(0x110000)`; any other code raises `ValueError`.
+fn format_integer(
+    value: &Value,
+    type_char: Option<char>,
+    precision: Option<i64>,
+    alternate: bool,
+) -> Result<String, EvalError> {
+    use num_bigint::Sign;
+    use num_traits::ToPrimitive as _;
+
+    let big = crate::value::value_as_bigint(value).ok_or_else(|| {
+        EvalError::from(InterpreterError::Runtime("expected integer value".into()))
+    })?;
+    let prec = spec_usize(precision.unwrap_or(6), 6);
+    let radix = |kind: char| {
+        let mag = big.magnitude();
+        let body = match (kind, alternate) {
+            ('b', false) => format!("{mag:b}"),
+            ('b', true) => format!("{mag:#b}"),
+            ('o', false) => format!("{mag:o}"),
+            ('o', true) => format!("{mag:#o}"),
+            ('x', false) => format!("{mag:x}"),
+            ('x', true) => format!("{mag:#x}"),
+            ('X', false) => format!("{mag:X}"),
+            // Rust's `{:#X}` emits a lowercase `0x` prefix; Python uses `0X`.
+            _ => format!("0X{mag:X}"),
+        };
+        if big.sign() == Sign::Minus { format!("-{body}") } else { body }
+    };
+    let as_f64 = || big.to_f64().unwrap_or(f64::INFINITY);
+    match type_char {
+        // `n` is locale-aware in CPython; we render it as plain decimal.
+        None | Some('d' | 'n') => Ok(big.to_string()),
+        Some('b') => Ok(radix('b')),
+        Some('o') => Ok(radix('o')),
+        Some('x') => Ok(radix('x')),
+        Some('X') => Ok(radix('X')),
+        Some('c') => {
+            let cp = big.to_u32().and_then(char::from_u32).ok_or_else(|| {
+                EvalError::Exception(ExceptionValue::new(
+                    "OverflowError",
+                    "%c arg not in range(0x110000)",
+                ))
+            })?;
+            Ok(cp.to_string())
+        }
+        Some('f' | 'F') => Ok(format!("{:.prec$}", as_f64())),
+        Some('e') => Ok(format_scientific(as_f64(), prec, false)),
+        Some('E') => Ok(format_scientific(as_f64(), prec, true)),
+        Some('g' | 'G') => {
+            let f = as_f64();
+            let f_fmt = format!("{f:.prec$}");
+            let e_fmt = format_scientific(f, prec, type_char == Some('G'));
+            Ok(if f_fmt.len() <= e_fmt.len() { f_fmt } else { e_fmt })
+        }
+        Some('%') => Ok(format!("{:.prec$}%", as_f64() * 100.0)),
+        Some(c) => Err(unknown_format_code(c, value)),
     }
 }
 
@@ -282,7 +323,7 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
     let type_char = if rest.is_empty() { None } else { Some(rest[0]) };
 
     // Format the value.
-    let raw = format_value_body(value, type_char, precision, alternate);
+    let raw = format_value_body(value, type_char, precision, alternate)?;
     let formatted = match grouping {
         Some(sep) => apply_thousands_separator(&raw, sep),
         None => raw,
