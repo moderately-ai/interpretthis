@@ -171,7 +171,11 @@ pub type EqSlot = fn(lhs: &Value, rhs: &Value) -> Option<bool>;
 pub type HashSlot = fn(value: &Value) -> Result<i64, EvalError>;
 
 /// Function-pointer shape for the less-than slot. Mirrors `EqSlot`.
-pub type LtSlot = fn(lhs: &Value, rhs: &Value) -> Option<bool>;
+/// `<` slot: `None` when this type does not order against `rhs` (so
+/// `dispatch_lt` tries the reflected slot, then raises `TypeError`);
+/// `Some(Ok(_))` decides the comparison; `Some(Err(_))` propagates an error
+/// raised while comparing (e.g. an uncomparable nested list/tuple element).
+pub type LtSlot = fn(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>>;
 
 /// Function-pointer shape for the contains slot. Receives the container
 /// first, the item being tested second. Container slot impls dispatch back
@@ -387,11 +391,11 @@ pub fn dispatch_lt(lhs: &Value, rhs: &Value) -> Result<bool, EvalError> {
     }
     let lhs_type = type_of(lhs);
     if let Some(result) = (lhs_type.lt_slot)(lhs, rhs) {
-        return Ok(result);
+        return result;
     }
     let rhs_type = type_of(rhs);
     if let Some(result) = (rhs_type.lt_slot)(lhs, rhs) {
-        return Ok(result);
+        return result;
     }
     Err(type_error_unsupported("<", lhs, rhs))
 }
@@ -1208,71 +1212,71 @@ fn recurse_eq(lhs: &Value, rhs: &Value) -> bool {
 /// set, plus `OBJECT_TYPE` for the unmigrated variants). Always returns
 /// `None` so `dispatch_lt` raises `TypeError` via the unsupported-pair
 /// fallback.
-const fn noimpl_lt(_lhs: &Value, _rhs: &Value) -> Option<bool> {
+const fn noimpl_lt(_lhs: &Value, _rhs: &Value) -> Option<Result<bool, EvalError>> {
     None
 }
 
-fn bool_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
+fn bool_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::Bool(a) = lhs else { return None };
     let av = i64::from(*a);
     match rhs {
-        Value::Bool(b) => Some(av < i64::from(*b)),
-        Value::Int(b) => Some(av < *b),
+        Value::Bool(b) => Some(Ok(av < i64::from(*b))),
+        Value::Int(b) => Some(Ok(av < *b)),
         #[expect(
             clippy::cast_precision_loss,
             reason = "Python bool↔float compare matches CPython's lossy compare"
         )]
-        Value::Float(b) => Some((av as f64) < *b),
+        Value::Float(b) => Some(Ok((av as f64) < *b)),
         _ => None,
     }
 }
 
-fn int_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
+fn int_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let a = crate::value::value_as_bigint(lhs)?;
     match rhs {
         Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => {
             let b = crate::value::value_as_bigint(rhs)?;
-            Some(a < b)
+            Some(Ok(a < b))
         }
         Value::Float(b) => {
             use num_traits::ToPrimitive as _;
-            Some(a.to_f64().is_some_and(|af| af < *b))
+            Some(Ok(a.to_f64().is_some_and(|af| af < *b)))
         }
         _ => None,
     }
 }
 
-fn float_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
+fn float_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::Float(a) = lhs else { return None };
     match rhs {
-        Value::Float(b) => Some(a < b),
-        Value::Bool(b) => Some(*a < if *b { 1.0 } else { 0.0 }),
+        Value::Float(b) => Some(Ok(a < b)),
+        Value::Bool(b) => Some(Ok(*a < if *b { 1.0 } else { 0.0 })),
         #[expect(
             clippy::cast_precision_loss,
             reason = "Python int↔float compare matches CPython's lossy compare"
         )]
-        Value::Int(b) => Some(*a < (*b as f64)),
+        Value::Int(b) => Some(Ok(*a < (*b as f64))),
         Value::BigInt(b) => {
             use num_traits::ToPrimitive as _;
-            Some(b.to_f64().is_some_and(|bf| *a < bf))
+            Some(Ok(b.to_f64().is_some_and(|bf| *a < bf)))
         }
         _ => None,
     }
 }
 
-fn str_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
+fn str_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::String(a) = lhs else { return None };
     let Value::String(b) = rhs else { return None };
-    Some(a < b)
+    Some(Ok(a < b))
 }
 
-fn bytes_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
+fn bytes_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::Bytes(a) = lhs else { return None };
     let Value::Bytes(b) = rhs else { return None };
-    Some(a < b)
+    Some(Ok(a < b))
 }
 
-fn list_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
+fn list_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::List(a) = lhs else { return None };
     let Value::List(b) = rhs else { return None };
     let a_guard = a.lock();
@@ -1280,7 +1284,7 @@ fn list_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
     Some(lex_lt(&a_guard, &b_guard))
 }
 
-fn tuple_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
+fn tuple_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::Tuple(a) = lhs else { return None };
     let Value::Tuple(b) = rhs else { return None };
     Some(lex_lt(a, b))
@@ -1289,17 +1293,16 @@ fn tuple_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
 /// Lexicographic less-than for list/tuple: first non-equal element decides;
 /// if one is a prefix of the other, the shorter is less. Equality recurses
 /// through the eq dispatch (so bool↔int unification holds inside lists too).
-fn lex_lt(a: &[Value], b: &[Value]) -> bool {
+/// A genuine `TypeError` from the deciding pair (e.g. `2 < "a"`) propagates,
+/// matching CPython — it is not swallowed into `false`.
+fn lex_lt(a: &[Value], b: &[Value]) -> Result<bool, EvalError> {
     for (x, y) in a.iter().zip(b.iter()) {
         if !recurse_eq(x, y) {
-            // First inequal position decides. Nested user-class
-            // ordering is best-effort here (sync slot table can't reach
-            // `__lt__` on an Instance); fall back to `false` if the
-            // sync dispatch declines.
-            return dispatch_lt(x, y).unwrap_or(false);
+            // First inequal position decides.
+            return dispatch_lt(x, y);
         }
     }
-    a.len() < b.len()
+    Ok(a.len() < b.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -2533,8 +2536,8 @@ fn decimal_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     Some(decimal_to_bigdecimal(lhs)? == decimal_to_bigdecimal(rhs)?)
 }
 
-fn decimal_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
-    Some(decimal_to_bigdecimal(lhs)? < decimal_to_bigdecimal(rhs)?)
+fn decimal_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    Some(Ok(decimal_to_bigdecimal(lhs)? < decimal_to_bigdecimal(rhs)?))
 }
 
 fn decimal_arith(
@@ -2606,8 +2609,8 @@ fn fraction_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     Some(fraction_to_bigrational(lhs)? == fraction_to_bigrational(rhs)?)
 }
 
-fn fraction_lt(lhs: &Value, rhs: &Value) -> Option<bool> {
-    Some(fraction_to_bigrational(lhs)? < fraction_to_bigrational(rhs)?)
+fn fraction_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    Some(Ok(fraction_to_bigrational(lhs)? < fraction_to_bigrational(rhs)?))
 }
 
 fn fraction_to_f64(value: &Value) -> Option<f64> {
