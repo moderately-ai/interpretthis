@@ -36,41 +36,33 @@ pub(crate) fn dispatch_string_method(
     match method {
         "upper" => Ok(Value::String(s.to_uppercase().into())),
         "lower" => Ok(Value::String(s.to_lowercase().into())),
-        "strip" => {
-            if args.is_empty() {
-                Ok(Value::String(s.trim().into()))
-            } else if let Value::String(chars) = &args[0] {
-                Ok(Value::String(s.trim_matches(|c: char| chars.contains(c)).into()))
-            } else {
-                Ok(Value::String(s.trim().into()))
-            }
-        }
-        "lstrip" => {
-            if args.is_empty() {
-                Ok(Value::String(s.trim_start().into()))
-            } else if let Value::String(chars) = &args[0] {
+        "strip" => match strip_chars(method, args)? {
+            Some(chars) => Ok(Value::String(s.trim_matches(|c: char| chars.contains(c)).into())),
+            None => Ok(Value::String(s.trim().into())),
+        },
+        "lstrip" => match strip_chars(method, args)? {
+            Some(chars) => {
                 Ok(Value::String(s.trim_start_matches(|c: char| chars.contains(c)).into()))
-            } else {
-                Ok(Value::String(s.trim_start().into()))
             }
-        }
-        "rstrip" => {
-            if args.is_empty() {
-                Ok(Value::String(s.trim_end().into()))
-            } else if let Value::String(chars) = &args[0] {
+            None => Ok(Value::String(s.trim_start().into())),
+        },
+        "rstrip" => match strip_chars(method, args)? {
+            Some(chars) => {
                 Ok(Value::String(s.trim_end_matches(|c: char| chars.contains(c)).into()))
-            } else {
-                Ok(Value::String(s.trim_end().into()))
             }
-        }
+            None => Ok(Value::String(s.trim_end().into())),
+        },
         "split" => {
             let bound = bind_method_params(method, args, kwargs, &["sep", "maxsplit"])?;
-            let maxsplit = bound[1].as_ref().map_or(-1, |v| value_to_i64(v).unwrap_or(-1));
+            let maxsplit = coerce_maxsplit(bound[1].as_ref())?;
             match &bound[0] {
                 None | Some(Value::None) => {
                     Ok(Value::List(shared_list(split_whitespace_max(s, maxsplit)?)))
                 }
                 Some(Value::String(sep)) => {
+                    if sep.is_empty() {
+                        return Err(InterpreterError::ValueError("empty separator".into()).into());
+                    }
                     let parts: Vec<Value> = if maxsplit < 0 {
                         s.split(sep.as_str()).map(|p| Value::String(p.into())).collect()
                     } else {
@@ -87,12 +79,15 @@ pub(crate) fn dispatch_string_method(
         }
         "rsplit" => {
             let bound = bind_method_params(method, args, kwargs, &["sep", "maxsplit"])?;
-            let maxsplit = bound[1].as_ref().map_or(-1, |v| value_to_i64(v).unwrap_or(-1));
+            let maxsplit = coerce_maxsplit(bound[1].as_ref())?;
             match &bound[0] {
                 None | Some(Value::None) => {
                     Ok(Value::List(shared_list(rsplit_whitespace_max(s, maxsplit)?)))
                 }
                 Some(Value::String(sep)) => {
+                    if sep.is_empty() {
+                        return Err(InterpreterError::ValueError("empty separator".into()).into());
+                    }
                     let parts: Vec<Value> = if maxsplit < 0 {
                         // CPython rsplit with no max returns left-to-right order.
                         s.split(sep.as_str()).map(|p| Value::String(p.into())).collect()
@@ -159,7 +154,7 @@ pub(crate) fn dispatch_string_method(
                     .into());
                 }
             };
-            let count = if args.len() == 3 { value_to_i64(&args[2]).unwrap_or(-1) } else { -1 };
+            let count = if args.len() == 3 { value_to_i64(&args[2])? } else { -1 };
             if count < 0 {
                 Ok(Value::String(s.replace(old, new).into()))
             } else {
@@ -569,6 +564,28 @@ pub(crate) fn dispatch_string_method(
             "'str' object has no attribute '{method}'"
         ))
         .into()),
+    }
+}
+
+/// Optional strip character set: absent or `None` → strip whitespace; a `str`
+/// → strip that character set; anything else raises `TypeError` (CPython:
+/// "strip arg must be None or str").
+fn strip_chars<'a>(method: &str, args: &'a [Value]) -> Result<Option<&'a str>, EvalError> {
+    match args.first() {
+        None | Some(Value::None) => Ok(None),
+        Some(Value::String(chars)) => Ok(Some(chars.as_str())),
+        Some(_) => {
+            Err(InterpreterError::TypeError(format!("{method} arg must be None or str")).into())
+        }
+    }
+}
+
+/// Coerce an optional `maxsplit` argument: absent or `None` → unlimited (`-1`);
+/// otherwise an integer (non-integers raise `TypeError` via `value_to_i64`).
+fn coerce_maxsplit(arg: Option<&Value>) -> Result<i64, EvalError> {
+    match arg {
+        None | Some(Value::None) => Ok(-1),
+        Some(v) => value_to_i64(v),
     }
 }
 
