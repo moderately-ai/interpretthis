@@ -1,0 +1,8 @@
+print("hi".rjust(5), "hi".ljust(5) + "|", "hi".center(6, "-"))
+print("42".zfill(5), "-42".zfill(5), "+42".zfill(5))
+print("Hello World".count("o"), "Hello".count("l"))
+print("a.b.c".split("."), "a.b.c".rsplit(".", 1))
+print("  x  ".strip(), "xxabcxx".strip("x"))
+print("abcabc".replace("a", "X", 1))
+print("HELLO"[::-1], "hello".index("l"))
+print("The quick".startswith(("A", "The")), "file.txt".endswith((".txt", ".md")))

@@ -1,0 +1,7 @@
+print(1 < 2 <= 2 < 3, 1 < 2 > 3)
+print(True == 1, False == 0, True + True == 2)
+print([1, 2] < [1, 3], [1, 2] < [1, 2, 3], (1, 2) == (1, 2))
+print("abc" < "abd", "Abc" < "abc")
+print(0.1 + 0.2 == 0.3, abs(0.1 + 0.2 - 0.3) < 1e-9)
+print(None == None, None is None)
+print(2 ** 10, 2 ** 0.5 > 1.41)

@@ -175,13 +175,12 @@ fn format_value_body(
         }
         (Value::Float(f), Some('e')) => Ok(format_scientific(*f, prec(), false)),
         (Value::Float(f), Some('E')) => Ok(format_scientific(*f, prec(), true)),
-        (Value::Float(f), Some('g' | 'G')) => {
-            let p = prec();
-            // Use shorter of %e and %f.
-            let f_fmt = format!("{f:.p$}");
-            let e_fmt = format_scientific(*f, p, type_char == Some('G'));
-            Ok(if f_fmt.len() <= e_fmt.len() { f_fmt } else { e_fmt })
-        }
+        (Value::Float(f), Some('g' | 'G')) => Ok(format_general(
+            *f,
+            precision.map_or(6, |p| spec_usize(p, 6)),
+            type_char == Some('G'),
+            alternate,
+        )),
         (Value::Float(f), Some('%')) => Ok(format!("{:.*}%", prec(), f * 100.0)),
         // A float under a non-float code (e.g. `:d`, `:x`) is a ValueError.
         (Value::Float(_), Some(c)) => Err(unknown_format_code(c, value)),
@@ -259,12 +258,7 @@ fn format_integer(
         Some('f' | 'F') => Ok(format!("{:.prec$}", as_f64())),
         Some('e') => Ok(format_scientific(as_f64(), prec, false)),
         Some('E') => Ok(format_scientific(as_f64(), prec, true)),
-        Some('g' | 'G') => {
-            let f = as_f64();
-            let f_fmt = format!("{f:.prec$}");
-            let e_fmt = format_scientific(f, prec, type_char == Some('G'));
-            Ok(if f_fmt.len() <= e_fmt.len() { f_fmt } else { e_fmt })
-        }
+        Some('g' | 'G') => Ok(format_general(as_f64(), prec, type_char == Some('G'), alternate)),
         Some('%') => Ok(format!("{:.prec$}%", as_f64() * 100.0)),
         Some(c) => Err(unknown_format_code(c, value)),
     }
@@ -474,6 +468,55 @@ fn parse_number(chars: &[char]) -> (Option<i64>, &[char]) {
         let num = num_str.parse::<i64>().ok();
         (num, &chars[end..])
     }
+}
+
+/// Python `g`/`G` general float format. `precision` is the number of
+/// significant digits (default 6, minimum 1). Chooses fixed vs scientific by
+/// the value's decimal exponent, then — unless `alternate` (`#`) — strips
+/// trailing zeros and a trailing decimal point.
+fn format_general(val: f64, precision: usize, uppercase: bool, alternate: bool) -> String {
+    if val.is_nan() {
+        return if uppercase { "NAN".into() } else { "nan".into() };
+    }
+    if val.is_infinite() {
+        let s = if val < 0.0 { "-inf" } else { "inf" };
+        return if uppercase { s.to_uppercase() } else { s.into() };
+    }
+    let p = precision.max(1);
+    let mut rendered = if val == 0.0 {
+        // Exponent 0 -> fixed with p-1 decimals.
+        format!("{val:.*}", p - 1)
+    } else {
+        // Round to p significant digits, then read the resulting exponent
+        // (this accounts for a rounding carry, e.g. 9.99e0 -> 1e1).
+        let sci = format!("{val:.*e}", p - 1);
+        let exp: i32 = sci.split('e').nth(1).and_then(|e| e.parse().ok()).unwrap_or(0);
+        if exp < -4 || exp >= p as i32 {
+            format_scientific(val, p - 1, uppercase)
+        } else {
+            let decimals = usize::try_from(p as i32 - 1 - exp).unwrap_or(0);
+            format!("{val:.decimals$}")
+        }
+    };
+    if !alternate {
+        rendered = strip_general_zeros(&rendered);
+    }
+    rendered
+}
+
+/// Strip a `g`-format result's trailing zeros and trailing decimal point,
+/// leaving any exponent suffix intact (`1.2300e+06` -> `1.23e+06`).
+fn strip_general_zeros(s: &str) -> String {
+    let (mantissa, exp) = match s.find(['e', 'E']) {
+        Some(i) => (&s[..i], &s[i..]),
+        None => (s, ""),
+    };
+    let trimmed = if mantissa.contains('.') {
+        mantissa.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        mantissa
+    };
+    format!("{trimmed}{exp}")
 }
 
 fn format_scientific(val: f64, precision: usize, uppercase: bool) -> String {
