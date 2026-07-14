@@ -47,6 +47,35 @@ fn hex_digit(b: u8) -> Result<u8, EvalError> {
     }
 }
 
+/// A stable object id for `id(x)`, consistent with `is`: `id(a) == id(b)` iff
+/// `a is b`.
+///
+/// Reference types (list, instance, function, lambda, lru_cache) use their
+/// shared `Arc`'s address — two distinct objects get distinct ids, an alias
+/// shares one. Immutable value types have no stable address in the clone-on-load
+/// model, so their id is derived from their `repr`, giving equal values equal
+/// ids (matching the identity-as-equality choice `is` makes for immutables).
+/// Regression: `id()` returned 0 for everything, so `id(a) == id(b)` was always
+/// true.
+pub(super) fn object_id(v: &Value) -> i64 {
+    use std::sync::Arc;
+    let raw: usize = match v {
+        Value::List(a) => Arc::as_ptr(a).addr(),
+        Value::Instance(i) => Arc::as_ptr(&i.fields).addr(),
+        Value::Function(a) => Arc::as_ptr(a).addr(),
+        Value::Lambda(a) => Arc::as_ptr(a).addr(),
+        Value::LruCache(a) => Arc::as_ptr(a).addr(),
+        other => {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            other.repr().hash(&mut hasher);
+            hasher.finish() as usize
+        }
+    };
+    // CPython ids are non-negative; clear the sign bit.
+    (raw & (i64::MAX as usize)) as i64
+}
+
 /// Build a byte vector from an iterable of ints, for `bytes(iterable)`.
 ///
 /// Each element must be an int in `range(0, 256)`; an out-of-range value raises

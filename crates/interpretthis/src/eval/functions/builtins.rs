@@ -10,8 +10,8 @@ use super::{
     dispatch::call_value_as_function,
     float_to_int_exact,
     helpers::{
-        SortRequest, apply_key_fn, bytes_from_int_items, check_isinstance, dsu_sort, parse_int_str,
-        pow_three_arg, type_arg_name,
+        SortRequest, apply_key_fn, bytes_from_int_items, check_isinstance, dsu_sort, object_id,
+        parse_int_str, pow_three_arg, type_arg_name,
     },
     method_dispatch::CallArgs,
     resolve_proxy, to_len_i64, value_to_i64,
@@ -1290,8 +1290,7 @@ pub(super) async fn try_builtin(
         }
         "id" => {
             check_arg_count(name, args, 1, 1)?;
-            // No real object identity — return a deterministic fake
-            Ok(Some(Value::Int(0)))
+            Ok(Some(Value::Int(object_id(&args[0]))))
         }
         "input" => Err(InterpreterError::Security(
             "input() is not allowed in sandboxed interpreter".into(),
