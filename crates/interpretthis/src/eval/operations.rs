@@ -1077,9 +1077,48 @@ fn values_equal(left: &Value, right: &Value) -> bool {
     }
 }
 
-/// Check value identity (Python `is`). In our interpreter, only None has identity.
-const fn values_is(left: &Value, right: &Value) -> bool {
-    matches!((left, right), (Value::None, Value::None))
+/// Check value identity (Python `is`).
+///
+/// The single source of truth for `is` — the sync numeric fast path
+/// (`eval::try_numeric_compare`) routes here too, so `1 is 1` and `[] is []`
+/// can no longer disagree.
+///
+/// Identity for the reference types we back with a shared `Arc` (list, instance,
+/// function, lambda, lru_cache) is real pointer identity: an alias `is` its
+/// source, and two freshly-built objects are not. For immutable value types our
+/// clone-on-load model cannot distinguish "same object" from "equal object", and
+/// CPython caches/interns most of them anyway, so we fall back to equality —
+/// which matches CPython for the stable cases (small ints, bools, `None`, short
+/// interned strings). Uncached immutables (a large int, a long non-interned
+/// string) are the documented divergence.
+pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
+    use std::sync::Arc;
+    match (left, right) {
+        (Value::List(a), Value::List(b)) => Arc::ptr_eq(a, b),
+        (Value::Instance(a), Value::Instance(b)) => Arc::ptr_eq(&a.fields, &b.fields),
+        (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
+        (Value::Lambda(a), Value::Lambda(b)) => Arc::ptr_eq(a, b),
+        (Value::LruCache(a), Value::LruCache(b)) => Arc::ptr_eq(a, b),
+        // A reference type is never identical to a value of any other type.
+        (
+            Value::List(_)
+            | Value::Instance(_)
+            | Value::Function(_)
+            | Value::Lambda(_)
+            | Value::LruCache(_),
+            _,
+        )
+        | (
+            _,
+            Value::List(_)
+            | Value::Instance(_)
+            | Value::Function(_)
+            | Value::Lambda(_)
+            | Value::LruCache(_),
+        ) => false,
+        // Immutable value types: equality fallback (see doc).
+        _ => values_equal(left, right),
+    }
 }
 
 /// Evaluate a boolean operation (and, or) with short-circuit, returning actual values.

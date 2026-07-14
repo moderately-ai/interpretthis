@@ -360,12 +360,11 @@ fn eval_numeric_compare_unmetered(
         };
         count += right_count + 1;
         let result = match op {
-            rustpython_parser::ast::CmpOp::Is => {
-                Ok(std::mem::discriminant(&left) == std::mem::discriminant(&right) && left == right)
-            }
-            rustpython_parser::ast::CmpOp::IsNot => Ok(!(std::mem::discriminant(&left)
-                == std::mem::discriminant(&right)
-                && left == right)),
+            // Route to the single `is` implementation rather than a bespoke
+            // discriminant+equality check here — otherwise the sync numeric path
+            // and the async path answer `is` differently.
+            rustpython_parser::ast::CmpOp::Is => Ok(operations::values_is(&left, &right)),
+            rustpython_parser::ast::CmpOp::IsNot => Ok(!operations::values_is(&left, &right)),
             _ => operations::compare_builtin(state, *op, &left, &right),
         };
         match result {
