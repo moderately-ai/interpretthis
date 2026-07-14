@@ -1025,12 +1025,26 @@ impl PartialEq for ValueKey {
             (Self::Frozenset(a), Self::Frozenset(b)) => {
                 a.len() == b.len() && a.iter().all(|x| b.contains(x))
             }
-            // Instance keys use structural equality on the stored
-            // Value. Two Instance keys with different hashes can still
-            // compare equal — Python's `__hash__` consistency rule
-            // says equal-by-eq implies equal-by-hash, not the reverse.
+            // Instance keys compare by IDENTITY, not structurally. Two
+            // distinct instances are distinct dict/set keys even when
+            // their fields compare equal — e.g. two bare `object()`
+            // sentinels. Value-equality dedup for keys with a custom
+            // `__eq__`/`__hash__` is done on the async dict path
+            // (`dict_insert_instance_key` / `dict_get_instance_key`)
+            // BEFORE a key is ever handed to the map, so this sync `Eq`
+            // must only collapse the *same* instance. A structural
+            // compare here silently merged identity-distinct instances
+            // whenever their address-hashes shared a hashbrown control
+            // byte (~1/128), corrupting `len`/lookup non-deterministically.
             (Self::Instance { value: a, .. }, Self::Instance { value: b, .. }) => {
-                crate::eval::operations::values_equal_pub(a, b)
+                match (a.as_ref(), b.as_ref()) {
+                    (Value::Instance(ia), Value::Instance(ib)) => {
+                        std::sync::Arc::ptr_eq(&ia.fields, &ib.fields)
+                    }
+                    // Instance keys always box an `Instance`; the
+                    // structural fallback is defensive only.
+                    _ => crate::eval::operations::values_equal_pub(a, b),
+                }
             }
             _ => false,
         }

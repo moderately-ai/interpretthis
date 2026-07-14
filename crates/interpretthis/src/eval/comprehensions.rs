@@ -317,8 +317,18 @@ fn eval_dict_generators<'a>(
         if index >= generators.len() {
             let key = eval_expr(state, key_expr, tools).await?;
             let value = eval_expr(state, value_expr, tools).await?;
-            let key = value_to_key(&key)?;
-            result_map.insert(key, value);
+            // Instance keys go through the async hash/`__eq__` protocol
+            // (same as a dict literal); other keys use the sync
+            // `value_to_key`. Previously the comprehension always called
+            // `value_to_key`, which rejects instances as unhashable.
+            if matches!(key, Value::Instance(_)) {
+                crate::eval::op::dict_insert_instance_key_pub(
+                    state, result_map, &key, value, tools,
+                )
+                .await?;
+            } else {
+                result_map.insert(value_to_key(&key)?, value);
+            }
             return Ok(());
         }
 
