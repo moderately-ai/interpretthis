@@ -48,6 +48,7 @@ bigdecimal = { workspace = true }
 num-rational = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
+num-integer = { workspace = true }
 rustc-hash = { workspace = true }
 compact_str = { workspace = true }
 

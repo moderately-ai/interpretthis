@@ -535,6 +535,7 @@ dependencies = [
  "indexmap",
  "mimalloc",
  "num-bigint",
+ "num-integer",
  "num-rational",
  "num-traits",
  "parking_lot",

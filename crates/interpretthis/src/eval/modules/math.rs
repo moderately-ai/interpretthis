@@ -132,11 +132,17 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
             Ok(Value::Int(gcd(a.unsigned_abs(), b.unsigned_abs())))
         }
         "isqrt" => {
-            let n = arg_i64(func, args, 0)?;
-            if n < 0 {
+            let arg = need_arg(func, args, 0)?;
+            let Some(n) = crate::value::value_as_bigint(arg) else {
+                return Err(type_error(format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    arg.type_name()
+                )));
+            };
+            if n.sign() == num_bigint::Sign::Minus {
                 return Err(value_error("isqrt() argument must be nonnegative"));
             }
-            Ok(Value::Int(isqrt(n)))
+            Ok(crate::value::int_from_bigint(num_integer::Roots::sqrt(&n)))
         }
         _ => Err(crate::error::InterpreterError::AttributeError(format!(
             "module 'math' has no attribute '{func}'"
@@ -229,19 +235,6 @@ const fn gcd(mut a: u64, mut b: u64) -> i64 {
     )]
     let result = a as i64;
     result
-}
-
-const fn isqrt(n: i64) -> i64 {
-    if n < 2 {
-        return n;
-    }
-    let mut x = n;
-    let mut y = (x + 1) / 2;
-    while y < x {
-        x = y;
-        y = (x + n / x) / 2;
-    }
-    x
 }
 
 /// `math` module registration.
