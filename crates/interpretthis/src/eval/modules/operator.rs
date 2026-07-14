@@ -41,6 +41,9 @@ pub fn has_function(name: &str) -> bool {
                 | "concat"
                 | "countOf"
                 | "indexOf"
+                | "itemgetter"
+                | "attrgetter"
+                | "methodcaller"
         )
 }
 
@@ -115,9 +118,60 @@ impl crate::eval::modules::Module for OperatorModule {
         state: &mut InterpreterState,
         func: &str,
         args: &[Value],
-        _kwargs: &IndexMap<String, Value>,
+        kwargs: &IndexMap<String, Value>,
         tools: &Tools,
     ) -> EvalResult {
+        // Callable factories return a captured getter applied later.
+        match func {
+            "itemgetter" => {
+                if args.is_empty() {
+                    return Err(InterpreterError::TypeError(
+                        "itemgetter expected 1 argument, got 0".into(),
+                    )
+                    .into());
+                }
+                return Ok(Value::OperatorGetter(Box::new(
+                    crate::value::OperatorGetter::ItemGetter(args.to_vec()),
+                )));
+            }
+            "attrgetter" => {
+                if args.is_empty() {
+                    return Err(InterpreterError::TypeError(
+                        "attrgetter expected 1 argument, got 0".into(),
+                    )
+                    .into());
+                }
+                let mut attrs = Vec::with_capacity(args.len());
+                for a in args {
+                    let Value::String(s) = a else {
+                        return Err(InterpreterError::TypeError(
+                            "attribute name must be a string".into(),
+                        )
+                        .into());
+                    };
+                    attrs.push(s.split('.').map(str::to_string).collect());
+                }
+                return Ok(Value::OperatorGetter(Box::new(
+                    crate::value::OperatorGetter::AttrGetter(attrs),
+                )));
+            }
+            "methodcaller" => {
+                let Some(Value::String(name)) = args.first() else {
+                    return Err(InterpreterError::TypeError(
+                        "methodcaller needs at least one argument, the method name".into(),
+                    )
+                    .into());
+                };
+                return Ok(Value::OperatorGetter(Box::new(
+                    crate::value::OperatorGetter::MethodCaller {
+                        name: name.to_string(),
+                        args: args[1..].to_vec(),
+                        kwargs: kwargs.clone(),
+                    },
+                )));
+            }
+            _ => {}
+        }
         if let Some(op) = binary_operator(func) {
             let (a, b) = arg2(func, args)?;
             return crate::eval::op::binop(state, op, a, b, tools).await;

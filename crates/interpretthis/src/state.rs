@@ -404,6 +404,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
     use crate::value::Value;
     match value {
         Value::None | Value::NotImplemented | Value::Ellipsis => 0,
+        Value::OperatorGetter(_) => 32,
         Value::Bool(_) => 1,
         // i64 and f64 are both 8 bytes.
         Value::Int(_) | Value::Float(_) => 8,

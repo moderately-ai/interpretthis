@@ -289,6 +289,10 @@ pub enum Value {
     /// `Partial` is one of the rarer variants and gating Value enum size
     /// on it hurts every other clone / push / match.
     Partial(Box<PartialData>),
+    /// A callable produced by `operator.itemgetter` / `attrgetter` /
+    /// `methodcaller`. Boxed to keep the inline slot narrow; the call path
+    /// applies it to its single argument.
+    OperatorGetter(Box<OperatorGetter>),
     /// `functools.lru_cache`-wrapped callable. Shared interior state so
     /// clones share the memo table (CPython identity of the wrapper).
     LruCache(std::sync::Arc<LruCacheData>),
@@ -505,6 +509,19 @@ pub struct PartialData {
     pub args: Vec<Value>,
     /// Bound keyword args, merged into the dispatched call's kwargs.
     pub keywords: indexmap::IndexMap<String, Value>,
+}
+
+/// Backing data for [`Value::OperatorGetter`] — the three callable factories in
+/// the `operator` module. Each applies to a single argument at call time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OperatorGetter {
+    /// `itemgetter(*items)` — `obj[item]`, or a tuple of them for 2+ items.
+    ItemGetter(Vec<Value>),
+    /// `attrgetter(*attrs)` — `obj.attr`, or a tuple; each attr may be a dotted
+    /// path (`"a.b"`), stored pre-split into its components.
+    AttrGetter(Vec<Vec<String>>),
+    /// `methodcaller(name, *args, **kwargs)` — `obj.name(*args, **kwargs)`.
+    MethodCaller { name: String, args: Vec<Value>, kwargs: indexmap::IndexMap<String, Value> },
 }
 
 /// Shared state for [`Value::LruCache`].
@@ -1293,6 +1310,7 @@ impl Value {
             | Self::Lazy { .. }
             | Self::Generator { .. }
             | Self::Partial { .. }
+            | Self::OperatorGetter(_)
             | Self::LruCache(_) => true,
             // Counter, TimeDelta: zero is falsy (matches CPython's
             // `bool(timedelta(0))` being False).
@@ -1320,8 +1338,13 @@ impl Value {
 
     /// Get the Python type name for this value.
     #[must_use]
-    pub const fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match self {
+            Self::OperatorGetter(g) => match **g {
+                OperatorGetter::ItemGetter(_) => "itemgetter",
+                OperatorGetter::AttrGetter(_) => "attrgetter",
+                OperatorGetter::MethodCaller { .. } => "methodcaller",
+            },
             Self::None => "NoneType",
             Self::NotImplemented => "NotImplementedType",
             Self::Ellipsis => "ellipsis",
@@ -1766,6 +1789,20 @@ impl fmt::Display for Value {
             Self::Lazy { .. } => write!(f, "<generator object>"),
             Self::Generator { .. } => write!(f, "<generator object>"),
             Self::Partial(data) => write!(f, "functools.partial({})", data.func),
+            Self::OperatorGetter(g) => match &**g {
+                OperatorGetter::ItemGetter(items) => {
+                    let rendered: Vec<String> = items.iter().map(|v| v.repr()).collect();
+                    write!(f, "operator.itemgetter({})", rendered.join(", "))
+                }
+                OperatorGetter::AttrGetter(attrs) => {
+                    let rendered: Vec<String> =
+                        attrs.iter().map(|parts| format!("'{}'", parts.join("."))).collect();
+                    write!(f, "operator.attrgetter({})", rendered.join(", "))
+                }
+                OperatorGetter::MethodCaller { name, .. } => {
+                    write!(f, "operator.methodcaller('{name}')")
+                }
+            },
             Self::LruCache(_) => write!(f, "<functools._lru_cache_wrapper>"),
         }
     }

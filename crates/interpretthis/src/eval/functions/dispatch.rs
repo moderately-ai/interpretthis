@@ -601,6 +601,19 @@ pub(crate) async fn call_value_as_function(
             ))
             .await;
         }
+        // `operator.itemgetter` / `attrgetter` / `methodcaller` — apply the
+        // captured getter to the single argument.
+        Value::OperatorGetter(getter) => {
+            let [obj] = args else {
+                return Err(InterpreterError::TypeError(format!(
+                    "{} expected 1 argument, got {}",
+                    func.type_name(),
+                    args.len()
+                ))
+                .into());
+            };
+            return apply_operator_getter(state, getter, obj, tools).await;
+        }
         Value::LruCache(data) => {
             // Memoize by positional AND keyword ValueKeys. Keying on positionals
             // only meant `f(1, b=2)` and `f(1, b=3)` collided on the same cache
@@ -670,4 +683,60 @@ pub(crate) async fn call_value_as_function(
         ))
         .into()),
     }
+}
+
+/// Apply an `operator.itemgetter`/`attrgetter`/`methodcaller` to its argument.
+async fn apply_operator_getter(
+    state: &mut crate::state::InterpreterState,
+    getter: &crate::value::OperatorGetter,
+    obj: &Value,
+    tools: &Tools,
+) -> EvalResult {
+    use crate::value::OperatorGetter;
+    match getter {
+        OperatorGetter::ItemGetter(items) => {
+            let mut results = Vec::with_capacity(items.len());
+            for item in items {
+                results.push(crate::eval::op::getitem(state, obj, item, tools).await?);
+            }
+            Ok(single_or_tuple(results))
+        }
+        OperatorGetter::AttrGetter(attrs) => {
+            let mut results = Vec::with_capacity(attrs.len());
+            for parts in attrs {
+                // A dotted path (`attrgetter("a.b")`) resolves left to right.
+                let mut current = obj.clone();
+                for part in parts {
+                    current =
+                        crate::eval::names::getattr_on_value(state, current, part, tools, None)
+                            .await?;
+                }
+                results.push(current);
+            }
+            Ok(single_or_tuple(results))
+        }
+        OperatorGetter::MethodCaller { name, args, kwargs } => {
+            // A user instance's method is looked up in its MRO and invoked with
+            // `self`; a builtin receiver goes through the method-dispatch table.
+            if let Value::Instance(inst) = obj {
+                if let Some((_, method)) =
+                    crate::eval::classes::lookup_method_in_mro(state, &inst.class_name, name)
+                {
+                    let call = CallArgs { positional: args, keyword: kwargs };
+                    let (returned, _self) =
+                        crate::eval::classes::call_method(state, &method, obj.clone(), call, tools)
+                            .await?;
+                    return Ok(returned);
+                }
+            }
+            let mut receiver = obj.clone();
+            Ok(dispatch_method(&mut receiver, name, args, kwargs)?.value)
+        }
+    }
+}
+
+/// A single result is returned bare; two or more form a tuple (CPython
+/// `itemgetter`/`attrgetter` with multiple selectors).
+fn single_or_tuple(mut results: Vec<Value>) -> Value {
+    if results.len() == 1 { results.pop().unwrap_or(Value::None) } else { Value::Tuple(results) }
 }
