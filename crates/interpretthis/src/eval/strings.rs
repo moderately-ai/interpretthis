@@ -923,8 +923,36 @@ const fn mapping_key_unused(
 fn format_percent_conversion(value: &Value, spec: &PercentSpec) -> EvalResult {
     // Coerce the operand to the type the conversion needs.
     let coerced = match spec.conv {
-        'd' | 'i' | 'u' | 'o' | 'x' | 'X' | 'c' => match value {
-            Value::Int(_) => value.clone(),
+        // `%c`: an int/bool codepoint or a single-character string. Handled
+        // fully here (width/padding via the 's' brace spec) with an early
+        // return; out of range raises OverflowError, a float or a multi-char
+        // string raises TypeError.
+        'c' => {
+            use num_traits::ToPrimitive as _;
+            let ch = match value {
+                Value::String(s) if s.chars().count() == 1 => s.to_string(),
+                Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => {
+                    crate::value::value_as_bigint(value)
+                        .and_then(|b| b.to_u32())
+                        .and_then(char::from_u32)
+                        .map(|c| c.to_string())
+                        .ok_or_else(|| {
+                            EvalError::Exception(ExceptionValue::new(
+                                "OverflowError",
+                                "%c arg not in range(0x110000)",
+                            ))
+                        })?
+                }
+                _ => {
+                    return Err(
+                        InterpreterError::TypeError("%c requires int or char".into()).into()
+                    );
+                }
+            };
+            return apply_format_spec(&Value::String(ch.into()), &build_brace_spec(spec, 's'));
+        }
+        'd' | 'i' | 'u' | 'o' | 'x' | 'X' => match value {
+            Value::Int(_) | Value::BigInt(_) => value.clone(),
             Value::Bool(b) => Value::Int(i64::from(*b)),
             Value::Float(f) => Value::Int(percent_trunc(*f)),
             _ => {
@@ -953,23 +981,6 @@ fn format_percent_conversion(value: &Value, spec: &PercentSpec) -> EvalResult {
             .into());
         }
     };
-
-    // `%c` becomes a single-character string and skips numeric padding nuances.
-    if spec.conv == 'c' {
-        let ch = match &coerced {
-            Value::Int(i) => {
-                u32::try_from(*i).ok().and_then(char::from_u32).map(|c| c.to_string()).ok_or_else(
-                    || {
-                        EvalError::from(InterpreterError::ValueError(
-                            "%c arg not in range(0x110000)".into(),
-                        ))
-                    },
-                )?
-            }
-            _ => format!("{coerced}"),
-        };
-        return apply_format_spec(&Value::String(ch.into()), &build_brace_spec(spec, 's'));
-    }
 
     let type_char = match spec.conv {
         'i' | 'u' => 'd',
