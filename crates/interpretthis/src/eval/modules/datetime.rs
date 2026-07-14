@@ -16,7 +16,7 @@ use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
-    eval::modules::{arg_str, need_arg, value_error},
+    eval::modules::{arg_str, value_error},
     value::Value,
 };
 
@@ -54,34 +54,52 @@ fn construct_naive_date(year: i32, month: u32, day: u32) -> Result<NaiveDate, Ev
         .ok_or_else(|| value_error("day is out of range for month"))
 }
 
-/// Invoke a `datetime` constructor.
-pub fn call(func: &str, args: &[Value]) -> EvalResult {
+/// Invoke a `datetime` constructor. Positional and keyword arguments are bound
+/// through `bind_method_params`, so both `datetime(2020, 1, 1, hour=9)` and the
+/// fully-positional form work and unknown/duplicate keywords raise TypeError.
+pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
+    use crate::eval::functions::bind_method_params;
     match func {
         "date" => {
-            let year = arg_i32(func, args, 0)?;
-            let month = arg_u32(func, args, 1)?;
-            let day = arg_u32(func, args, 2)?;
+            let b = bind_method_params(func, args, kwargs, &["year", "month", "day"])?;
+            let year = comp_i32(b[0].as_ref(), func, "year")?;
+            let month = comp_u32(b[1].as_ref(), func, "month")?;
+            let day = comp_u32(b[2].as_ref(), func, "day")?;
             let date = construct_naive_date(year, month, day)?;
             Ok(Value::Date(date))
         }
         "datetime" => {
             // datetime(year, month, day, hour=0, minute=0, second=0,
-            //          microsecond=0, tzinfo=None) — positional only
-            // here because the method-dispatch path doesn't thread
-            // kwargs. Tzinfo arg is accepted as a Value::TimeZone or
-            // None.
-            let year = arg_i32(func, args, 0)?;
-            let month = arg_u32(func, args, 1)?;
-            let day = arg_u32(func, args, 2)?;
-            let hour = opt_u32(args, 3)?.unwrap_or(0);
-            let minute = opt_u32(args, 4)?.unwrap_or(0);
-            let second = opt_u32(args, 5)?.unwrap_or(0);
-            let microsecond = opt_u32(args, 6)?.unwrap_or(0);
+            //          microsecond=0, tzinfo=None, *, fold=0). Tzinfo is a
+            // Value::TimeZone or None; fold is accepted but not modelled.
+            let b = bind_method_params(
+                func,
+                args,
+                kwargs,
+                &[
+                    "year",
+                    "month",
+                    "day",
+                    "hour",
+                    "minute",
+                    "second",
+                    "microsecond",
+                    "tzinfo",
+                    "fold",
+                ],
+            )?;
+            let year = comp_i32(b[0].as_ref(), func, "year")?;
+            let month = comp_u32(b[1].as_ref(), func, "month")?;
+            let day = comp_u32(b[2].as_ref(), func, "day")?;
+            let hour = comp_opt_u32(b[3].as_ref(), func)?.unwrap_or(0);
+            let minute = comp_opt_u32(b[4].as_ref(), func)?.unwrap_or(0);
+            let second = comp_opt_u32(b[5].as_ref(), func)?.unwrap_or(0);
+            let microsecond = comp_opt_u32(b[6].as_ref(), func)?.unwrap_or(0);
             let date = construct_naive_date(year, month, day)?;
             let time = NaiveTime::from_hms_micro_opt(hour, minute, second, microsecond)
                 .ok_or_else(|| value_error("time component out of range"))?;
             let dt = NaiveDateTime::new(date, time);
-            let tz_offset_secs = match args.get(7) {
+            let tz_offset_secs = match b[7].as_ref() {
                 None | Some(Value::None) => None,
                 Some(Value::TimeZone(secs)) => Some(*secs),
                 Some(other) => {
@@ -95,26 +113,37 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
             Ok(Value::DateTime { dt, tz_offset_secs })
         }
         "time" => {
-            // time(hour=0, minute=0, second=0, microsecond=0)
-            let hour = opt_u32(args, 0)?.unwrap_or(0);
-            let minute = opt_u32(args, 1)?.unwrap_or(0);
-            let second = opt_u32(args, 2)?.unwrap_or(0);
-            let microsecond = opt_u32(args, 3)?.unwrap_or(0);
+            // time(hour=0, minute=0, second=0, microsecond=0, tzinfo=None,
+            //      *, fold=0). Our time is naive; tzinfo/fold are accepted for
+            // signature parity but not modelled.
+            let b = bind_method_params(
+                func,
+                args,
+                kwargs,
+                &["hour", "minute", "second", "microsecond", "tzinfo", "fold"],
+            )?;
+            let hour = comp_opt_u32(b[0].as_ref(), func)?.unwrap_or(0);
+            let minute = comp_opt_u32(b[1].as_ref(), func)?.unwrap_or(0);
+            let second = comp_opt_u32(b[2].as_ref(), func)?.unwrap_or(0);
+            let microsecond = comp_opt_u32(b[3].as_ref(), func)?.unwrap_or(0);
             let t = NaiveTime::from_hms_micro_opt(hour, minute, second, microsecond)
                 .ok_or_else(|| value_error("time component out of range"))?;
             Ok(Value::Time(t))
         }
         "timedelta" => {
-            // timedelta(days=0, seconds=0, microseconds=0,
-            //           milliseconds=0, minutes=0, hours=0, weeks=0)
-            // Positional only; method dispatch doesn't carry kwargs.
-            let days = opt_i64(args, 0)?.unwrap_or(0);
-            let seconds = opt_i64(args, 1)?.unwrap_or(0);
-            let microseconds = opt_i64(args, 2)?.unwrap_or(0);
-            let milliseconds = opt_i64(args, 3)?.unwrap_or(0);
-            let minutes = opt_i64(args, 4)?.unwrap_or(0);
-            let hours = opt_i64(args, 5)?.unwrap_or(0);
-            let weeks = opt_i64(args, 6)?.unwrap_or(0);
+            let b = bind_method_params(
+                func,
+                args,
+                kwargs,
+                &["days", "seconds", "microseconds", "milliseconds", "minutes", "hours", "weeks"],
+            )?;
+            let days = comp_opt_i64(b[0].as_ref())?.unwrap_or(0);
+            let seconds = comp_opt_i64(b[1].as_ref())?.unwrap_or(0);
+            let microseconds = comp_opt_i64(b[2].as_ref())?.unwrap_or(0);
+            let milliseconds = comp_opt_i64(b[3].as_ref())?.unwrap_or(0);
+            let minutes = comp_opt_i64(b[4].as_ref())?.unwrap_or(0);
+            let hours = comp_opt_i64(b[5].as_ref())?.unwrap_or(0);
+            let weeks = comp_opt_i64(b[6].as_ref())?.unwrap_or(0);
             // Compose into microseconds carefully — every component
             // converts via i64 multiplication, saturating-checked at
             // each step so 1e18-microsecond inputs surface as an
@@ -131,8 +160,11 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
             Ok(Value::TimeDelta(micros))
         }
         "timezone" => {
-            // timezone(offset) where offset is a timedelta.
-            let offset = need_arg(func, args, 0)?;
+            // timezone(offset, name=None) where offset is a timedelta.
+            let b = bind_method_params(func, args, kwargs, &["offset", "name"])?;
+            let offset = b[0]
+                .as_ref()
+                .ok_or_else(|| value_error("timezone() missing required argument 'offset'"))?;
             let secs = match offset {
                 Value::TimeDelta(micros) => {
                     let secs_i64 = micros / 1_000_000;
@@ -261,7 +293,10 @@ pub fn dispatch_date_method(
     args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
-    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    // `replace` accepts year/month/day keyword args; the others are argument-less.
+    if method != "replace" {
+        crate::eval::functions::reject_kwargs(method, kwargs)?;
+    }
     match method {
         "isoformat" => Ok(Value::String(date.format("%Y-%m-%d").to_string().into())),
         // Python: Monday == 0 … Sunday == 6.
@@ -273,11 +308,15 @@ pub fn dispatch_date_method(
             Ok(Value::String(date.format(fmt).to_string().into()))
         }
         "replace" => {
-            // Keyword args are not threaded through method dispatch, so only the
-            // positional `replace(year, month, day)` form is supported.
-            let year = opt_i32(args, 0)?.unwrap_or_else(|| date.year());
-            let month = opt_u32(args, 1)?.unwrap_or_else(|| date.month());
-            let day = opt_u32(args, 2)?.unwrap_or_else(|| date.day());
+            let b = crate::eval::functions::bind_method_params(
+                method,
+                args,
+                kwargs,
+                &["year", "month", "day"],
+            )?;
+            let year = comp_opt_i32(b[0].as_ref())?.unwrap_or_else(|| date.year());
+            let month = comp_opt_u32(b[1].as_ref(), method)?.unwrap_or_else(|| date.month());
+            let day = comp_opt_u32(b[2].as_ref(), method)?.unwrap_or_else(|| date.day());
             let replaced = construct_naive_date(year, month, day)?;
             Ok(Value::Date(replaced))
         }
@@ -296,8 +335,53 @@ pub fn dispatch_datetime_method(
     args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
-    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    // `replace` accepts keyword components; the others are argument-less.
+    if method != "replace" {
+        crate::eval::functions::reject_kwargs(method, kwargs)?;
+    }
     match method {
+        "replace" => {
+            let b = crate::eval::functions::bind_method_params(
+                method,
+                args,
+                kwargs,
+                &[
+                    "year",
+                    "month",
+                    "day",
+                    "hour",
+                    "minute",
+                    "second",
+                    "microsecond",
+                    "tzinfo",
+                    "fold",
+                ],
+            )?;
+            let year = comp_opt_i32(b[0].as_ref())?.unwrap_or_else(|| dt.year());
+            let month = comp_opt_u32(b[1].as_ref(), method)?.unwrap_or_else(|| dt.month());
+            let day = comp_opt_u32(b[2].as_ref(), method)?.unwrap_or_else(|| dt.day());
+            let hour = comp_opt_u32(b[3].as_ref(), method)?.unwrap_or_else(|| dt.hour());
+            let minute = comp_opt_u32(b[4].as_ref(), method)?.unwrap_or_else(|| dt.minute());
+            let second = comp_opt_u32(b[5].as_ref(), method)?.unwrap_or_else(|| dt.second());
+            let microsecond =
+                comp_opt_u32(b[6].as_ref(), method)?.unwrap_or_else(|| dt.nanosecond() / 1_000);
+            let tz = match b[7].as_ref() {
+                None => tz_offset_secs,
+                Some(Value::None) => None,
+                Some(Value::TimeZone(secs)) => Some(*secs),
+                Some(other) => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "replace() tzinfo must be a datetime.timezone (got '{}')",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            let date = construct_naive_date(year, month, day)?;
+            let time = NaiveTime::from_hms_micro_opt(hour, minute, second, microsecond)
+                .ok_or_else(|| value_error("time component out of range"))?;
+            Ok(Value::DateTime { dt: NaiveDateTime::new(date, time), tz_offset_secs: tz })
+        }
         "isoformat" => {
             // CPython: `2026-01-15T14:30:00` for naive; with tz adds
             // `+HH:MM`. We don't model microseconds in the default
@@ -464,43 +548,6 @@ pub fn try_arith(op: &str, lhs: &Value, rhs: &Value) -> Option<EvalResult> {
     }
 }
 
-fn arg_i32(func: &str, args: &[Value], index: usize) -> Result<i32, EvalError> {
-    int_arg(need_arg(func, args, index)?, func, index)
-        .and_then(|n| i32::try_from(n).map_err(|_| value_error("year out of range")))
-}
-
-fn arg_u32(func: &str, args: &[Value], index: usize) -> Result<u32, EvalError> {
-    int_arg(need_arg(func, args, index)?, func, index)
-        .and_then(|n| u32::try_from(n).map_err(|_| value_error("value out of range")))
-}
-
-fn opt_i32(args: &[Value], index: usize) -> Result<Option<i32>, EvalError> {
-    match args.get(index) {
-        None => Ok(None),
-        Some(v) => Ok(Some(
-            int_arg(v, "replace", index)
-                .and_then(|n| i32::try_from(n).map_err(|_| value_error("year out of range")))?,
-        )),
-    }
-}
-
-fn opt_u32(args: &[Value], index: usize) -> Result<Option<u32>, EvalError> {
-    match args.get(index) {
-        None => Ok(None),
-        Some(v) => Ok(Some(
-            int_arg(v, "replace", index)
-                .and_then(|n| u32::try_from(n).map_err(|_| value_error("value out of range")))?,
-        )),
-    }
-}
-
-fn opt_i64(args: &[Value], index: usize) -> Result<Option<i64>, EvalError> {
-    match args.get(index) {
-        None | Some(Value::None) => Ok(None),
-        Some(v) => int_arg(v, "timedelta", index).map(Some),
-    }
-}
-
 fn int_arg(value: &Value, func: &str, index: usize) -> Result<i64, EvalError> {
     match value {
         Value::Int(i) => Ok(*i),
@@ -509,6 +556,56 @@ fn int_arg(value: &Value, func: &str, index: usize) -> Result<i64, EvalError> {
             "{func}() expected an integer at position {index}"
         ))
         .into()),
+    }
+}
+
+/// Required `i32` component from a bound slot (year), CPython range wording.
+fn comp_i32(v: Option<&Value>, func: &str, name: &str) -> Result<i32, EvalError> {
+    let value = v.ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "{func}() missing required argument '{name}'"
+        )))
+    })?;
+    i32::try_from(int_arg(value, func, 0)?).map_err(|_| value_error("year out of range"))
+}
+
+/// Required `u32` component from a bound slot (month/day).
+fn comp_u32(v: Option<&Value>, func: &str, name: &str) -> Result<u32, EvalError> {
+    let value = v.ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "{func}() missing required argument '{name}'"
+        )))
+    })?;
+    u32::try_from(int_arg(value, func, 0)?).map_err(|_| value_error("value out of range"))
+}
+
+/// Optional `u32` component from a bound slot; `None`/absent → `None`.
+fn comp_opt_u32(v: Option<&Value>, func: &str) -> Result<Option<u32>, EvalError> {
+    match v {
+        None | Some(Value::None) => Ok(None),
+        Some(value) => Ok(Some(
+            u32::try_from(int_arg(value, func, 0)?)
+                .map_err(|_| value_error("value out of range"))?,
+        )),
+    }
+}
+
+/// Optional `i64` component from a bound slot (timedelta parts).
+fn comp_opt_i64(v: Option<&Value>) -> Result<Option<i64>, EvalError> {
+    match v {
+        None | Some(Value::None) => Ok(None),
+        Some(value) => int_arg(value, "timedelta", 0).map(Some),
+    }
+}
+
+/// Optional `i32` component from a bound slot (replace year).
+fn comp_opt_i32(v: Option<&Value>) -> Result<Option<i32>, EvalError> {
+    match v {
+        None | Some(Value::None) => Ok(None),
+        Some(value) => Ok(Some(
+            i32::try_from(int_arg(value, "replace", 0)?)
+                .map_err(|_| value_error("year out of range"))?,
+        )),
     }
 }
 
@@ -528,9 +625,9 @@ impl crate::eval::modules::Module for DatetimeModule {
         _state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
-        _kwargs: &indexmap::IndexMap<String, Value>,
+        kwargs: &indexmap::IndexMap<String, Value>,
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
-        call(func, args)
+        call(func, args, kwargs)
     }
 }
