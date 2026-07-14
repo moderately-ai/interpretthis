@@ -235,6 +235,23 @@ pub(super) async fn try_builtin(
             };
             Ok(Some(type_obj))
         }
+        "object" => {
+            // Bare `object()` — CPython's universal base. Takes no arguments
+            // and yields a fresh identity, supporting the common sentinel
+            // idiom `_MISSING = object()`. Identity/equality/hash all key on
+            // the instance's shared-fields Arc.
+            check_arg_count(name, args, 0, 0)?;
+            if !kwargs.is_empty() {
+                return Err(InterpreterError::TypeError(
+                    "object() takes no keyword arguments".into(),
+                )
+                .into());
+            }
+            Ok(Some(Value::Instance(crate::value::InstanceValue {
+                class_name: "object".into(),
+                fields: crate::value::shared_fields(std::collections::BTreeMap::new()),
+            })))
+        }
         "isinstance" => {
             check_arg_count(name, args, 2, 2)?;
             let obj = &args[0];
