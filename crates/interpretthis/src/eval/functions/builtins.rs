@@ -624,10 +624,18 @@ pub(super) async fn try_builtin(
                             let parsed = s.parse::<f64>().unwrap_or(*f);
                             return Ok(Some(Value::Float(parsed)));
                         }
-                        let exp =
-                            i32::try_from(n).unwrap_or(if n > 0 { i32::MAX } else { i32::MIN });
-                        let factor = 10f64.powi(exp);
-                        Ok(Some(Value::Float((f * factor).round_ties_even() / factor)))
+                        // Round to the nearest 10^|n|. Dividing by the power
+                        // (rather than multiplying by 10^n) keeps the scaled
+                        // value finite; the reverse form underflowed 10^n to
+                        // 0.0 for large |n|, yielding (x*0)/0 == NaN.
+                        let abs_exp = i32::try_from(-n).unwrap_or(i32::MAX);
+                        let pow10 = 10f64.powi(abs_exp);
+                        if !pow10.is_finite() {
+                            // 10^|n| exceeds the f64 range: every finite value
+                            // rounds to a signed zero at this scale.
+                            return Ok(Some(Value::Float(0.0_f64.copysign(*f))));
+                        }
+                        Ok(Some(Value::Float((f / pow10).round_ties_even() * pow10)))
                     },
                 ),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
