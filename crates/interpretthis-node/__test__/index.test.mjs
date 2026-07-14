@@ -251,6 +251,16 @@ test('a Set round-trips', async () => {
   assert.deepEqual([...out].sort(), [1, 2, 3])
 })
 
+test('a Python frozenset projects to a JS Set', async () => {
+  // JavaScript has no frozenset, so a Python frozenset comes back as a Set
+  // (immutability is lost across the boundary, like tuple -> array).
+  const interp = new Interpreter()
+  await interp.execute('out = frozenset([3, 1, 2, 1])')
+  const out = interp.getVariable('out')
+  assert.ok(out instanceof Set)
+  assert.deepEqual([...out].sort(), [1, 2, 3])
+})
+
 test('a Python tuple arrives as a frozen array', async () => {
   const interp = new Interpreter()
   await interp.execute('out = (1, 2)')

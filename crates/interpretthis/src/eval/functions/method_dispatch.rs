@@ -258,6 +258,18 @@ fn set_methods(
     methods::set::dispatch_set_method(items, method, args, kwargs)
 }
 
+fn frozenset_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Frozenset(items) = obj else {
+        return Err(type_mismatch("frozenset"));
+    };
+    methods::set::dispatch_frozenset_method(items, method, args, kwargs)
+}
+
 fn tuple_methods(
     obj: &mut Value,
     method: &str,
@@ -450,6 +462,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Deque { .. } => Some(deque_methods),
         Value::DefaultDict(_) => Some(defaultdict_methods),
         Value::Set(_) => Some(set_methods),
+        Value::Frozenset(_) => Some(frozenset_methods),
         Value::Tuple(_) => Some(tuple_methods),
         Value::Int(_) | Value::BigInt(_) => Some(int_methods),
         Value::Float(_) => Some(float_methods),

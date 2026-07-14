@@ -294,6 +294,24 @@ def test_sets_round_trip() -> None:
     assert interp.get_variable("out") == {1, 2, 3}
 
 
+def test_frozenset_round_trips_as_frozenset() -> None:
+    # A frozenset must come back a frozenset, not a mutable set — the sandbox
+    # cannot mutate what the host passed as immutable.
+    interp = Interpreter()
+    interp.execute("out = value", {"value": frozenset({1, 2, 3})}).check()
+    out = interp.get_variable("out")
+    assert out == frozenset({1, 2, 3})
+    assert isinstance(out, frozenset)
+
+
+def test_frozenset_built_in_sandbox_returns_frozenset() -> None:
+    interp = Interpreter()
+    interp.execute("out = frozenset([3, 1, 2, 1])").check()
+    out = interp.get_variable("out")
+    assert out == frozenset({1, 2, 3})
+    assert isinstance(out, frozenset)
+
+
 def test_big_ints_stay_exact() -> None:
     # to_json() would have stringified this. The native converter must not.
     big = 2**200 + 1

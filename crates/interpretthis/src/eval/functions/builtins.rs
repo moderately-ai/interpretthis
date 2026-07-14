@@ -1000,6 +1000,19 @@ pub(super) async fn try_builtin(
             // unhashables and collapsed every instance to one).
             Ok(Some(crate::eval::literals::build_set(state, items, tools).await?))
         }
+        "frozenset" => {
+            check_arg_count(name, args, 0, 1)?;
+            if args.is_empty() {
+                return Ok(Some(Value::Frozenset(Vec::new())));
+            }
+            let items = crate::eval::op::iter(state, &args[0], tools).await?;
+            // Reuse the set builder (dedup + unhashable rejection), then freeze.
+            let built = crate::eval::literals::build_set(state, items, tools).await?;
+            let Value::Set(elements) = built else {
+                unreachable!("build_set always returns Value::Set")
+            };
+            Ok(Some(Value::Frozenset(elements)))
+        }
         "iter" => {
             check_arg_count(name, args, 1, 2)?;
             // Two-arg form: `iter(callable, sentinel)` calls `callable` with

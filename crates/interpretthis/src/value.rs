@@ -233,6 +233,10 @@ pub enum Value {
     ),
     /// Python `set` (stored as Vec since Value isn't Hash).
     Set(Vec<Self>),
+    /// Python `frozenset` — an immutable, hashable set. Same Vec storage as
+    /// `Set`, but with no mutating methods and a `ValueKey::Frozenset`
+    /// projection so it can serve as a dict key or set member.
+    Frozenset(Vec<Self>),
     /// User-defined function (`def`) — captures closure at definition time.
     ///
     /// Wrapped in `Arc` so closures that reference a function share the
@@ -778,6 +782,13 @@ impl PartialEq for Value {
                     && a_guard.iter().zip(b_guard.iter()).all(|(x, y)| x == y)
             }
             (Self::Tuple(a), Self::Tuple(b)) | (Self::Set(a), Self::Set(b)) => a == b,
+            // set/frozenset equality is order-independent and cross-type, so
+            // `frozenset([1, 2])` keyed structurally still matches `{2, 1}`.
+            (Self::Frozenset(a), Self::Frozenset(b))
+            | (Self::Frozenset(a), Self::Set(b))
+            | (Self::Set(a), Self::Frozenset(b)) => {
+                a.len() == b.len() && a.iter().all(|x| b.contains(x))
+            }
             (Self::Dict(a), Self::Dict(b)) => a == b,
             (
                 Self::Range { start: s1, stop: e1, step: st1 },
@@ -872,6 +883,11 @@ pub enum ValueKey {
     /// inline up to 24 B, spill to heap beyond.
     String(CompactString),
     Tuple(Vec<Self>),
+    /// `frozenset` key. Element order is irrelevant to equality and hash
+    /// (two frozensets are equal iff they hold the same elements), so this
+    /// variant hand-implements set-equality in `PartialEq` and an
+    /// order-independent hash.
+    Frozenset(Vec<Self>),
     /// User-class instance key. `hash` is the precomputed value from
     /// the class's `__hash__` slot (called once at key-construction
     /// time at the async eval-layer boundary); `value` carries the
@@ -910,6 +926,11 @@ impl PartialEq for ValueKey {
             (Self::Complex(ar, ai), Self::Complex(br, bi)) => ar == br && ai == bi,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Tuple(a), Self::Tuple(b)) => a == b,
+            // Set equality: same cardinality and every element of one is in
+            // the other. Order-independent, matching Python's frozenset.
+            (Self::Frozenset(a), Self::Frozenset(b)) => {
+                a.len() == b.len() && a.iter().all(|x| b.contains(x))
+            }
             // Instance keys use structural equality on the stored
             // Value. Two Instance keys with different hashes can still
             // compare equal — Python's `__hash__` consistency rule
@@ -940,6 +961,7 @@ impl core::hash::Hash for ValueKey {
         const INSTANCE_TAG: u8 = 5;
         const COMPLEX_TAG: u8 = 6;
         const ELLIPSIS_TAG: u8 = 7;
+        const FROZENSET_TAG: u8 = 8;
         match self {
             Self::None => NONE_TAG.hash(state),
             Self::Ellipsis => ELLIPSIS_TAG.hash(state),
@@ -977,6 +999,18 @@ impl core::hash::Hash for ValueKey {
             Self::Tuple(items) => {
                 TUPLE_TAG.hash(state);
                 items.hash(state);
+            }
+            Self::Frozenset(items) => {
+                FROZENSET_TAG.hash(state);
+                // Order-independent: XOR each element's individual hash so
+                // permutations collide, agreeing with the set-equality above.
+                let mut acc: u64 = 0;
+                for item in items {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    item.hash(&mut h);
+                    acc ^= core::hash::Hasher::finish(&h);
+                }
+                acc.hash(state);
             }
             Self::Instance { hash, .. } => {
                 INSTANCE_TAG.hash(state);
@@ -1286,7 +1320,7 @@ impl Value {
             Self::List(l) => !l.lock().is_empty(),
             Self::Tuple(t) => !t.is_empty(),
             Self::Dict(d) => !d.is_empty(),
-            Self::Set(s) => !s.is_empty(),
+            Self::Set(s) | Self::Frozenset(s) => !s.is_empty(),
             // Always truthy: callables, exceptions, proxies, type/class/module
             // objects, dates, match objects. (An instance is truthy unless it
             // defines `__bool__`/`__len__`; those aren't consulted in this
@@ -1366,6 +1400,7 @@ impl Value {
             Self::Tuple(_) => "tuple",
             Self::Dict(_) => "dict",
             Self::Set(_) => "set",
+            Self::Frozenset(_) => "frozenset",
             // Both Function (named def) and Lambda (anonymous) are "function"
             // in Python's type system.
             Self::Function(_) | Self::Lambda(_) => "function",
@@ -1632,6 +1667,21 @@ impl fmt::Display for Value {
                     write!(f, "{}", item.repr())?;
                 }
                 write!(f, "}}")
+            }
+            // `frozenset({1, 2})`, or `frozenset()` when empty (CPython never
+            // renders a bare `{}`, which is an empty dict).
+            Self::Frozenset(items) => {
+                if items.is_empty() {
+                    return write!(f, "frozenset()");
+                }
+                write!(f, "frozenset({{")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item.repr())?;
+                }
+                write!(f, "}})")
             }
             Self::Function(fd) => write!(f, "<function {}>", fd.name),
             Self::Lambda(_) => write!(f, "<function <lambda>>"),
@@ -2147,7 +2197,7 @@ impl Value {
             Self::Bytes(b) => serde_json::json!(b),
             // List / Tuple / Set / Deque all project to a JSON array.
             Self::List(items) => array(&items.lock())?,
-            Self::Tuple(items) | Self::Set(items) => array(items)?,
+            Self::Tuple(items) | Self::Set(items) | Self::Frozenset(items) => array(items)?,
             Self::Deque { items, .. } => {
                 J::Array(items.iter().map(Self::to_json).collect::<Result<_, _>>()?)
             }
@@ -2256,6 +2306,7 @@ impl ValueKey {
             ))),
             Self::String(s) => Value::String(s.clone()),
             Self::Tuple(items) => Value::Tuple(items.iter().map(Self::to_value).collect()),
+            Self::Frozenset(items) => Value::Frozenset(items.iter().map(Self::to_value).collect()),
             Self::Instance { value, .. } => (**value).clone(),
         }
     }
@@ -2295,6 +2346,19 @@ impl fmt::Display for ValueKey {
                     write!(f, ",")?;
                 }
                 write!(f, ")")
+            }
+            Self::Frozenset(items) => {
+                if items.is_empty() {
+                    return write!(f, "frozenset()");
+                }
+                write!(f, "frozenset({{")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "}})")
             }
             Self::Instance { value, .. } => write!(f, "{value}"),
         }

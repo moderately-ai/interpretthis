@@ -141,6 +141,24 @@ pub(crate) fn dispatch_set_method(
             items.clear();
             Ok(MethodOutcome::shrank(Value::None, freed))
         }
+        "symmetric_difference" => {
+            let other = iterate_value(arg1(method, args)?)?;
+            let self_keys: Vec<_> = items.iter().filter_map(|v| value_to_key(v).ok()).collect();
+            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
+            let mut result: Vec<Value> = items
+                .iter()
+                .filter(|v| value_to_key(v).map_or(true, |k| !other_keys.contains(&k)))
+                .cloned()
+                .collect();
+            for item in other {
+                if value_to_key(&item).is_ok_and(|k| !self_keys.contains(&k))
+                    && !contains(&result, &item)
+                {
+                    result.push(item);
+                }
+            }
+            Ok(MethodOutcome::pure(Value::Set(result)))
+        }
         "update" => {
             let Some(arg) = args.first() else { return Ok(MethodOutcome::pure(Value::None)) };
             let new_items = iterate_value(arg)?;
@@ -153,9 +171,76 @@ pub(crate) fn dispatch_set_method(
             }
             Ok(MethodOutcome::grew(Value::None, added))
         }
+        "intersection_update" => {
+            let other = iterate_value(arg1(method, args)?)?;
+            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
+            items.retain(|v| value_to_key(v).is_ok_and(|k| other_keys.contains(&k)));
+            Ok(MethodOutcome::pure(Value::None))
+        }
+        "difference_update" => {
+            let other = iterate_value(arg1(method, args)?)?;
+            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
+            items.retain(|v| value_to_key(v).map_or(true, |k| !other_keys.contains(&k)));
+            Ok(MethodOutcome::pure(Value::None))
+        }
+        "symmetric_difference_update" => {
+            let other = iterate_value(arg1(method, args)?)?;
+            let self_keys: Vec<_> = items.iter().filter_map(|v| value_to_key(v).ok()).collect();
+            // Drop shared elements, then append the other side's uniques.
+            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
+            items.retain(|v| value_to_key(v).map_or(true, |k| !other_keys.contains(&k)));
+            let mut added = 0usize;
+            for item in other {
+                if value_to_key(&item).is_ok_and(|k| !self_keys.contains(&k))
+                    && !contains(items, &item)
+                {
+                    added += estimate_value_size(&item);
+                    items.push(item);
+                }
+            }
+            Ok(MethodOutcome::grew(Value::None, added))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "'set' object has no attribute '{method}'"
         ))
         .into()),
     }
+}
+
+/// Non-mutating `frozenset` methods — the set-algebra subset that returns a
+/// new value. Delegates to [`dispatch_set_method`] on a copy (so no mutation
+/// escapes) and rewraps any `set` result as a `frozenset`. Mutating method
+/// names raise `AttributeError`, matching CPython's immutable `frozenset`.
+pub(crate) fn dispatch_frozenset_method(
+    items: &[Value],
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    const FROZENSET_METHODS: &[&str] = &[
+        "copy",
+        "union",
+        "intersection",
+        "difference",
+        "symmetric_difference",
+        "issubset",
+        "issuperset",
+        "isdisjoint",
+    ];
+    if !FROZENSET_METHODS.contains(&method) {
+        return Err(InterpreterError::AttributeError(format!(
+            "'frozenset' object has no attribute '{method}'"
+        ))
+        .into());
+    }
+    let mut scratch = items.to_vec();
+    let outcome = dispatch_set_method(&mut scratch, method, args, kwargs)?;
+    // The delegated methods above are all non-mutating, so `scratch` is
+    // untouched and only the returned value matters; a set result becomes a
+    // frozenset, a bool stays a bool.
+    let value = match outcome.value {
+        Value::Set(v) => Value::Frozenset(v),
+        other => other,
+    };
+    Ok(MethodOutcome::pure(value))
 }

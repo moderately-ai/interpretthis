@@ -572,6 +572,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::Tuple(_) => &TUPLE_TYPE,
         Value::Dict(_) => &DICT_TYPE,
         Value::Set(_) => &SET_TYPE,
+        Value::Frozenset(_) => &FROZENSET_TYPE,
         Value::Range { .. } => &RANGE_TYPE,
         Value::Counter(_) => &COUNTER_TYPE,
         Value::Deque { .. } => &DEQUE_TYPE,
@@ -804,6 +805,27 @@ static SET_TYPE: TypeObject = TypeObject {
     missing_slot: None,
     len_slot: Some(sequence_len),
     get_attr_slot: Some(set_get_attr),
+    set_attr_slot: None,
+    has_methods_table: true,
+};
+/// `frozenset` — the immutable, hashable sibling of `set`. Shares the set's
+/// equality, membership, iteration, length, and algebra slots (all of which
+/// accept either concrete type), but adds a real `hash_slot` and exposes only
+/// the non-mutating methods via `frozenset_get_attr`.
+static FROZENSET_TYPE: TypeObject = TypeObject {
+    name: "frozenset",
+    eq_slot: set_eq,
+    hash_slot: Some(fallback_hash_slot),
+    lt_slot: noimpl_lt,
+    contains_slot: Some(sequence_contains),
+    arith_slot: set_arith,
+    iter_slot: Some(sequence_iter),
+    get_item_slot: None,
+    set_item_slot: None,
+    del_item_slot: None,
+    missing_slot: None,
+    len_slot: Some(sequence_len),
+    get_attr_slot: Some(frozenset_get_attr),
     set_attr_slot: None,
     has_methods_table: true,
 };
@@ -1200,8 +1222,8 @@ fn dict_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 }
 
 fn set_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
-    let Value::Set(a) = lhs else { return None };
-    let Value::Set(b) = rhs else { return None };
+    let (Value::Set(a) | Value::Frozenset(a)) = lhs else { return None };
+    let (Value::Set(b) | Value::Frozenset(b)) = rhs else { return None };
     if a.len() != b.len() {
         return Some(false);
     }
@@ -1451,7 +1473,7 @@ fn sequence_contains(container: &Value, item: &Value) -> Result<bool, EvalError>
         }
         return Ok(false);
     }
-    let (Value::Tuple(items) | Value::Set(items)) = container else {
+    let (Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items)) = container else {
         unreachable!("sequence_contains only attached to list/tuple/set TypeObjects")
     };
     for entry in items {
@@ -1635,9 +1657,9 @@ fn set_arith(
     rhs: &Value,
     _decimal_prec: i64,
 ) -> Option<Result<Value, EvalError>> {
-    let Value::Set(_) = lhs else { return None };
+    let (Value::Set(_) | Value::Frozenset(_)) = lhs else { return None };
     match op {
-        BinOp::Sub if matches!(rhs, Value::Set(_)) => {
+        BinOp::Sub if matches!(rhs, Value::Set(_) | Value::Frozenset(_)) => {
             Some(crate::eval::operations::apply_binop_builtin(op, lhs, rhs))
         }
         _ => None,
@@ -1667,7 +1689,7 @@ fn sequence_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
     if let Value::List(items) = value {
         return Ok(items.lock().clone());
     }
-    let (Value::Tuple(items) | Value::Set(items)) = value else {
+    let (Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items)) = value else {
         unreachable!("sequence_iter only attached to list/tuple/set TypeObjects")
     };
     Ok(items.clone())
@@ -2118,7 +2140,7 @@ fn sequence_len(value: &Value) -> Result<usize, EvalError> {
     if let Value::List(items) = value {
         return Ok(items.lock().len());
     }
-    let (Value::Tuple(items) | Value::Set(items)) = value else {
+    let (Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items)) = value else {
         unreachable!("sequence_len only on list/tuple/set TypeObjects")
     };
     Ok(items.len())
@@ -2360,6 +2382,27 @@ fn set_get_attr(value: &Value, name: &str) -> EvalResult {
         return Ok(bound_method(value, name));
     }
     Err(attribute_error("set", name))
+}
+
+/// `frozenset` exposes only the non-mutating set methods; the mutators
+/// (`add`, `update`, `pop`, …) are absent, so `fs.add` raises AttributeError
+/// exactly as CPython's immutable frozenset does.
+const FROZENSET_METHODS: &[&str] = &[
+    "copy",
+    "union",
+    "intersection",
+    "difference",
+    "symmetric_difference",
+    "issubset",
+    "issuperset",
+    "isdisjoint",
+];
+
+fn frozenset_get_attr(value: &Value, name: &str) -> EvalResult {
+    if FROZENSET_METHODS.contains(&name) {
+        return Ok(bound_method(value, name));
+    }
+    Err(attribute_error("frozenset", name))
 }
 
 // ---------------------------------------------------------------------------

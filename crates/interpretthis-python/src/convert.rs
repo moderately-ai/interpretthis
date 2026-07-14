@@ -101,6 +101,11 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
                 items.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
             PySet::new(py, converted)?.into_any()
         }
+        Value::Frozenset(items) => {
+            let converted =
+                items.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
+            PyFrozenSet::new(py, converted)?.into_any()
+        }
         Value::Dict(map) => {
             let dict = PyDict::new(py);
             for (key, val) in map {
@@ -211,7 +216,7 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
     if let Ok(set) = ob.cast::<PyFrozenSet>() {
         let items = set.iter().map(|v| py_to_value(&v)).collect::<PyResult<Vec<_>>>()?;
-        return Ok(Value::Set(items));
+        return Ok(Value::Frozenset(items));
     }
     if let Ok(dict) = ob.cast::<PyDict>() {
         let mut map: IndexMap<ValueKey, Value> = IndexMap::new();

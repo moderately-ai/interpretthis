@@ -201,6 +201,11 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
             let keys: Result<Vec<ValueKey>, _> = items.iter().map(value_to_key).collect();
             Ok(ValueKey::Tuple(keys?))
         }
+        // A frozenset is hashable; its elements are already hashable.
+        Value::Frozenset(items) => {
+            let keys: Result<Vec<ValueKey>, _> = items.iter().map(value_to_key).collect();
+            Ok(ValueKey::Frozenset(keys?))
+        }
         _ => Err(crate::error::InterpreterError::TypeError(format!(
             "unhashable type: '{}'",
             val.type_name()

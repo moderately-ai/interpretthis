@@ -136,6 +136,14 @@ pub fn render<'a>(
                     Ok(render_sequence(state, items, "{", "}", tools).await?)
                 }
             }
+            Value::Frozenset(items) => {
+                if items.is_empty() {
+                    Ok("frozenset()".to_string())
+                } else {
+                    let inner = render_sequence(state, items, "{", "}", tools).await?;
+                    Ok(format!("frozenset({inner})"))
+                }
+            }
             Value::Dict(map) => {
                 let mut out = String::from("{");
                 let mut first = true;

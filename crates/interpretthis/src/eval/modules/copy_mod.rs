@@ -60,6 +60,7 @@ fn shallow_clone(value: &Value) -> Value {
         Value::Instance(inst) => Value::Instance(inst.clone()),
         Value::Dict(map) => Value::Dict(map.clone()),
         Value::Set(items) => Value::Set(items.clone()),
+        Value::Frozenset(items) => Value::Frozenset(items.clone()),
         Value::Tuple(items) => Value::Tuple(items.clone()),
         Value::Counter(map) => Value::Counter(map.clone()),
         Value::DefaultDict(data) => Value::DefaultDict(data.clone()),
@@ -105,6 +106,9 @@ fn deep_clone_memo(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             Value::Tuple(items.iter().map(|v| deep_clone_memo(v, memo)).collect())
         }
         Value::Set(items) => Value::Set(items.iter().map(|v| deep_clone_memo(v, memo)).collect()),
+        Value::Frozenset(items) => {
+            Value::Frozenset(items.iter().map(|v| deep_clone_memo(v, memo)).collect())
+        }
         Value::Dict(map) => {
             let mut out = IndexMap::with_capacity(map.len());
             for (k, v) in map {

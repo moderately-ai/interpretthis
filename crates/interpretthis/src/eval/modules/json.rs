@@ -178,6 +178,7 @@ fn json_key(key: &ValueKey) -> String {
         ValueKey::Ellipsis
         | ValueKey::Complex(..)
         | ValueKey::Tuple(_)
+        | ValueKey::Frozenset(_)
         | ValueKey::Instance { .. } => {
             format!("{key}")
         }

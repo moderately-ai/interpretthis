@@ -321,16 +321,32 @@ fn add_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     }
 }
 
+/// Elements of a `set` or `frozenset`; `None` for any other value. Lets the
+/// set-algebra operators accept either concrete type on both operands.
+fn set_like_items(v: &Value) -> Option<&[Value]> {
+    match v {
+        Value::Set(items) | Value::Frozenset(items) => Some(items),
+        _ => None,
+    }
+}
+
+/// Wrap set-algebra output in the LEFT operand's concrete type — CPython's
+/// `a OP b` returns `type(a)`, so `frozenset - set` is a frozenset while
+/// `set - frozenset` is a plain set.
+fn wrap_set_like(left: &Value, items: Vec<Value>) -> Value {
+    if matches!(left, Value::Frozenset(_)) { Value::Frozenset(items) } else { Value::Set(items) }
+}
+
 fn sub_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     // Set difference
-    if let (Value::Set(a), Value::Set(b)) = (left, right) {
+    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
         let b_keys: Vec<_> = b.iter().filter_map(|v| value_to_key(v).ok()).collect();
         let result: Vec<Value> = a
             .iter()
             .filter(|v| value_to_key(v).map_or(true, |k| !b_keys.contains(&k)))
             .cloned()
             .collect();
-        return Ok(Value::Set(result));
+        return Ok(wrap_set_like(left, result));
     }
 
     if either_is_float(left, right) {
@@ -738,8 +754,8 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         return Ok(Value::Counter(crate::types::counter_combine_op(a, b, std::cmp::Ord::max)));
     }
     // Set union
-    if let (Value::Set(a), Value::Set(b)) = (left, right) {
-        let mut result = a.clone();
+    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
+        let mut result = a.to_vec();
         for item in b {
             let key = value_to_key(item).ok();
             let already_has = result.iter().any(|r| value_to_key(r).ok() == key);
@@ -747,7 +763,7 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
                 result.push(item.clone());
             }
         }
-        return Ok(Value::Set(result));
+        return Ok(wrap_set_like(left, result));
     }
     // Dict merge (Python 3.9+)
     if let (Value::Dict(a), Value::Dict(b)) = (left, right) {
@@ -764,7 +780,7 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
 
 fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     // Set symmetric difference
-    if let (Value::Set(a), Value::Set(b)) = (left, right) {
+    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
         let a_keys: Vec<_> = a.iter().filter_map(|v| value_to_key(v).ok()).collect();
         let b_keys: Vec<_> = b.iter().filter_map(|v| value_to_key(v).ok()).collect();
         let mut result: Vec<Value> = a
@@ -779,7 +795,7 @@ fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
                 }
             }
         }
-        return Ok(Value::Set(result));
+        return Ok(wrap_set_like(left, result));
     }
     let l = to_int(left)?;
     let r = to_int(right)?;
@@ -793,14 +809,14 @@ fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         return Ok(Value::Counter(crate::types::counter_combine_op(a, b, std::cmp::Ord::min)));
     }
     // Set intersection
-    if let (Value::Set(a), Value::Set(b)) = (left, right) {
+    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
         let b_keys: Vec<_> = b.iter().filter_map(|v| value_to_key(v).ok()).collect();
         let result: Vec<Value> = a
             .iter()
             .filter(|v| value_to_key(v).is_ok_and(|k| b_keys.contains(&k)))
             .cloned()
             .collect();
-        return Ok(Value::Set(result));
+        return Ok(wrap_set_like(left, result));
     }
     let l = to_int(left)?;
     let r = to_int(right)?;
@@ -1058,7 +1074,9 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             }
             a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
         }
-        (Value::Set(a), Value::Set(b)) => {
+        // set/frozenset equality is order-independent and cross-type:
+        // CPython's `{1, 2} == frozenset([2, 1])` is True.
+        (Value::Set(a) | Value::Frozenset(a), Value::Set(b) | Value::Frozenset(b)) => {
             if a.len() != b.len() {
                 return false;
             }

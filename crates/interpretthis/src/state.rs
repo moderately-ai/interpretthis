@@ -422,7 +422,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
                 + guard.len() * VALUE_SLOT_BYTES
                 + guard.iter().map(estimate_value_size).sum::<usize>()
         }
-        Value::Tuple(items) | Value::Set(items) => {
+        Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items) => {
             STRING_HEADER_BYTES
                 + items.len() * VALUE_SLOT_BYTES
                 + items.iter().map(estimate_value_size).sum::<usize>()
@@ -556,7 +556,9 @@ pub fn estimate_key_size(key: &crate::value::ValueKey) -> usize {
         ValueKey::Complex(..) => 16,
         ValueKey::BigInt(b) => 16 + (b.bits() as usize / 8).saturating_add(8),
         ValueKey::String(s) => s.len(),
-        ValueKey::Tuple(items) => 24 + items.iter().map(estimate_key_size).sum::<usize>(),
+        ValueKey::Tuple(items) | ValueKey::Frozenset(items) => {
+            24 + items.iter().map(estimate_key_size).sum::<usize>()
+        }
         ValueKey::Instance { value, .. } => 8 + estimate_value_size(value),
     }
 }

@@ -928,6 +928,7 @@ fn empty_for_builtin_factory(name: &str) -> EvalResult {
         "list" => Ok(Value::List(shared_list(Vec::new()))),
         "dict" => Ok(Value::Dict(IndexMap::new())),
         "set" => Ok(Value::Set(Vec::new())),
+        "frozenset" => Ok(Value::Frozenset(Vec::new())),
         "tuple" => Ok(Value::Tuple(Vec::new())),
         "str" => Ok(Value::String("".into())),
         other => {

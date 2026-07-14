@@ -735,7 +735,7 @@ pub async fn contains(
             }
             return Ok(false);
         }
-        if let Value::Tuple(items) | Value::Set(items) = container {
+        if let Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items) = container {
             for stored in items {
                 if eq(state, stored, item, tools).await? {
                     return Ok(true);

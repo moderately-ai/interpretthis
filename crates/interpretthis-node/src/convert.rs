@@ -158,6 +158,14 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
             construct_global(env, "Set", array)
         }
 
+        // JavaScript has no frozenset; project it to a JS `Set` (the same shape
+        // as a Python `set`). The immutability is lost across the boundary — a
+        // documented, one-way projection, like tuple → array.
+        Value::Frozenset(items) => {
+            let array = array_to_js(env, items, false)?;
+            construct_global(env, "Set", array)
+        }
+
         Value::Dict(map) => dict_to_js(env, map),
 
         // A Python `range` is a lazy sequence; JS has no counterpart, so it

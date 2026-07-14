@@ -75,6 +75,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "tuple",
         "dict",
         "set",
+        "frozenset",
         "iter",
         "next",
         "filter",
@@ -706,6 +707,7 @@ async fn invoke_factory(
                 "tuple" => Ok(Value::Tuple(Vec::new())),
                 "dict" => Ok(Value::Dict(indexmap::IndexMap::new())),
                 "set" => Ok(Value::Set(Vec::new())),
+                "frozenset" => Ok(Value::Frozenset(Vec::new())),
                 _ => Err(InterpreterError::TypeError(format!(
                     "defaultdict factory builtin '{builtin}' is not zero-arg constructable"
                 ))
