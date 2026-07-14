@@ -731,10 +731,14 @@ pub(super) async fn try_builtin(
             Ok(Some(Value::Bool(items.iter().any(Value::is_truthy))))
         }
         "sorted" => {
-            if args.is_empty() {
-                return Err(InterpreterError::TypeError(
-                    "sorted expected at least 1 argument".into(),
-                )
+            // `sorted` takes exactly one positional (the iterable); `key` and
+            // `reverse` are keyword-only. The old code checked only for zero
+            // args, so `sorted(xs, keyfn)` silently ignored the second argument.
+            if args.len() != 1 {
+                return Err(InterpreterError::TypeError(format!(
+                    "sorted expected 1 argument, got {}",
+                    args.len()
+                ))
                 .into());
             }
             let req = SortRequest {

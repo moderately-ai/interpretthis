@@ -176,15 +176,35 @@ pub(crate) async fn dsu_sort(
         }
         return Ok(sorted);
     }
+    // Capture the first comparison error out of the sort_by closure (which
+    // cannot return a Result). Previously `compare_lt(...).unwrap_or(false)`
+    // swallowed it, so `sorted([1, "a", 2])` returned a silently-wrong order
+    // instead of raising `TypeError: '<' not supported between ...`.
+    let mut cmp_err: Option<EvalError> = None;
     decorated.sort_by(|a, b| {
-        if crate::eval::operations::compare_lt(&a.0, &b.0).unwrap_or(false) {
-            std::cmp::Ordering::Less
-        } else if crate::eval::operations::compare_lt(&b.0, &a.0).unwrap_or(false) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
+        use std::cmp::Ordering;
+        if cmp_err.is_some() {
+            return Ordering::Equal;
+        }
+        match crate::eval::operations::compare_lt(&a.0, &b.0) {
+            Ok(true) => Ordering::Less,
+            Ok(false) => match crate::eval::operations::compare_lt(&b.0, &a.0) {
+                Ok(true) => Ordering::Greater,
+                Ok(false) => Ordering::Equal,
+                Err(e) => {
+                    cmp_err = Some(e);
+                    Ordering::Equal
+                }
+            },
+            Err(e) => {
+                cmp_err = Some(e);
+                Ordering::Equal
+            }
         }
     });
+    if let Some(e) = cmp_err {
+        return Err(e);
+    }
     let mut sorted: Vec<Value> = decorated.into_iter().map(|(_, v)| v).collect();
     if reverse {
         sorted.reverse();
