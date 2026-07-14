@@ -75,6 +75,7 @@ fn write_json(
         Value::None => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(i) => out.push_str(&i.to_string()),
+        Value::BigInt(b) => out.push_str(&b.to_string()),
         Value::Float(f) => out.push_str(&float_repr(*f)),
         Value::String(s) => write_json_str(s, out),
         Value::List(items) => {
