@@ -84,18 +84,21 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
         )
         .into()),
         "islice" => {
-            // islice(iterable, stop) or islice(iterable, start, stop, [step])
-            let iter_arg = need_arg(func, args, 0)?;
-            let items = iterate_value(iter_arg)?;
+            // islice(iterable, stop) or islice(iterable, start, stop, [step]).
+            // Bounds are validated: start/stop must be a non-negative int or
+            // None, step a positive int or None (CPython raises ValueError).
+            let items = iterate_value(need_arg(func, args, 0)?)?;
             let (start, stop, step) = match args.len() {
-                2 => (0usize, opt_usize(args, 1).unwrap_or(items.len()), 1usize),
-                3 => {
-                    (opt_usize(args, 1).unwrap_or(0), opt_usize(args, 2).unwrap_or(items.len()), 1)
-                }
+                2 => (0usize, islice_bound(args.get(1), items.len(), "Stop")?, 1usize),
+                3 => (
+                    islice_bound(args.get(1), 0, "Start")?,
+                    islice_bound(args.get(2), items.len(), "Stop")?,
+                    1usize,
+                ),
                 4 => (
-                    opt_usize(args, 1).unwrap_or(0),
-                    opt_usize(args, 2).unwrap_or(items.len()),
-                    opt_usize(args, 3).unwrap_or(1).max(1),
+                    islice_bound(args.get(1), 0, "Start")?,
+                    islice_bound(args.get(2), items.len(), "Stop")?,
+                    islice_step(args.get(3))?,
                 ),
                 _ => {
                     return Err(InterpreterError::TypeError(
@@ -264,15 +267,28 @@ fn cartesian_product(pools: &[Vec<Value>]) -> Vec<Value> {
     result.into_iter().map(Value::Tuple).collect()
 }
 
-fn opt_usize(args: &[Value], index: usize) -> Option<usize> {
-    match args.get(index)? {
-        Value::Int(n) => usize::try_from(*n).ok(),
-        Value::Bool(b) => Some(usize::from(*b)),
-        // Value::None and any non-integer falls through to None — the
-        // None case is documented behaviour (islice accepts None for
-        // unbounded start/stop), other shapes are rejected by the
-        // caller via TypeError if the slot was required.
-        _ => None,
+/// An `islice` start/stop bound: absent or `None` uses `default`; a
+/// non-negative integer is that value; anything else (negative, float, ...)
+/// raises `ValueError`, matching CPython.
+fn islice_bound(arg: Option<&Value>, default: usize, which: &str) -> Result<usize, EvalError> {
+    match arg {
+        None | Some(Value::None) => Ok(default),
+        Some(Value::Int(n)) if *n >= 0 => Ok(usize::try_from(*n).unwrap_or(usize::MAX)),
+        Some(Value::Bool(b)) => Ok(usize::from(*b)),
+        _ => Err(value_error(format!(
+            "{which} argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
+        ))),
+    }
+}
+
+/// The `islice` step: absent or `None` is 1; otherwise a positive integer.
+/// Zero, negative, or non-integer raises `ValueError`.
+fn islice_step(arg: Option<&Value>) -> Result<usize, EvalError> {
+    match arg {
+        None | Some(Value::None) => Ok(1),
+        Some(Value::Int(n)) if *n >= 1 => Ok(usize::try_from(*n).unwrap_or(usize::MAX)),
+        Some(Value::Bool(true)) => Ok(1),
+        _ => Err(value_error("Step for islice() must be a positive integer or None.")),
     }
 }
 
