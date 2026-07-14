@@ -583,8 +583,23 @@ pub fn str_format(template: &str, args: &[Value], kwargs: &IndexMap<String, Valu
                 i += 2;
             }
             Some('{') => {
+                // Scan to the matching '}', tracking nesting depth so a
+                // replacement field inside the format spec
+                // (`{:>{}}`, `{:.{}f}`) is captured whole rather than
+                // truncated at the first inner '}'.
                 let mut j = i + 1;
-                while j < chars.len() && chars.get(j) != Some(&'}') {
+                let mut depth = 1usize;
+                while j < chars.len() {
+                    match chars.get(j) {
+                        Some('{') => depth += 1,
+                        Some('}') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
                     j += 1;
                 }
                 if j >= chars.len() {
@@ -662,8 +677,56 @@ fn render_format_field(
 
     match spec {
         None | Some("") => Ok(Value::String(format!("{converted}").into())),
+        Some(s) if s.contains('{') => {
+            // The format spec itself carries replacement fields
+            // (`{:>{}}`, `{:.{}f}`). Resolve that one nesting level —
+            // consuming further positional args in order — then apply
+            // the now-literal spec.
+            let resolved = resolve_nested_spec(s, args, kwargs, auto_index)?;
+            apply_format_spec(&converted, &resolved)
+        }
         Some(s) => apply_format_spec(&converted, s),
     }
+}
+
+/// Resolve replacement fields nested inside a format spec (one level,
+/// as CPython allows). Each `{...}` is rendered to its literal text via
+/// [`render_format_field`]; the surrounding spec characters pass
+/// through unchanged.
+fn resolve_nested_spec(
+    spec: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    auto_index: &mut usize,
+) -> Result<String, EvalError> {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars.get(i) {
+            Some('{') => {
+                let mut j = i + 1;
+                while j < chars.len() && chars.get(j) != Some(&'}') {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    return Err(InterpreterError::ValueError(
+                        "unmatched '{' in format spec".into(),
+                    )
+                    .into());
+                }
+                let inner: String = chars[i + 1..j].iter().collect();
+                out.push_str(&value_text(render_format_field(&inner, args, kwargs, auto_index)?));
+                i = j + 1;
+            }
+            Some(other) => {
+                out.push(*other);
+                i += 1;
+            }
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 /// ASCII-escape a value's repr, mirroring the `!a` conversion in f-strings.

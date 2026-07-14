@@ -1,0 +1,8 @@
+print("{0}{1}{0}".format("a", "b"))
+print("{:>{}}".format("x", 5))
+print("{name!r}".format(name="test"))
+print("%(key)s" % {"key": "val"})
+print("{:+}".format(42))
+print("{:.3g}".format(0.0001234))
+print("{:e}".format(123456))
+print("%05.2f" % 3.14159)
