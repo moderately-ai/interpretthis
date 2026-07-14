@@ -129,8 +129,10 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
         Value::Bool(b) => b.into_unknown(env),
 
         // Above 2^53-1 a JS `number` loses digits. Promote rather than corrupt.
+        // `unsigned_abs` avoids the `i64::MIN.abs()` overflow (which is well
+        // outside the safe range and promotes to BigInt anyway).
         Value::Int(i) => {
-            if i.abs() <= MAX_SAFE_INTEGER {
+            if i.unsigned_abs() <= MAX_SAFE_INTEGER as u64 {
                 (*i as f64).into_unknown(env)
             } else {
                 BigInt::from(*i).into_unknown(env)
@@ -162,7 +164,7 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
         // materialises as an array. The alternative — an opaque handle — would
         // be useless to a JS caller.
         Value::Range { start, stop, step } => {
-            let items: Vec<Value> = range_items(*start, *stop, *step);
+            let items: Vec<Value> = range_items(*start, *stop, *step)?;
             array_to_js(env, &items, false)
         }
 
@@ -205,17 +207,42 @@ fn bigint_to_js<'env>(env: &'env Env, value: &num_bigint::BigInt) -> Result<Unkn
     BigInt { sign_bit: sign == num_bigint::Sign::Minus, words }.into_unknown(env)
 }
 
-fn range_items(start: i64, stop: i64, step: i64) -> Vec<Value> {
-    let mut items = Vec::new();
+/// Cap on how many elements a `range` may materialise into a JS array. A larger
+/// range would exhaust memory; the interpreter keeps ranges lazy, but the JS
+/// boundary has no lazy sequence, so an oversized range is an error, not an OOM.
+const MAX_RANGE_MATERIALIZE: i128 = 100_000_000;
+
+fn range_items(start: i64, stop: i64, step: i64) -> Result<Vec<Value>> {
     if step == 0 {
-        return items;
+        return Ok(Vec::new());
     }
+    // Count in i128 so `stop - start` (up to ~2^64) cannot overflow, and reject
+    // an oversized range before allocating.
+    let (s, e, st) = (i128::from(start), i128::from(stop), i128::from(step));
+    let span = e - s;
+    let count: i128 = if (st > 0 && span > 0) || (st < 0 && span < 0) {
+        span / st + i128::from(span % st != 0)
+    } else {
+        0
+    };
+    if count > MAX_RANGE_MATERIALIZE {
+        return Err(Error::new(
+            Status::GenericFailure,
+            format!("range with {count} elements is too large to convert to a JS array"),
+        ));
+    }
+    let mut items = Vec::with_capacity(count.max(0) as usize);
     let mut current = start;
+    // `checked_add` guards the `i64::MAX`/`i64::MIN` edge (a step past the bound
+    // would otherwise wrap and loop forever).
     while (step > 0 && current < stop) || (step < 0 && current > stop) {
         items.push(Value::Int(current));
-        current += step;
+        match current.checked_add(step) {
+            Some(next) => current = next,
+            None => break,
+        }
     }
-    items
+    Ok(items)
 }
 
 fn array_to_js<'env>(env: &'env Env, items: &[Value], freeze: bool) -> Result<Unknown<'env>> {
@@ -334,13 +361,26 @@ fn js_bigint_to_value(bigint: &BigInt) -> Value {
 }
 
 fn object_to_value(env: &Env, value: Unknown<'_>) -> Result<Value> {
-    if value.is_buffer()? {
-        let buffer: Buffer = Buffer::from_unknown(value)?;
-        return Ok(Value::Bytes(buffer.to_vec()));
-    }
-    if value.is_typedarray()? {
-        let buffer: Buffer = Buffer::from_unknown(value)?;
-        return Ok(Value::Bytes(buffer.to_vec()));
+    // Node's `is_buffer` returns true for *any* typed array, so both are gated
+    // on the constructor: a Node `Buffer` / `Uint8Array` maps to bytes, but
+    // another typed array (Float64Array, Int32Array, …) carries element
+    // *values*, not raw bytes — returning the raw memory (e.g. 24 bytes for
+    // `Float64Array([1,2,3])`) is silent corruption, so reject it.
+    if value.is_buffer()? || value.is_typedarray()? {
+        let object = value.coerce_to_object()?;
+        match constructor_name(&object)?.as_deref() {
+            Some("Buffer" | "Uint8Array" | "Uint8ClampedArray") => {
+                let buffer: Buffer = Buffer::from_unknown(value)?;
+                return Ok(Value::Bytes(buffer.to_vec()));
+            }
+            other => {
+                return Err(type_error(format!(
+                    "interpretthis: {} is not supported; convert it to a plain Array (numbers) \
+                     or a Uint8Array (bytes) first",
+                    other.unwrap_or("this typed array")
+                )));
+            }
+        }
     }
     if value.is_date()? {
         let dt: DateTime<Utc> = DateTime::<Utc>::from_unknown(value)?;
@@ -386,6 +426,11 @@ fn set_to_value(env: &Env, value: &Unknown<'_>) -> Result<Value> {
         object.get_named_property("values")?;
     let iterator = values.apply(object.to_unknown(), ())?;
     let items = drain_iterator(env, iterator)?;
+    // A JS Set can hold an array/object; Python set elements must be hashable,
+    // so validate each element (discarding the key) before building the set.
+    for item in &items {
+        to_key(item)?;
+    }
     Ok(Value::Set(items))
 }
 
@@ -428,8 +473,38 @@ fn drain_iterator(env: &Env, iterator: Unknown<'_>) -> Result<Vec<Value>> {
     Ok(items)
 }
 
+/// The name of an object's constructor (`obj.constructor.name`), for the plain
+/// vs class-instance and typed-array distinctions. `None` for a null-prototype
+/// object or a missing/anonymous constructor.
+fn constructor_name(object: &Object) -> Result<Option<String>> {
+    let ctor: Unknown = object.get_named_property("constructor")?;
+    if ctor.get_type()? != ValueType::Function {
+        return Ok(None);
+    }
+    let ctor_obj = ctor.coerce_to_object()?;
+    let name: Unknown = ctor_obj.get_named_property("name")?;
+    if name.get_type()? == ValueType::String {
+        Ok(Some(name.coerce_to_string()?.into_utf8()?.as_str()?.to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 fn plain_object_to_value(env: &Env, value: Unknown<'_>) -> Result<Value> {
     let object = value.coerce_to_object()?;
+    // Only a plain object (or a null-prototype object) becomes a dict. A class
+    // instance — an Error, a Date subclass, a user class — must not silently
+    // collapse to `{}` (its data lives in non-enumerable/prototype properties
+    // that `Object.keys` never sees).
+    match constructor_name(&object)?.as_deref() {
+        None | Some("Object") => {}
+        Some(other) => {
+            return Err(type_error(format!(
+                "interpretthis: cannot pass a JavaScript {other} instance into the sandbox; \
+                 only plain objects convert to a dict"
+            )));
+        }
+    }
     let names = Object::keys(&object)?;
 
     let mut map: IndexMap<ValueKey, Value> = IndexMap::new();

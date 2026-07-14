@@ -49,16 +49,27 @@ pub struct Config {
     pub max_while_iterations: Option<i64>,
     pub max_memory_bytes: Option<i64>,
     pub max_stdout_bytes: Option<i64>,
-    pub max_concurrent_tools: Option<u32>,
+    // i64 (not u32): a JS `-1` would otherwise be coerced by ECMAScript
+    // ToUint32 to 4294967295, silently disabling the limit. As i64 it is
+    // range-validated below.
+    pub max_concurrent_tools: Option<i64>,
     /// Wall-clock budget in **seconds**. Omit for no limit.
     pub max_execution_time: Option<f64>,
-    pub max_recursion_depth: Option<u32>,
+    pub max_recursion_depth: Option<i64>,
     pub max_int_bits: Option<i64>,
 }
 
 fn positive(field: &str, value: i64) -> Result<u64> {
     u64::try_from(value)
         .map_err(|_| Error::new(Status::InvalidArg, format!("{field} must not be negative")))
+}
+
+/// A non-negative value that fits `u32` — rejects a negative (which JS ToUint32
+/// would wrap into a huge limit) and an out-of-range value.
+fn positive_u32(field: &str, value: i64) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        Error::new(Status::InvalidArg, format!("{field} must be between 0 and {}", u32::MAX))
+    })
 }
 
 impl Config {
@@ -81,7 +92,7 @@ impl Config {
             config.max_stdout_bytes = positive("maxStdoutBytes", v)?;
         }
         if let Some(v) = self.max_concurrent_tools {
-            config.max_concurrent_tools = v;
+            config.max_concurrent_tools = positive_u32("maxConcurrentTools", v)?;
         }
         if let Some(secs) = self.max_execution_time {
             if !secs.is_finite() || secs < 0.0 {
@@ -93,7 +104,7 @@ impl Config {
             config.max_execution_time = Some(Duration::from_secs_f64(secs));
         }
         if let Some(v) = self.max_recursion_depth {
-            config.max_recursion_depth = v;
+            config.max_recursion_depth = positive_u32("maxRecursionDepth", v)?;
         }
         if let Some(v) = self.max_int_bits {
             config.max_int_bits = positive("maxIntBits", v)?;

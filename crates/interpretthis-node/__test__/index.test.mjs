@@ -307,3 +307,59 @@ test('a foreign state blob is refused', () => {
   // The interpreter never silently migrates a state format.
   assert.throws(() => new Interpreter().importState(Buffer.from('not a state blob')))
 })
+
+// --- binding-boundary regressions -----------------------------------------
+
+test('a non-Uint8 typed array is rejected, not read as raw bytes', async () => {
+  const interp = new Interpreter()
+  assert.throws(
+    () => interp.execute('out = a', { a: new Float64Array([1, 2, 3]) }),
+    /typed array|Float64Array/,
+  )
+})
+
+test('a Uint8Array still becomes bytes', async () => {
+  const interp = new Interpreter()
+  await interp.execute('out = a', { a: new Uint8Array([1, 2, 3]) })
+  const out = interp.getVariable('out')
+  assert.deepEqual([...out], [1, 2, 3])
+})
+
+test('a class instance (Error) is rejected, not collapsed to {}', async () => {
+  const interp = new Interpreter()
+  assert.throws(
+    () => interp.execute('out = e', { e: new Error('boom') }),
+    /Error instance|plain objects/,
+  )
+})
+
+test('a plain object still becomes a dict', async () => {
+  const interp = new Interpreter()
+  await interp.execute('out = o["a"]', { o: { a: 1, b: 2 } })
+  assert.equal(interp.getVariable('out'), 1)
+})
+
+test('a Set with an unhashable element is rejected', async () => {
+  const interp = new Interpreter()
+  assert.throws(
+    () => interp.execute('out = s', { s: new Set([[1, 2]]) }),
+    /unhashable/,
+  )
+})
+
+test('i64::MIN comes back as a BigInt without panicking', async () => {
+  const interp = new Interpreter()
+  await interp.execute('out = -(2**63)')
+  assert.equal(interp.getVariable('out'), -9223372036854775808n)
+})
+
+test('an oversized range is rejected instead of exhausting memory', async () => {
+  const interp = new Interpreter()
+  await interp.execute('out = range(10**18)')
+  assert.throws(() => interp.getVariable('out'), /too large/)
+})
+
+test('a negative maxRecursionDepth is rejected, not wrapped to a huge limit', () => {
+  assert.throws(() => new Interpreter(null, { maxRecursionDepth: -1 }), /maxRecursionDepth/)
+  assert.throws(() => new Interpreter(null, { maxConcurrentTools: -1 }), /maxConcurrentTools/)
+})
