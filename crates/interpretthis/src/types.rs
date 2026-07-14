@@ -168,7 +168,7 @@ pub type EqSlot = fn(lhs: &Value, rhs: &Value) -> Option<bool>;
 /// Function-pointer shape for the hash slot. The dispatcher already knows
 /// the operand's type matches the slot's owner (it looked up the slot via
 /// `type_of`), so the slot only sees its own variant.
-pub type HashSlot = fn(value: &Value) -> i64;
+pub type HashSlot = fn(value: &Value) -> Result<i64, EvalError>;
 
 /// Function-pointer shape for the less-than slot. Mirrors `EqSlot`.
 pub type LtSlot = fn(lhs: &Value, rhs: &Value) -> Option<bool>;
@@ -456,7 +456,7 @@ pub fn dispatch_hash(state: &InterpreterState, value: &Value) -> Result<i64, Eva
     let type_obj = type_of(value);
     type_obj.hash_slot.map_or_else(
         || Err(InterpreterError::TypeError(format!("unhashable type: '{}'", type_obj.name)).into()),
-        |slot| Ok(slot(value)),
+        |slot| slot(value),
     )
 }
 
@@ -1661,23 +1661,23 @@ const fn finalize_hash(h: i64) -> i64 {
     if h == -1 { -2 } else { h }
 }
 
-const fn none_hash(_value: &Value) -> i64 {
+fn none_hash(_value: &Value) -> Result<i64, EvalError> {
     // CPython 3.12 returns a deterministic constant for `hash(None)` (the
     // address of `Py_None`'s singleton, stable across runs). 0 is the
     // platform-independent choice that preserves `hash(None) == hash(None)`
     // and never collides with `hash(0)` after `finalize_hash` (0 stays 0).
-    0
+    Ok(0)
 }
 
-fn bool_hash(value: &Value) -> i64 {
+fn bool_hash(value: &Value) -> Result<i64, EvalError> {
     let Value::Bool(b) = value else { unreachable!("bool_hash sees only Value::Bool") };
     // `hash(True) == hash(1)` and `hash(False) == hash(0)` per CPython —
     // bool is a subclass of int, so its hash IS the int hash.
-    finalize_hash(int_hash_impl(i64::from(*b)))
+    Ok(finalize_hash(int_hash_impl(i64::from(*b))))
 }
 
-fn int_hash_slot(value: &Value) -> i64 {
-    match value {
+fn int_hash_slot(value: &Value) -> Result<i64, EvalError> {
+    Ok(match value {
         Value::Int(n) => finalize_hash(int_hash_impl(*n)),
         Value::BigInt(n) => {
             // Reduce modulo HASH_MODULUS like CPython's long_hash.
@@ -1690,7 +1690,7 @@ fn int_hash_slot(value: &Value) -> i64 {
             finalize_hash(rem.to_i64().unwrap_or(0))
         }
         _ => unreachable!("int_hash_slot sees only int variants"),
-    }
+    })
 }
 
 #[expect(
@@ -1702,9 +1702,9 @@ const fn int_hash_impl(n: i64) -> i64 {
     if n < 0 { -(abs as i64) } else { abs as i64 }
 }
 
-fn float_hash_slot(value: &Value) -> i64 {
+fn float_hash_slot(value: &Value) -> Result<i64, EvalError> {
     let Value::Float(f) = value else { unreachable!("float_hash_slot sees only Value::Float") };
-    finalize_hash(float_hash_impl(*f))
+    Ok(finalize_hash(float_hash_impl(*f)))
 }
 
 /// `_Py_HashDouble` for `f64`. Operates on the magnitude via `frexp`,
@@ -1794,17 +1794,17 @@ fn frexp(v: f64) -> (f64, i32) {
     clippy::cast_possible_wrap,
     reason = "Python's hash() returns a signed integer; reinterpreting u64 bits as i64 via wrapping matches CPython's Py_hash_t on 64-bit platforms"
 )]
-fn fallback_hash_slot(value: &Value) -> i64 {
+fn fallback_hash_slot(value: &Value) -> Result<i64, EvalError> {
     use std::hash::{Hash as _, Hasher as _};
-    // `value_to_key` would error on unhashable; we shouldn't reach here
-    // unless the value's TypeObject said it's hashable, so the unwrap-or-0
-    // fallback is defensive against a misconfigured slot.
-    let Ok(key) = crate::eval::literals::value_to_key(value) else {
-        return 0;
-    };
+    // A container whose TypeObject says it is hashable (a tuple) may still hold
+    // an unhashable element — `hash((1, [2]))`. `value_to_key` recurses and
+    // raises `TypeError: unhashable type` on that inner element; propagate it
+    // rather than returning 0 (which also collapsed every such tuple to one
+    // bucket).
+    let key = crate::eval::literals::value_to_key(value)?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut hasher);
-    finalize_hash(hasher.finish() as i64)
+    Ok(finalize_hash(hasher.finish() as i64))
 }
 
 // ---------------------------------------------------------------------------
