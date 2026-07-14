@@ -61,6 +61,37 @@ pub(crate) fn to_len_i64(len: usize) -> Result<i64, EvalError> {
         .map_err(|_| InterpreterError::Runtime("collection length overflows i64".into()).into())
 }
 
+/// Resolve the optional `start`/`end` arguments of a sequence `list`/`tuple`
+/// `.index(value, start, stop)` into a half-open `[start, end)` slot range over
+/// `len` elements. Unlike the `str` search family, these bounds are
+/// integer-only (CPython raises `TypeError` on `None`), so they route through
+/// `value_to_i64`; negative indices count from the end and clamp to `[0, len]`.
+pub(crate) fn sequence_index_range(
+    method: &str,
+    args: &[Value],
+    len: usize,
+) -> Result<(usize, usize), EvalError> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(
+            InterpreterError::TypeError(format!("{method}() takes 1 to 3 arguments")).into()
+        );
+    }
+    let len_i = to_len_i64(len)?;
+    let clamp = |v: i64| -> i64 {
+        let v = if v < 0 { v + len_i } else { v };
+        v.clamp(0, len_i)
+    };
+    let start = match args.get(1) {
+        None => 0,
+        Some(v) => clamp(value_to_i64(v)?),
+    };
+    let end = match args.get(2) {
+        None => len_i,
+        Some(v) => clamp(value_to_i64(v)?),
+    };
+    Ok((to_index(start)?, to_index(end.max(start))?))
+}
+
 /// Python's `int(float)`: truncate toward zero to the *exact* integer.
 ///
 /// - `NaN` raises `ValueError` (CPython: "cannot convert float NaN to integer").

@@ -12,7 +12,9 @@
 
 use indexmap::IndexMap;
 
-use super::super::{MethodOutcome, arg1, reject_kwargs, to_index, to_len_i64, value_to_i64};
+use super::super::{
+    MethodOutcome, arg1, reject_kwargs, sequence_index_range, to_index, to_len_i64, value_to_i64,
+};
 use crate::{
     error::{EvalError, InterpreterError},
     eval::control_flow::iterate_value,
@@ -36,13 +38,19 @@ pub(crate) fn dispatch_list_method(
         // `list.copy()` is a shallow copy: new SharedList, same inner elements.
         "copy" => Ok(MethodOutcome::pure(Value::List(shared_list(items.clone())))),
         "count" => {
-            let target = arg1(method, args)?;
-            let count = items.iter().filter(|v| values_equal_pub(v, target)).count();
+            if args.len() != 1 {
+                return Err(InterpreterError::TypeError(
+                    "count() takes exactly one argument".into(),
+                )
+                .into());
+            }
+            let count = items.iter().filter(|v| values_equal_pub(v, &args[0])).count();
             Ok(MethodOutcome::pure(Value::Int(to_len_i64(count)?)))
         }
         "index" => {
             let target = arg1(method, args)?;
-            for (i, item) in items.iter().enumerate() {
+            let (start, end) = sequence_index_range(method, args, items.len())?;
+            for (i, item) in items.iter().enumerate().take(end).skip(start) {
                 if values_equal_pub(item, target) {
                     return Ok(MethodOutcome::pure(Value::Int(to_len_i64(i)?)));
                 }

@@ -20,7 +20,7 @@ pub(crate) fn dispatch_tuple_method(
     crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
         "count" => {
-            if args.is_empty() {
+            if args.len() != 1 {
                 return Err(
                     InterpreterError::TypeError("count() takes exactly 1 argument".into()).into()
                 );
@@ -32,14 +32,15 @@ pub(crate) fn dispatch_tuple_method(
             Ok(Value::Int(to_len_i64(count)?))
         }
         "index" => {
-            if args.is_empty() {
-                return Err(InterpreterError::TypeError(
+            let target = args.first().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError(
                     "index() takes at least 1 argument".into(),
-                )
-                .into());
-            }
-            for (i, item) in items.iter().enumerate() {
-                if crate::eval::operations::values_equal_pub(item, &args[0]) {
+                ))
+            })?;
+            let (start, end) =
+                crate::eval::functions::sequence_index_range(method, args, items.len())?;
+            for (i, item) in items.iter().enumerate().take(end).skip(start) {
+                if crate::eval::operations::values_equal_pub(item, target) {
                     return Ok(Value::Int(to_len_i64(i)?));
                 }
             }

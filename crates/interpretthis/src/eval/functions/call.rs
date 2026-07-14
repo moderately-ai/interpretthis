@@ -612,7 +612,7 @@ async fn list_eq_method(
     kwargs: &IndexMap<String, Value>,
     tools: &Tools,
 ) -> Result<Option<Value>, EvalError> {
-    use crate::eval::functions::{reject_kwargs, to_len_i64};
+    use crate::eval::functions::{reject_kwargs, sequence_index_range, to_len_i64};
 
     reject_kwargs(method_name, kwargs)?;
     let needle = args.first().ok_or_else(|| {
@@ -652,10 +652,26 @@ async fn list_eq_method(
         }
     };
 
+    // `index` searches only the `[start, stop)` window; `count`/`remove` scan
+    // the whole list and take exactly the needle. (Arity is checked here, once
+    // the receiver is confirmed to be a list, so non-list receivers still fall
+    // through to their own method table above.)
+    let (start, end) = if method_name == "index" {
+        sequence_index_range(method_name, args, items.len())?
+    } else {
+        if args.len() != 1 {
+            return Err(InterpreterError::TypeError(format!(
+                "{method_name}() takes exactly one argument ({} given)",
+                args.len()
+            ))
+            .into());
+        }
+        (0, items.len())
+    };
     // Find first equal index (shared by index/remove).
     let mut first_eq: Option<usize> = None;
     let mut count = 0i64;
-    for (i, item) in items.iter().enumerate() {
+    for (i, item) in items.iter().enumerate().take(end).skip(start) {
         if crate::eval::op::eq(state, item, needle, tools).await? {
             count = count.saturating_add(1);
             if first_eq.is_none() {
