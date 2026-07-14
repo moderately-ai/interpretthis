@@ -52,9 +52,15 @@ pub async fn eval_call(
             let val = eval_expr(state, &kw.value, tools).await?;
             if let Value::Dict(map) = val {
                 for (k, v) in map {
-                    if let ValueKey::String(key_str) = k {
-                        kwargs.insert(key_str.into(), v);
-                    }
+                    // A non-string key raises `TypeError: keywords must be
+                    // strings` — it was previously skipped silently, so
+                    // `f(**{1: 2})` quietly passed no arguments.
+                    let ValueKey::String(key_str) = k else {
+                        return Err(
+                            InterpreterError::TypeError("keywords must be strings".into()).into()
+                        );
+                    };
+                    kwargs.insert(key_str.into(), v);
                 }
             } else {
                 return Err(InterpreterError::TypeError(
