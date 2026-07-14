@@ -551,6 +551,7 @@ pub fn estimate_key_size(key: &crate::value::ValueKey) -> usize {
         ValueKey::None => 0,
         ValueKey::Bool(_) => 1,
         ValueKey::Int(_) | ValueKey::Float(_) => 8,
+        ValueKey::Complex(..) => 16,
         ValueKey::BigInt(b) => 16 + (b.bits() as usize / 8).saturating_add(8),
         ValueKey::String(s) => s.len(),
         ValueKey::Tuple(items) => 24 + items.iter().map(estimate_key_size).sum::<usize>(),

@@ -34,6 +34,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "str",
     "int",
     "float",
+    "complex",
     "bool",
     "type",
     "isinstance",

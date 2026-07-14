@@ -47,6 +47,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "str",
         "int",
         "float",
+        "complex",
         "bool",
         "type",
         "isinstance",

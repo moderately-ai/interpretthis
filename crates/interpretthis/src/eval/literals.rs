@@ -191,6 +191,11 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
         Value::Int(i) => Ok(ValueKey::Int(*i)),
         Value::BigInt(i) => Ok(ValueKey::BigInt((**i).clone())),
         Value::Float(f) => Ok(float_to_key(*f)),
+        // A real complex (`imag == 0`) folds to the float/int key so it shares a
+        // slot with equal ints/floats (`{1, 1+0j}` -> one entry). `+0.0`
+        // normalises `-0.0` so signed zeros key alike.
+        Value::Complex(c) if c.im == 0.0 => Ok(float_to_key(c.re)),
+        Value::Complex(c) => Ok(ValueKey::Complex((c.re + 0.0).to_bits(), (c.im + 0.0).to_bits())),
         Value::String(s) => Ok(ValueKey::String(s.clone())),
         Value::Tuple(items) => {
             let keys: Result<Vec<ValueKey>, _> = items.iter().map(value_to_key).collect();

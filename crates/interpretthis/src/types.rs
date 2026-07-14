@@ -565,6 +565,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::Bool(_) => &BOOL_TYPE,
         Value::Int(_) | Value::BigInt(_) => &INT_TYPE,
         Value::Float(_) => &FLOAT_TYPE,
+        Value::Complex(_) => &COMPLEX_TYPE,
         Value::String(_) => &STR_TYPE,
         Value::Bytes(_) => &BYTES_TYPE,
         Value::List(_) => &LIST_TYPE,
@@ -671,6 +672,26 @@ static FLOAT_TYPE: TypeObject = TypeObject {
     del_item_slot: None,
     missing_slot: None,
     len_slot: None,
+    get_attr_slot: Some(noattr_get_attr),
+    set_attr_slot: None,
+    has_methods_table: false,
+};
+static COMPLEX_TYPE: TypeObject = TypeObject {
+    name: "complex",
+    eq_slot: complex_eq,
+    hash_slot: Some(complex_hash_slot),
+    // Ordering is a TypeError for complex; `noimpl_lt` -> None -> the dispatcher
+    // raises "unsupported operand type(s) for <".
+    lt_slot: noimpl_lt,
+    contains_slot: None,
+    arith_slot: complex_arith,
+    iter_slot: None,
+    get_item_slot: None,
+    set_item_slot: None,
+    del_item_slot: None,
+    missing_slot: None,
+    len_slot: None,
+    // `.real`/`.imag`/`.conjugate()` are wired in a later commit.
     get_attr_slot: Some(noattr_get_attr),
     set_attr_slot: None,
     has_methods_table: false,
@@ -1284,6 +1305,90 @@ fn str_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::String(a) = lhs else { return None };
     let Value::String(b) = rhs else { return None };
     Some(Ok(a < b))
+}
+
+/// Coerce a numeric value to `Complex64` for complex arithmetic/equality.
+/// `None` for a non-numeric operand (so the caller returns NotImplemented).
+pub(crate) fn value_to_complex(v: &Value) -> Option<num_complex::Complex64> {
+    use num_traits::ToPrimitive as _;
+    let re = match v {
+        Value::Complex(c) => return Some(**c),
+        Value::Float(f) => *f,
+        #[expect(clippy::cast_precision_loss, reason = "matches Python complex(int) coercion")]
+        Value::Int(i) => *i as f64,
+        Value::Bool(b) => f64::from(*b),
+        Value::BigInt(b) => b.to_f64()?,
+        _ => return None,
+    };
+    Some(num_complex::Complex64::new(re, 0.0))
+}
+
+/// Arithmetic where at least one operand is `complex`: `+ - * / **` coerce the
+/// other operand (int/float/bool/BigInt) to complex; `//` and `%` raise
+/// TypeError (CPython has no floor/mod for complex); division by zero raises
+/// ZeroDivisionError.
+fn complex_arith(
+    op: BinOp,
+    lhs: &Value,
+    rhs: &Value,
+    _decimal_prec: i64,
+) -> Option<Result<Value, EvalError>> {
+    if !matches!(lhs, Value::Complex(_)) && !matches!(rhs, Value::Complex(_)) {
+        return None;
+    }
+    let a = value_to_complex(lhs)?;
+    let b = value_to_complex(rhs)?;
+    let out = match op {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mul => a * b,
+        BinOp::Div => {
+            if b.re == 0.0 && b.im == 0.0 {
+                return Some(Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                    "ZeroDivisionError",
+                    "complex division by zero",
+                ))));
+            }
+            a / b
+        }
+        // An integer exponent uses exact repeated squaring (`powi`), so
+        // `1j**2 == (-1+0j)` exactly rather than carrying float error from the
+        // exp/log path; other exponents use the general complex power.
+        BinOp::Pow => match rhs {
+            Value::Int(n) => i32::try_from(*n).map_or_else(|_| a.powc(b), |e| a.powi(e)),
+            Value::Bool(bl) => a.powi(i32::from(*bl)),
+            _ => a.powc(b),
+        },
+        BinOp::FloorDiv | BinOp::Mod => {
+            return Some(Err(InterpreterError::TypeError(
+                "can't take floor or mod of complex number.".into(),
+            )
+            .into()));
+        }
+    };
+    Some(Ok(Value::Complex(Box::new(out))))
+}
+
+/// `complex` equality: value-equal to another complex or a real number with a
+/// zero imaginary part; unequal (not an error) to a non-number.
+fn complex_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
+    if !matches!(lhs, Value::Complex(_)) && !matches!(rhs, Value::Complex(_)) {
+        return None;
+    }
+    match (value_to_complex(lhs), value_to_complex(rhs)) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => Some(false),
+    }
+}
+
+/// CPython's complex hash: `hash(re) + _PyHASH_IMAG * hash(im)` in wrapping
+/// `Py_hash_t`. With `im == 0` this reduces to the real part's hash, so
+/// `hash(1+0j) == hash(1)` and complex/int/float share dict and set slots.
+fn complex_hash_slot(value: &Value) -> Result<i64, EvalError> {
+    let Value::Complex(c) = value else { unreachable!("complex_hash_slot sees only Complex") };
+    let combined =
+        float_hash_impl(c.re).wrapping_add(1_000_003_i64.wrapping_mul(float_hash_impl(c.im)));
+    Ok(finalize_hash(combined))
 }
 
 fn bytes_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {

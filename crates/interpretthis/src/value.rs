@@ -834,6 +834,11 @@ pub enum ValueKey {
     /// `Int(2)` so that `{2: x}[2.0]` hits the same slot, matching CPython's
     /// `hash(2.0) == hash(2)` numeric-key unification.
     Float(u64),
+    /// Non-real `complex` key: raw IEEE-754 bits of `(real, imag)`. A real
+    /// complex (`imag == 0`) never reaches this variant — it folds to the
+    /// float/int key in `value_to_key`, so `{1, 1+0j}` dedups and complex
+    /// keys share slots with equal ints/floats.
+    Complex(u64, u64),
     /// String dict key. Same SSO rationale as [`Value::String`] —
     /// inline up to 24 B, spill to heap beyond.
     String(CompactString),
@@ -872,6 +877,7 @@ impl PartialEq for ValueKey {
                 i == &num_bigint::BigInt::from(i64::from(*b))
             }
             (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::Complex(ar, ai), Self::Complex(br, bi)) => ar == br && ai == bi,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Tuple(a), Self::Tuple(b)) => a == b,
             // Instance keys use structural equality on the stored
@@ -902,6 +908,7 @@ impl core::hash::Hash for ValueKey {
         const STRING_TAG: u8 = 3;
         const TUPLE_TAG: u8 = 4;
         const INSTANCE_TAG: u8 = 5;
+        const COMPLEX_TAG: u8 = 6;
         match self {
             Self::None => NONE_TAG.hash(state),
             Self::Bool(b) => {
@@ -925,6 +932,11 @@ impl core::hash::Hash for ValueKey {
             Self::Float(bits) => {
                 FLOAT_TAG.hash(state);
                 bits.hash(state);
+            }
+            Self::Complex(re, im) => {
+                COMPLEX_TAG.hash(state);
+                re.hash(state);
+                im.hash(state);
             }
             Self::String(s) => {
                 STRING_TAG.hash(state);
@@ -2093,6 +2105,10 @@ impl ValueKey {
             Self::Int(i) => Value::Int(*i),
             Self::BigInt(i) => crate::value::int_from_bigint(i.clone()),
             Self::Float(bits) => Value::Float(f64::from_bits(*bits)),
+            Self::Complex(re, im) => Value::Complex(Box::new(num_complex::Complex64::new(
+                f64::from_bits(*re),
+                f64::from_bits(*im),
+            ))),
             Self::String(s) => Value::String(s.clone()),
             Self::Tuple(items) => Value::Tuple(items.iter().map(Self::to_value).collect()),
             Self::Instance { value, .. } => (**value).clone(),
@@ -2112,6 +2128,14 @@ impl fmt::Display for ValueKey {
             // shared formatter still handles them for parity if one is built
             // directly.
             Self::Float(bits) => write_python_float(f, f64::from_bits(*bits)),
+            Self::Complex(re, im) => write!(
+                f,
+                "{}",
+                format_complex(&num_complex::Complex64::new(
+                    f64::from_bits(*re),
+                    f64::from_bits(*im)
+                ))
+            ),
             Self::String(s) => write!(f, "'{s}'"),
             Self::Tuple(items) => {
                 write!(f, "(")?;

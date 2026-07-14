@@ -822,6 +822,7 @@ pub async fn eval_unaryop(
             Value::Int(_)
             | Value::BigInt(_)
             | Value::Float(_)
+            | Value::Complex(_)
             | Value::Decimal(_)
             | Value::Fraction(_) => Ok(operand.clone()),
             Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
@@ -840,6 +841,7 @@ pub async fn eval_unaryop(
             )),
             Value::BigInt(b) => Ok(crate::value::int_from_bigint(-(*b.clone()))),
             Value::Float(f) => Ok(Value::Float(-*f)),
+            Value::Complex(c) => Ok(Value::Complex(Box::new(-(**c)))),
             Value::Bool(b) => Ok(Value::Int(if *b { -1 } else { 0 })),
             Value::Decimal(d) => Ok(Value::Decimal(Box::new(-(*d.clone())))),
             Value::Fraction(fr) => Ok(Value::Fraction(Box::new(-(*fr.clone())))),

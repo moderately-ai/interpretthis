@@ -11,7 +11,7 @@ use super::{
     float_to_int_exact,
     helpers::{
         SortRequest, apply_key_fn, bytes_from_int_items, check_isinstance, dsu_sort, object_id,
-        parse_int_str, pow_three_arg, type_arg_name,
+        parse_complex_str, parse_int_str, pow_three_arg, type_arg_name,
     },
     method_dispatch::CallArgs,
     resolve_proxy, to_len_i64, value_to_i64,
@@ -201,6 +201,55 @@ pub(super) async fn try_builtin(
                 ))
                 .into()),
             }
+        }
+        "complex" => {
+            use num_complex::Complex64;
+            check_arg_count(name, args, 0, 2)?;
+            let malformed = || {
+                EvalError::Exception(ExceptionValue::new(
+                    "ValueError",
+                    "complex() arg is a malformed string",
+                ))
+            };
+            let result = match args {
+                [] => Complex64::new(0.0, 0.0),
+                // A single string argument is parsed as a complex literal.
+                [Value::String(s)] => parse_complex_str(s).ok_or_else(malformed)?,
+                [re] => crate::types::value_to_complex(re).ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(format!(
+                        "complex() first argument must be a string or a number, not '{}'",
+                        re.type_name()
+                    )))
+                })?,
+                [Value::String(_), _] => {
+                    return Err(InterpreterError::TypeError(
+                        "complex() can't take second arg if first is a string".into(),
+                    )
+                    .into());
+                }
+                [re, im] => {
+                    if matches!(im, Value::String(_)) {
+                        return Err(InterpreterError::TypeError(
+                            "complex() second arg can't be a string".into(),
+                        )
+                        .into());
+                    }
+                    let a = crate::types::value_to_complex(re).ok_or_else(|| {
+                        EvalError::from(InterpreterError::TypeError(
+                            "complex() first argument must be a string or a number".into(),
+                        ))
+                    })?;
+                    let b = crate::types::value_to_complex(im).ok_or_else(|| {
+                        EvalError::from(InterpreterError::TypeError(
+                            "complex() second argument must be a number".into(),
+                        ))
+                    })?;
+                    // complex(real, imag) == real + imag*1j (both may be complex).
+                    a + b * Complex64::new(0.0, 1.0)
+                }
+                _ => unreachable!("check_arg_count bounds args to 0..=2"),
+            };
+            Ok(Some(Value::Complex(Box::new(result))))
         }
         "bool" => {
             check_arg_count(name, args, 0, 1)?;

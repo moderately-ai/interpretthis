@@ -11,6 +11,54 @@ use crate::{
     value::{ExceptionValue, Value},
 };
 
+/// Parse a Python `complex()` string literal — `"1+2j"`, `"3j"`, `"-1.5e3-2j"`,
+/// `"(1+2j)"`, `"inf"`, `"nanj"`. Returns `None` on a malformed string (caller
+/// raises `ValueError`). The imaginary part is marked by a trailing `j`/`J`; the
+/// real/imag split is the last sign that is not the leading char and not part of
+/// a float exponent (`e`/`E`).
+pub(super) fn parse_complex_str(s: &str) -> Option<num_complex::Complex64> {
+    use num_complex::Complex64;
+    let mut t = s.trim();
+    // Strip a single layer of surrounding parentheses.
+    if let Some(inner) = t.strip_prefix('(') {
+        t = inner.strip_suffix(')')?.trim();
+    }
+    if t.is_empty() {
+        return None;
+    }
+    // No `j` suffix -> a purely real value.
+    let Some(core) = t.strip_suffix(['j', 'J']) else {
+        return t.parse::<f64>().ok().map(|re| Complex64::new(re, 0.0));
+    };
+    // Find the last '+'/'-' that separates real from imaginary (skip index 0 and
+    // signs that follow an exponent marker).
+    let mut split = None;
+    let bytes = core.as_bytes();
+    for (i, ch) in core.char_indices() {
+        if i > 0 && (ch == '+' || ch == '-') {
+            let prev = bytes[i - 1];
+            if prev != b'e' && prev != b'E' {
+                split = Some(i);
+            }
+        }
+    }
+    let coeff = |part: &str| -> Option<f64> {
+        match part {
+            "" | "+" => Some(1.0),
+            "-" => Some(-1.0),
+            other => other.parse::<f64>().ok(),
+        }
+    };
+    match split {
+        Some(k) => {
+            let re = core[..k].parse::<f64>().ok()?;
+            let im = coeff(&core[k..])?;
+            Some(Complex64::new(re, im))
+        }
+        None => Some(Complex64::new(0.0, coeff(core)?)),
+    }
+}
+
 /// `bytes.fromhex(hex_str)` — parse a hex string into bytes. CPython
 /// allows ASCII whitespace between hex pairs and is case-insensitive.
 pub(super) fn bytes_fromhex(args: &[Value]) -> EvalResult {
