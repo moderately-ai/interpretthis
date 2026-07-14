@@ -33,8 +33,34 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
                 Some(Value::Bool(b)) => Some(usize::from(*b)),
                 _ => None,
             };
+            // `separators=(item, key)` overrides the defaults, which are
+            // `(', ', ': ')` compact and `(',', ': ')` when indenting.
+            let (item_sep, key_sep) = match kwargs.get("separators") {
+                Some(Value::Tuple(pair)) if pair.len() == 2 => {
+                    let as_str = |v: &Value| match v {
+                        Value::String(s) => Ok(s.to_string()),
+                        other => Err(EvalError::from(InterpreterError::TypeError(format!(
+                            "separators must be str, not {}",
+                            other.type_name()
+                        )))),
+                    };
+                    (as_str(&pair[0])?, as_str(&pair[1])?)
+                }
+                None | Some(Value::None) => {
+                    let item = if indent.is_some() { "," } else { ", " };
+                    (item.to_string(), ": ".to_string())
+                }
+                Some(other) => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "separators must be a tuple of two strings, not {}",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            let fmt = JsonFormat { sort_keys, indent, item_sep, key_sep };
             let mut out = String::new();
-            write_json(value, sort_keys, indent, 0, &mut out)?;
+            write_json(value, &fmt, 0, &mut out)?;
             Ok(Value::String(out.into()))
         }
         "loads" => {
@@ -64,10 +90,19 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
 /// `indent=Some(N)`, each list/dict element gets its own line
 /// prefixed by `N * depth` spaces — matching CPython's
 /// `json.dumps(obj, indent=N)` byte-for-byte for the common cases.
-fn write_json(
-    value: &Value,
+/// Serialisation options for `json.dumps` threaded through the writers.
+struct JsonFormat {
     sort_keys: bool,
     indent: Option<usize>,
+    /// Separator between array/object entries (e.g. `", "` or `","`).
+    item_sep: String,
+    /// Separator between an object key and its value (e.g. `": "`).
+    key_sep: String,
+}
+
+fn write_json(
+    value: &Value,
+    fmt: &JsonFormat,
     depth: usize,
     out: &mut String,
 ) -> Result<(), EvalError> {
@@ -83,10 +118,10 @@ fn write_json(
             // and we want a stable sequence for the duration of the
             // serialisation.
             let snapshot = items.lock().clone();
-            write_seq_json(&snapshot, sort_keys, indent, depth, out)?;
+            write_seq_json(&snapshot, fmt, depth, out)?;
         }
         Value::Tuple(items) => {
-            write_seq_json(items, sort_keys, indent, depth, out)?;
+            write_seq_json(items, fmt, depth, out)?;
         }
         Value::Dict(map) => {
             if map.is_empty() {
@@ -95,33 +130,33 @@ fn write_json(
             }
             // Optionally emit keys in sorted order (`json.dumps(..., sort_keys=True)`).
             let mut entries: Vec<(&ValueKey, &Value)> = map.iter().collect();
-            if sort_keys {
+            if fmt.sort_keys {
                 entries.sort_by(|a, b| compare_keys_for_sort(a.0, b.0));
             }
             out.push('{');
-            if let Some(spaces) = indent {
+            if let Some(spaces) = fmt.indent {
                 let inner = " ".repeat(spaces * (depth + 1));
                 let outer = " ".repeat(spaces * depth);
                 for (i, (key, val)) in entries.into_iter().enumerate() {
                     if i > 0 {
-                        out.push(',');
+                        out.push_str(&fmt.item_sep);
                     }
                     out.push('\n');
                     out.push_str(&inner);
                     write_json_str(&json_key(key), out);
-                    out.push_str(": ");
-                    write_json(val, sort_keys, indent, depth + 1, out)?;
+                    out.push_str(&fmt.key_sep);
+                    write_json(val, fmt, depth + 1, out)?;
                 }
                 out.push('\n');
                 out.push_str(&outer);
             } else {
                 for (i, (key, val)) in entries.into_iter().enumerate() {
                     if i > 0 {
-                        out.push_str(", ");
+                        out.push_str(&fmt.item_sep);
                     }
                     write_json_str(&json_key(key), out);
-                    out.push_str(": ");
-                    write_json(val, sort_keys, indent, depth, out)?;
+                    out.push_str(&fmt.key_sep);
+                    write_json(val, fmt, depth, out)?;
                 }
             }
             out.push('}');
@@ -190,8 +225,7 @@ fn json_key(key: &ValueKey) -> String {
 /// duplicated.
 fn write_seq_json(
     items: &[Value],
-    sort_keys: bool,
-    indent: Option<usize>,
+    fmt: &JsonFormat,
     depth: usize,
     out: &mut String,
 ) -> Result<(), EvalError> {
@@ -200,25 +234,25 @@ fn write_seq_json(
         return Ok(());
     }
     out.push('[');
-    if let Some(spaces) = indent {
+    if let Some(spaces) = fmt.indent {
         let inner = " ".repeat(spaces * (depth + 1));
         let outer = " ".repeat(spaces * depth);
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
-                out.push(',');
+                out.push_str(&fmt.item_sep);
             }
             out.push('\n');
             out.push_str(&inner);
-            write_json(item, sort_keys, indent, depth + 1, out)?;
+            write_json(item, fmt, depth + 1, out)?;
         }
         out.push('\n');
         out.push_str(&outer);
     } else {
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
-                out.push_str(", ");
+                out.push_str(&fmt.item_sep);
             }
-            write_json(item, sort_keys, indent, depth, out)?;
+            write_json(item, fmt, depth, out)?;
         }
     }
     out.push(']');

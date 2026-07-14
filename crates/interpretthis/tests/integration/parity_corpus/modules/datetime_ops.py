@@ -1,0 +1,12 @@
+import datetime
+d = datetime.date(2024, 3, 15)
+print(d.year, d.month, d.day, d.weekday(), d.isoweekday())
+print(d.isoformat(), d.strftime("%Y/%m/%d"))
+print(d + datetime.timedelta(days=20))
+print(d - datetime.timedelta(days=30))
+dt = datetime.datetime(2024, 3, 15, 14, 30, 45)
+print(dt.hour, dt.minute, dt.second)
+print(dt.date(), dt.time())
+delta = datetime.date(2024, 12, 31) - datetime.date(2024, 1, 1)
+print(delta.days)
+print(datetime.timedelta(hours=25).days, datetime.timedelta(hours=25).seconds)

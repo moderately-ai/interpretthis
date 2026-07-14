@@ -84,6 +84,32 @@ pub async fn eval_aug_assign(
     node: &ast::StmtAugAssign,
     tools: &Tools,
 ) -> EvalResult {
+    // Augmented assignment to a class attribute via the class name
+    // (`C.count += 1`): the attribute lives in the class registry, which the
+    // place machinery (which navigates Values) cannot reach. Read-modify-write
+    // it directly.
+    if let Expr::Attribute(attr_node) = node.target.as_ref() {
+        if let Expr::Name(name_node) = attr_node.value.as_ref() {
+            if let Some(Value::Class(class_name)) = state.variables.get(name_node.id.as_str()) {
+                let class_name = class_name.clone();
+                let attr_name = attr_node.attr.as_str();
+                let current = state
+                    .classes
+                    .get(&class_name)
+                    .and_then(|c| c.class_attrs.get(attr_name).cloned());
+                if let Some(current) = current {
+                    let rhs = eval_expr(state, &node.value, tools).await?;
+                    let new_value =
+                        crate::eval::op::aug_binop(state, node.op, &current, &rhs, tools).await?;
+                    if let Some(class) = state.classes.get_mut(&class_name) {
+                        class.class_attrs.insert(attr_name.to_string(), new_value);
+                    }
+                    return Ok(Value::None);
+                }
+            }
+        }
+    }
+
     // Track E: defaultdict pre-touch. If the target is `d[k]` where
     // `d` is a DefaultDict and `k` is missing, synthesise the entry
     // via the factory before the place machinery navigates.
@@ -479,6 +505,16 @@ pub fn assign_target<'a>(
                                 state
                                     .set_variable(&obj_name, updated_self)
                                     .map_err(EvalError::Interpreter)?;
+                                return Ok(());
+                            }
+                        }
+                        // Assigning to a class attribute via the class name
+                        // (`C.attr = v`) mutates the class registry, not a
+                        // Value field — the place machinery can't reach it.
+                        if let Value::Class(class_name) = &obj {
+                            let attr_name = attr_node.attr.as_str().to_string();
+                            if let Some(class) = state.classes.get_mut(class_name) {
+                                class.class_attrs.insert(attr_name, value.clone());
                                 return Ok(());
                             }
                         }
