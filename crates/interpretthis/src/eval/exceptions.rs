@@ -484,10 +484,12 @@ pub async fn eval_raise(
 
     let exc_val = eval_expr(state, exc_expr, tools).await?;
 
-    // Evaluate cause if present
+    // Evaluate the explicit `from` cause, if the raise has one. `from None`
+    // yields `Value::None` — a deliberate cause of None that also suppresses
+    // implicit context chaining, distinct from having no `from` clause at all.
+    let has_explicit_from = node.cause.is_some();
     let cause = if let Some(ref cause_expr) = node.cause {
-        let cause_val = eval_expr(state, cause_expr, tools).await?;
-        match cause_val {
+        match eval_expr(state, cause_expr, tools).await? {
             Value::Exception(e) => Some(e),
             _ => None,
         }
@@ -495,17 +497,15 @@ pub async fn eval_raise(
         None
     };
 
-    // Implicit `__context__` chaining: if we're inside an except
-    // handler and the raise has no explicit `from`, CPython attaches
-    // the active exception as the new one's `__context__` (rendered as
-    // "during handling of the above exception, another exception
-    // occurred"). We collapse `__context__` and `__cause__` into the
-    // same `cause` field for the user-visible model — they read the
-    // same on `.__cause__` / `.__context__`.
-    let implicit_context = if cause.is_none() {
-        state.active_exception_stack.last().cloned().map(Box::new)
-    } else {
+    // Implicit `__context__` chaining: if we're inside an except handler and
+    // the raise has NO explicit `from`, CPython attaches the active exception
+    // as the new one's `__context__`. An explicit `from` (including `from
+    // None`) suppresses that. We collapse `__context__` and `__cause__` into
+    // the same `cause` field for the user-visible model.
+    let implicit_context = if has_explicit_from {
         None
+    } else {
+        state.active_exception_stack.last().cloned().map(Box::new)
     };
     let attached_cause = cause.or(implicit_context);
 
