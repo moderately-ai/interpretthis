@@ -572,18 +572,37 @@ pub fn assign_target<'a>(
             // (calls `__setitem__` and writes the post-call self back).
             Expr::Subscript(sub) => {
                 let Some(target_place) = place::eval_place(state, target, tools).await? else {
-                    // Non-place receiver (`f()[x] = v`) cannot be written back through the
-                    // place system. Preserve the old user-instance hook for this edge case.
-                    let receiver = crate::eval::eval_expr(state, &sub.value, tools).await?;
+                    // Non-place receiver (`f()[x] = v`, `(1, 2)[0] = 5`):
+                    // the target isn't rooted at a name, so there's
+                    // nothing to write back. User instances dispatch
+                    // `__setitem__`; builtin containers mutate through
+                    // their shared handle (or raise TypeError when
+                    // immutable) so a literal tuple/str assignment fails
+                    // exactly as CPython does rather than emitting a
+                    // misleading "cannot assign" RuntimeError.
+                    let mut receiver = crate::eval::eval_expr(state, &sub.value, tools).await?;
                     if matches!(receiver, Value::Instance(_)) {
                         let key = crate::eval::eval_expr(state, &sub.slice, tools).await?;
-                        let _ =
-                            crate::eval::op::setitem(state, &receiver, &key, value, tools).await?;
+                        if crate::eval::op::setitem(state, &receiver, &key, value, tools)
+                            .await?
+                            .is_none()
+                        {
+                            return Err(InterpreterError::TypeError(format!(
+                                "'{}' object does not support item assignment",
+                                receiver.type_name()
+                            ))
+                            .into());
+                        }
                         return Ok(());
                     }
-                    return Err(EvalError::from(InterpreterError::Runtime(
-                        "cannot assign to this expression".into(),
-                    )));
+                    return place::assign_computed_subscript(
+                        state,
+                        &mut receiver,
+                        &sub.slice,
+                        value,
+                        tools,
+                    )
+                    .await;
                 };
                 // A bare `Name` is handled by the arm above, so a subscript /
                 // attribute target always carries at least one step.

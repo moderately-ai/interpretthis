@@ -111,6 +111,32 @@ pub(crate) fn eval_place<'a>(
     })
 }
 
+/// Assign `receiver[slice] = value` for a computed (non-place)
+/// receiver such as `f()[0] = v` or a literal `(1, 2)[0] = 5`. Mutable
+/// builtin containers are mutated through their shared handle (the
+/// mutation is observable only if the receiver is retained elsewhere,
+/// matching CPython's throwaway semantics); immutable ones raise
+/// CPython's `TypeError: '<type>' object does not support item
+/// assignment`. The byte delta is discarded because the receiver is not
+/// bound to any name the memory accounting tracks.
+pub(crate) async fn assign_computed_subscript(
+    state: &mut InterpreterState,
+    receiver: &mut Value,
+    slice: &Expr,
+    value: Value,
+    tools: &Tools,
+) -> Result<(), EvalError> {
+    let step = if let Expr::Slice(s) = slice {
+        let lower = eval_opt(state, s.lower.as_deref(), tools).await?;
+        let upper = eval_opt(state, s.upper.as_deref(), tools).await?;
+        let step = eval_opt(state, s.step.as_deref(), tools).await?;
+        PlaceStep::Slice(Box::new(SliceSpec { lower, upper, step }))
+    } else {
+        PlaceStep::Index(eval_expr(state, slice, tools).await?)
+    };
+    assign_terminal(receiver, &step, value).map(|_delta| ())
+}
+
 /// Evaluate an optional slice-bound expression.
 async fn eval_opt(
     state: &mut InterpreterState,
