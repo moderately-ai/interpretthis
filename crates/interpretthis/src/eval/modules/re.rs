@@ -169,12 +169,27 @@ fn split(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalRe
     let text = arg_str(func, args, 1)?;
     let maxsplit = count_arg(args, 2, kwargs, "maxsplit");
     let re = compile(pattern)?;
-    // `maxsplit + 1` pieces; 0 means unlimited.
-    let parts: Vec<Value> = if maxsplit == 0 {
-        re.split(text).map(|p| Value::String(p.into())).collect()
-    } else {
-        re.splitn(text, maxsplit + 1).map(|p| Value::String(p.into())).collect()
-    };
+    // CPython interleaves the pattern's captured groups between the pieces:
+    // `re.split(r'(\s)', 'a b')` -> ['a', ' ', 'b']. A group that did not
+    // participate contributes None. Walk the matches manually (the regex
+    // crate's own `split` drops captures). maxsplit == 0 means unlimited.
+    let group_count = re.captures_len().saturating_sub(1);
+    let mut parts: Vec<Value> = Vec::new();
+    let mut last = 0usize;
+    let mut splits = 0usize;
+    for caps in re.captures_iter(text) {
+        if maxsplit != 0 && splits >= maxsplit {
+            break;
+        }
+        let Some(whole) = caps.get(0) else { continue };
+        parts.push(Value::String(text[last..whole.start()].into()));
+        for g in 1..=group_count {
+            parts.push(caps.get(g).map_or(Value::None, |m| Value::String(m.as_str().into())));
+        }
+        last = whole.end();
+        splits += 1;
+    }
+    parts.push(Value::String(text[last..].into()));
     Ok(Value::List(shared_list(parts)))
 }
 
