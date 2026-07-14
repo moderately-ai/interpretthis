@@ -47,11 +47,14 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
     }
 }
 
-/// A non-negative integer count argument from a positional slot or keyword.
-fn count_arg(args: &[Value], pos: usize, kwargs: &IndexMap<String, Value>, key: &str) -> usize {
-    let value = args.get(pos).or_else(|| kwargs.get(key));
-    match value {
-        Some(Value::Int(n)) if *n > 0 => usize::try_from(*n).unwrap_or(0),
+/// The `count`/`maxsplit` argument, preserving sign. CPython treats `0` (or an
+/// absent value) as "unlimited" but a *negative* value as "zero effect" — the
+/// two must be distinguished, so this returns the raw `i64` rather than folding
+/// both to 0.
+fn count_arg(args: &[Value], pos: usize, kwargs: &IndexMap<String, Value>, key: &str) -> i64 {
+    match args.get(pos).or_else(|| kwargs.get(key)) {
+        Some(Value::Int(n)) => *n,
+        Some(Value::Bool(b)) => i64::from(*b),
         _ => 0,
     }
 }
@@ -96,13 +99,16 @@ fn sub(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResu
     let repl = arg_str(func, args, 1)?;
     let text = arg_str(func, args, 2)?;
     let count = count_arg(args, 3, kwargs, "count");
+    // A negative count performs zero replacements (CPython); 0 means replace all.
+    if count < 0 {
+        return Ok(Value::String(text.into()));
+    }
     let re = compile(pattern)?;
     let translated = translate_python_repl(repl);
-    // count == 0 means "replace all" in Python.
     let replaced = if count == 0 {
         re.replace_all(text, translated.as_str())
     } else {
-        re.replacen(text, count, translated.as_str())
+        re.replacen(text, usize::try_from(count).unwrap_or(0), translated.as_str())
     };
     Ok(Value::String(replaced.into_owned().into()))
 }
@@ -168,17 +174,23 @@ fn split(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalRe
     let pattern = arg_str(func, args, 0)?;
     let text = arg_str(func, args, 1)?;
     let maxsplit = count_arg(args, 2, kwargs, "maxsplit");
+    // A negative maxsplit performs zero splits (CPython) — the whole string is
+    // returned as the single element.
+    if maxsplit < 0 {
+        return Ok(Value::List(shared_list(vec![Value::String(text.into())])));
+    }
     let re = compile(pattern)?;
     // CPython interleaves the pattern's captured groups between the pieces:
     // `re.split(r'(\s)', 'a b')` -> ['a', ' ', 'b']. A group that did not
     // participate contributes None. Walk the matches manually (the regex
     // crate's own `split` drops captures). maxsplit == 0 means unlimited.
     let group_count = re.captures_len().saturating_sub(1);
+    let limit = usize::try_from(maxsplit).unwrap_or(0);
     let mut parts: Vec<Value> = Vec::new();
     let mut last = 0usize;
     let mut splits = 0usize;
     for caps in re.captures_iter(text) {
-        if maxsplit != 0 && splits >= maxsplit {
+        if limit != 0 && splits >= limit {
             break;
         }
         let Some(whole) = caps.get(0) else { continue };
