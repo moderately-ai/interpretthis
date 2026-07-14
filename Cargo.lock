@@ -578,6 +578,7 @@ dependencies = [
  "indexmap",
  "interpretthis",
  "num-bigint",
+ "num-complex",
  "num-rational",
  "pyo3",
  "pyo3-async-runtimes",

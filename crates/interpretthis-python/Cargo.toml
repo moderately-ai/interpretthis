@@ -66,6 +66,7 @@ chrono = { workspace = true }
 compact_str = { workspace = true }
 indexmap = { workspace = true }
 num-bigint = { workspace = true }
+num-complex = { workspace = true }
 num-rational = { workspace = true }
 tokio = { workspace = true }
 

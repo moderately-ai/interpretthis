@@ -116,6 +116,9 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
             py.import("builtins")?.getattr("range")?.call1((*start, *stop, *step))?
         }
 
+        Value::Complex(c) => pyo3::types::PyComplex::from_doubles(py, c.re, c.im).into_any(),
+        Value::Ellipsis => py.import("builtins")?.getattr("Ellipsis")?,
+
         Value::Decimal(d) => (**d).clone().into_pyobject(py)?.into_any(),
         Value::Fraction(f) => (**f).clone().into_pyobject(py)?.into_any(),
 
@@ -161,6 +164,14 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
 pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     if ob.is_none() {
         return Ok(Value::None);
+    }
+    // The Ellipsis singleton (`...`) is distinct from None.
+    if ob.is(&py_ellipsis(ob.py())?) {
+        return Ok(Value::Ellipsis);
+    }
+    // complex BEFORE the numeric primitives (it is neither int nor float).
+    if let Ok(c) = ob.cast::<pyo3::types::PyComplex>() {
+        return Ok(Value::Complex(Box::new(num_complex::Complex64::new(c.real(), c.imag()))));
     }
 
     // bool BEFORE int: in Python `bool` is a subclass of `int`, so an `isinstance`
@@ -263,6 +274,11 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     Err(unsupported_inbound(ob))
+}
+
+/// The `Ellipsis` singleton object.
+fn py_ellipsis(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    py.import("builtins")?.getattr("Ellipsis")
 }
 
 /// Whether `ob` is an instance of `<module>.<name>` (e.g. `decimal.Decimal`).

@@ -487,3 +487,20 @@ async def test_the_event_loop_is_not_blocked_during_execute_async() -> None:
 
     assert result.check().stdout == "done\n"
     assert ticks == 5
+
+
+def test_complex_round_trips() -> None:
+    interp = Interpreter()
+    interp.execute("out = z", {"z": 1 + 2j}).check()
+    assert interp.get_variable("out") == 1 + 2j
+    # A complex computed inside the sandbox reads back as a Python complex.
+    interp.execute("w = (1 + 1j) * (1 + 1j)").check()
+    assert interp.get_variable("w") == 2j
+
+
+def test_ellipsis_round_trips() -> None:
+    interp = Interpreter()
+    interp.execute("out = e", {"e": ...}).check()
+    assert interp.get_variable("out") is ...
+    interp.execute("made = ...").check()
+    assert interp.get_variable("made") is ...
