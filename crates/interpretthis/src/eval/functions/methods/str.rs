@@ -166,42 +166,8 @@ pub(crate) fn dispatch_string_method(
                 Ok(Value::String(s.replacen(old, new, to_index(count)?).into()))
             }
         }
-        "startswith" => {
-            if args.is_empty() {
-                return Err(InterpreterError::TypeError(
-                    "startswith() takes at least 1 argument".into(),
-                )
-                .into());
-            }
-            let prefix = match &args[0] {
-                Value::String(p) => p.as_str(),
-                _ => {
-                    return Err(InterpreterError::TypeError(
-                        "startswith() argument must be str".into(),
-                    )
-                    .into());
-                }
-            };
-            Ok(Value::Bool(s.starts_with(prefix)))
-        }
-        "endswith" => {
-            if args.is_empty() {
-                return Err(InterpreterError::TypeError(
-                    "endswith() takes at least 1 argument".into(),
-                )
-                .into());
-            }
-            let suffix = match &args[0] {
-                Value::String(p) => p.as_str(),
-                _ => {
-                    return Err(InterpreterError::TypeError(
-                        "endswith() argument must be str".into(),
-                    )
-                    .into());
-                }
-            };
-            Ok(Value::Bool(s.ends_with(suffix)))
-        }
+        "startswith" => string_affix(s, method, args, true),
+        "endswith" => string_affix(s, method, args, false),
         // Unicode-aware casefold for the common non-lower surprises:
         // German ß → ss, Greek final sigma. Remaining characters use
         // Rust's to_lowercase (covers most scripts; not a full UCD
@@ -387,61 +353,45 @@ pub(crate) fn dispatch_string_method(
             Ok(Value::String(s.strip_suffix(suffix.as_str()).unwrap_or(s).into()))
         }
         "find" => {
-            if args.is_empty() {
-                return Err(
-                    InterpreterError::TypeError("find() takes at least 1 argument".into()).into()
-                );
-            }
-            let sub = match &args[0] {
-                Value::String(p) => p.as_str(),
-                _ => {
-                    return Err(
-                        InterpreterError::TypeError("find() argument must be str".into()).into()
-                    );
+            let (sub, start, end) = parse_search_args(method, args)?;
+            let (start_char, bs, be) = resolve_window(s, start, end);
+            match s[bs..be].find(sub) {
+                Some(pos) => {
+                    Ok(Value::Int(to_len_i64(start_char + s[bs..bs + pos].chars().count())?))
                 }
-            };
-            match s.find(sub) {
-                Some(pos) => Ok(Value::Int(to_len_i64(pos)?)),
                 None => Ok(Value::Int(-1)),
             }
         }
         "rfind" => {
-            if args.is_empty() {
-                return Err(InterpreterError::TypeError(
-                    "rfind() takes at least 1 argument".into(),
-                )
-                .into());
-            }
-            let sub = match &args[0] {
-                Value::String(p) => p.as_str(),
-                _ => {
-                    return Err(
-                        InterpreterError::TypeError("rfind() argument must be str".into()).into()
-                    );
+            let (sub, start, end) = parse_search_args(method, args)?;
+            let (start_char, bs, be) = resolve_window(s, start, end);
+            match s[bs..be].rfind(sub) {
+                Some(pos) => {
+                    Ok(Value::Int(to_len_i64(start_char + s[bs..bs + pos].chars().count())?))
                 }
-            };
-            match s.rfind(sub) {
-                Some(pos) => Ok(Value::Int(to_len_i64(pos)?)),
                 None => Ok(Value::Int(-1)),
             }
         }
         "index" => {
-            if args.is_empty() {
-                return Err(InterpreterError::TypeError(
-                    "index() takes at least 1 argument".into(),
-                )
-                .into());
-            }
-            let sub = match &args[0] {
-                Value::String(p) => p.as_str(),
-                _ => {
-                    return Err(
-                        InterpreterError::TypeError("index() argument must be str".into()).into()
-                    );
+            let (sub, start, end) = parse_search_args(method, args)?;
+            let (start_char, bs, be) = resolve_window(s, start, end);
+            match s[bs..be].find(sub) {
+                Some(pos) => {
+                    Ok(Value::Int(to_len_i64(start_char + s[bs..bs + pos].chars().count())?))
                 }
-            };
-            match s.find(sub) {
-                Some(pos) => Ok(Value::Int(to_len_i64(pos)?)),
+                None => Err(EvalError::Exception(ExceptionValue::new(
+                    "ValueError",
+                    "substring not found",
+                ))),
+            }
+        }
+        "rindex" => {
+            let (sub, start, end) = parse_search_args(method, args)?;
+            let (start_char, bs, be) = resolve_window(s, start, end);
+            match s[bs..be].rfind(sub) {
+                Some(pos) => {
+                    Ok(Value::Int(to_len_i64(start_char + s[bs..bs + pos].chars().count())?))
+                }
                 None => Err(EvalError::Exception(ExceptionValue::new(
                     "ValueError",
                     "substring not found",
@@ -449,21 +399,9 @@ pub(crate) fn dispatch_string_method(
             }
         }
         "count" => {
-            if args.is_empty() {
-                return Err(InterpreterError::TypeError(
-                    "count() takes at least 1 argument".into(),
-                )
-                .into());
-            }
-            let sub = match &args[0] {
-                Value::String(p) => p.as_str(),
-                _ => {
-                    return Err(
-                        InterpreterError::TypeError("count() argument must be str".into()).into()
-                    );
-                }
-            };
-            Ok(Value::Int(to_len_i64(s.matches(sub).count())?))
+            let (sub, start, end) = parse_search_args(method, args)?;
+            let (_, bs, be) = resolve_window(s, start, end);
+            Ok(Value::Int(to_len_i64(s[bs..be].matches(sub).count())?))
         }
         "isdigit" => Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))),
         "isalpha" => Ok(Value::Bool(!s.is_empty() && s.chars().all(char::is_alphabetic))),
@@ -632,6 +570,96 @@ pub(crate) fn dispatch_string_method(
         ))
         .into()),
     }
+}
+
+/// Parse `(sub, start, end)` for the `find`/`rfind`/`index`/`rindex`/`count`
+/// family: the substring must be `str`; `start`/`end` are optional integer (or
+/// `None`) char indices. Non-integer bounds raise `TypeError` via `value_to_i64`.
+fn parse_search_args<'a>(
+    method: &str,
+    args: &'a [Value],
+) -> Result<(&'a str, Option<i64>, Option<i64>), EvalError> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(
+            InterpreterError::TypeError(format!("{method}() takes at least 1 argument")).into()
+        );
+    }
+    let Value::String(sub) = &args[0] else {
+        return Err(InterpreterError::TypeError(format!("{method}() argument must be str")).into());
+    };
+    Ok((sub.as_str(), opt_index_arg(args.get(1))?, opt_index_arg(args.get(2))?))
+}
+
+/// Missing or `None` → default; otherwise coerce to an integer index.
+fn opt_index_arg(arg: Option<&Value>) -> Result<Option<i64>, EvalError> {
+    match arg {
+        None | Some(Value::None) => Ok(None),
+        Some(v) => Ok(Some(value_to_i64(v)?)),
+    }
+}
+
+/// Resolve CPython `start`/`end` char indices to a `(clamped_start_char,
+/// byte_start, byte_end)` window over `s`. Negative indices count from the end
+/// and clamp at 0; out-of-range indices clamp to the length; an inverted range
+/// collapses to empty. The char start is returned so a match's byte offset can
+/// be translated back to a char index.
+fn resolve_window(s: &str, start: Option<i64>, end: Option<i64>) -> (usize, usize, usize) {
+    let char_len = s.chars().count() as i64;
+    let clamp = |i: i64| -> i64 {
+        let i = if i < 0 { i + char_len } else { i };
+        i.clamp(0, char_len)
+    };
+    let start = clamp(start.unwrap_or(0));
+    let end = clamp(end.unwrap_or(char_len)).max(start);
+    // start/end are in [0, char_len]; the casts cannot truncate.
+    let (start, end) = (start as usize, end as usize);
+    (start, char_to_byte(s, start), char_to_byte(s, end))
+}
+
+/// Byte offset of the `char_idx`-th character (or `s.len()` past the end).
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b)
+}
+
+/// Shared `startswith`/`endswith`: honour the `start`/`end` window and accept
+/// either a single `str` affix or a tuple of `str` affixes (any-match).
+fn string_affix(s: &str, method: &str, args: &[Value], is_start: bool) -> EvalResult {
+    if args.is_empty() || args.len() > 3 {
+        return Err(
+            InterpreterError::TypeError(format!("{method}() takes at least 1 argument")).into()
+        );
+    }
+    let (_, bs, be) = resolve_window(s, opt_index_arg(args.get(1))?, opt_index_arg(args.get(2))?);
+    let window = &s[bs..be];
+    let test = |affix: &str| {
+        if is_start { window.starts_with(affix) } else { window.ends_with(affix) }
+    };
+    let matched = match &args[0] {
+        Value::String(p) => test(p.as_str()),
+        Value::Tuple(items) => {
+            let mut any = false;
+            for it in items {
+                let Value::String(p) = it else {
+                    return Err(InterpreterError::TypeError(format!(
+                        "tuple for {method}() must only contain str"
+                    ))
+                    .into());
+                };
+                if test(p.as_str()) {
+                    any = true;
+                    break;
+                }
+            }
+            any
+        }
+        _ => {
+            return Err(InterpreterError::TypeError(format!(
+                "{method}() first arg must be str or a tuple of str"
+            ))
+            .into());
+        }
+    };
+    Ok(Value::Bool(matched))
 }
 
 /// Whitespace split with optional maxsplit, preserving the remainder of the
