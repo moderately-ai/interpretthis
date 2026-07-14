@@ -22,7 +22,7 @@ use rustpython_parser::ast;
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
-    eval::{eval_expr, functions::resolve_proxy, literals::value_to_key},
+    eval::{eval_expr, functions::resolve_proxy},
     state::InterpreterState,
     tools::Tools,
     value::{Value, shared_list},
@@ -337,15 +337,24 @@ fn wrap_set_like(left: &Value, items: Vec<Value>) -> Value {
     if matches!(left, Value::Frozenset(_)) { Value::Frozenset(items) } else { Value::Set(items) }
 }
 
+/// Whether `probe` equals any element of `items` under Python set membership.
+///
+/// Uses the sync structural comparator, so it handles the numeric tower
+/// (`1 == 1.0 == True`) and distinguishes distinct instances by structure —
+/// unlike the old `value_to_key(x).ok()` keying, which returned `None` for
+/// every instance and collapsed them all into one element. A custom async
+/// `__eq__`/`__hash__` on set elements is not consulted here (the sync set-op
+/// path has no eval context); that divergence is tracked by
+/// `gap-instance-dict-key-equality-dunder-parity`, and matches the structural
+/// fallback everywhere else set membership is computed synchronously.
+pub(crate) fn set_contains(items: &[Value], probe: &Value) -> bool {
+    items.iter().any(|item| values_equal_pub(item, probe))
+}
+
 fn sub_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     // Set difference
     if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
-        let b_keys: Vec<_> = b.iter().filter_map(|v| value_to_key(v).ok()).collect();
-        let result: Vec<Value> = a
-            .iter()
-            .filter(|v| value_to_key(v).map_or(true, |k| !b_keys.contains(&k)))
-            .cloned()
-            .collect();
+        let result: Vec<Value> = a.iter().filter(|v| !set_contains(b, v)).cloned().collect();
         return Ok(wrap_set_like(left, result));
     }
 
@@ -757,9 +766,7 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
         let mut result = a.to_vec();
         for item in b {
-            let key = value_to_key(item).ok();
-            let already_has = result.iter().any(|r| value_to_key(r).ok() == key);
-            if !already_has {
+            if !set_contains(&result, item) {
                 result.push(item.clone());
             }
         }
@@ -781,18 +788,10 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
 fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     // Set symmetric difference
     if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
-        let a_keys: Vec<_> = a.iter().filter_map(|v| value_to_key(v).ok()).collect();
-        let b_keys: Vec<_> = b.iter().filter_map(|v| value_to_key(v).ok()).collect();
-        let mut result: Vec<Value> = a
-            .iter()
-            .filter(|v| value_to_key(v).map_or(true, |k| !b_keys.contains(&k)))
-            .cloned()
-            .collect();
+        let mut result: Vec<Value> = a.iter().filter(|v| !set_contains(b, v)).cloned().collect();
         for item in b {
-            if let Ok(k) = value_to_key(item) {
-                if !a_keys.contains(&k) {
-                    result.push(item.clone());
-                }
+            if !set_contains(a, item) && !set_contains(&result, item) {
+                result.push(item.clone());
             }
         }
         return Ok(wrap_set_like(left, result));
@@ -810,12 +809,7 @@ fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     }
     // Set intersection
     if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
-        let b_keys: Vec<_> = b.iter().filter_map(|v| value_to_key(v).ok()).collect();
-        let result: Vec<Value> = a
-            .iter()
-            .filter(|v| value_to_key(v).is_ok_and(|k| b_keys.contains(&k)))
-            .cloned()
-            .collect();
+        let result: Vec<Value> = a.iter().filter(|v| set_contains(b, v)).cloned().collect();
         return Ok(wrap_set_like(left, result));
     }
     let l = to_int(left)?;

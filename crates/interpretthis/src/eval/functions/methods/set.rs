@@ -23,11 +23,12 @@ pub(crate) fn dispatch_set_method(
 ) -> Result<MethodOutcome, EvalError> {
     crate::eval::functions::reject_kwargs(method, kwargs)?;
     // Sets are stored as a `Vec` (Value is not `Hash`), so membership is a
-    // linear scan keyed on `value_to_key`.
-    let contains = |items: &[Value], probe: &Value| {
-        let key = value_to_key(probe).ok();
-        items.iter().any(|r| value_to_key(r).ok() == key)
-    };
+    // linear scan under the shared structural comparator. `value_to_key`
+    // returns `None` for every instance, so keying on it would collapse
+    // distinct objects into one — `set_contains` distinguishes them.
+    use crate::eval::operations::{set_contains, values_equal_pub};
+    let position =
+        |items: &[Value], probe: &Value| items.iter().position(|r| values_equal_pub(r, probe));
 
     match method {
         "copy" => Ok(MethodOutcome::pure(Value::Set(items.clone()))),
@@ -35,7 +36,7 @@ pub(crate) fn dispatch_set_method(
             let mut result = items.clone();
             if let Some(arg) = args.first() {
                 for item in iterate_value(arg)? {
-                    if !contains(&result, &item) {
+                    if !set_contains(&result, &item) {
                         result.push(item);
                     }
                 }
@@ -47,12 +48,8 @@ pub(crate) fn dispatch_set_method(
                 return Ok(MethodOutcome::pure(Value::Set(items.clone())));
             };
             let other = iterate_value(arg)?;
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            let result: Vec<Value> = items
-                .iter()
-                .filter(|v| value_to_key(v).is_ok_and(|k| other_keys.contains(&k)))
-                .cloned()
-                .collect();
+            let result: Vec<Value> =
+                items.iter().filter(|v| set_contains(&other, v)).cloned().collect();
             Ok(MethodOutcome::pure(Value::Set(result)))
         }
         "difference" => {
@@ -60,33 +57,23 @@ pub(crate) fn dispatch_set_method(
                 return Ok(MethodOutcome::pure(Value::Set(items.clone())));
             };
             let other = iterate_value(arg)?;
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            let result: Vec<Value> = items
-                .iter()
-                .filter(|v| value_to_key(v).map_or(true, |k| !other_keys.contains(&k)))
-                .cloned()
-                .collect();
+            let result: Vec<Value> =
+                items.iter().filter(|v| !set_contains(&other, v)).cloned().collect();
             Ok(MethodOutcome::pure(Value::Set(result)))
         }
         "issubset" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            let result =
-                items.iter().all(|v| value_to_key(v).is_ok_and(|k| other_keys.contains(&k)));
+            let result = items.iter().all(|v| set_contains(&other, v));
             Ok(MethodOutcome::pure(Value::Bool(result)))
         }
         "issuperset" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let self_keys: Vec<_> = items.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            let result =
-                other.iter().all(|v| value_to_key(v).is_ok_and(|k| self_keys.contains(&k)));
+            let result = other.iter().all(|v| set_contains(items, v));
             Ok(MethodOutcome::pure(Value::Bool(result)))
         }
         "isdisjoint" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            let result =
-                !items.iter().any(|v| value_to_key(v).is_ok_and(|k| other_keys.contains(&k)));
+            let result = !items.iter().any(|v| set_contains(&other, v));
             Ok(MethodOutcome::pure(Value::Bool(result)))
         }
         "add" => {
@@ -98,7 +85,7 @@ pub(crate) fn dispatch_set_method(
             if !matches!(arg, Value::Instance(_)) {
                 value_to_key(arg)?;
             }
-            if contains(items, arg) {
+            if set_contains(items, arg) {
                 Ok(MethodOutcome::pure(Value::None))
             } else {
                 let size = estimate_value_size(arg);
@@ -108,8 +95,7 @@ pub(crate) fn dispatch_set_method(
         }
         "remove" => {
             let arg = arg1(method, args)?;
-            let key = value_to_key(arg).ok();
-            let Some(idx) = items.iter().position(|r| value_to_key(r).ok() == key) else {
+            let Some(idx) = position(items, arg) else {
                 return Err(EvalError::Exception(ExceptionValue::new("KeyError", arg.repr())));
             };
             let removed = items.remove(idx);
@@ -117,9 +103,8 @@ pub(crate) fn dispatch_set_method(
         }
         "discard" => {
             let arg = arg1(method, args)?;
-            let key = value_to_key(arg).ok();
             // discard() on a missing element is a no-op.
-            let Some(idx) = items.iter().position(|r| value_to_key(r).ok() == key) else {
+            let Some(idx) = position(items, arg) else {
                 return Ok(MethodOutcome::pure(Value::None));
             };
             let removed = items.remove(idx);
@@ -143,17 +128,10 @@ pub(crate) fn dispatch_set_method(
         }
         "symmetric_difference" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let self_keys: Vec<_> = items.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            let mut result: Vec<Value> = items
-                .iter()
-                .filter(|v| value_to_key(v).map_or(true, |k| !other_keys.contains(&k)))
-                .cloned()
-                .collect();
+            let mut result: Vec<Value> =
+                items.iter().filter(|v| !set_contains(&other, v)).cloned().collect();
             for item in other {
-                if value_to_key(&item).is_ok_and(|k| !self_keys.contains(&k))
-                    && !contains(&result, &item)
-                {
+                if !set_contains(items, &item) && !set_contains(&result, &item) {
                     result.push(item);
                 }
             }
@@ -164,7 +142,7 @@ pub(crate) fn dispatch_set_method(
             let new_items = iterate_value(arg)?;
             let mut added = 0usize;
             for item in new_items {
-                if !contains(items, &item) {
+                if !set_contains(items, &item) {
                     added += estimate_value_size(&item);
                     items.push(item);
                 }
@@ -173,27 +151,23 @@ pub(crate) fn dispatch_set_method(
         }
         "intersection_update" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            items.retain(|v| value_to_key(v).is_ok_and(|k| other_keys.contains(&k)));
+            items.retain(|v| set_contains(&other, v));
             Ok(MethodOutcome::pure(Value::None))
         }
         "difference_update" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            items.retain(|v| value_to_key(v).map_or(true, |k| !other_keys.contains(&k)));
+            items.retain(|v| !set_contains(&other, v));
             Ok(MethodOutcome::pure(Value::None))
         }
         "symmetric_difference_update" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let self_keys: Vec<_> = items.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            // Drop shared elements, then append the other side's uniques.
-            let other_keys: Vec<_> = other.iter().filter_map(|v| value_to_key(v).ok()).collect();
-            items.retain(|v| value_to_key(v).map_or(true, |k| !other_keys.contains(&k)));
+            // Snapshot original membership before mutating, so the decision of
+            // which `other` items to append is made against the pre-image.
+            let original = items.clone();
+            items.retain(|v| !set_contains(&other, v));
             let mut added = 0usize;
             for item in other {
-                if value_to_key(&item).is_ok_and(|k| !self_keys.contains(&k))
-                    && !contains(items, &item)
-                {
+                if !set_contains(&original, &item) && !set_contains(items, &item) {
                     added += estimate_value_size(&item);
                     items.push(item);
                 }
