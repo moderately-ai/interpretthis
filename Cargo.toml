@@ -76,6 +76,8 @@ num-traits = "=0.2.19"
 # Integer `Roots` trait (exact isqrt over BigInt). MIT OR Apache-2.0; already in
 # the tree as a num-bigint dependency.
 num-integer = "=0.1.46"
+# Python `complex` storage + arithmetic (abs/conj/pow/div). MIT OR Apache-2.0.
+num-complex = { version = "=0.4.6", features = ["serde"] }
 # Drop-in `HashMap`/`HashSet` swap that uses FxHash instead of SipHash.
 # The interpreter runs sandboxed user code; per-lookup hash cost is what
 # shows up in benches. Public API surfaces keep std HashMap for

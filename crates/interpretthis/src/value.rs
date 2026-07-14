@@ -197,6 +197,9 @@ pub enum Value {
     BigInt(Box<num_bigint::BigInt>),
     /// Python `float` (IEEE 754 f64).
     Float(f64),
+    /// Python `complex` — a pair of f64 (real, imaginary). Boxed to keep the
+    /// `Value` slot small (matching [`Self::Decimal`]/[`Self::Fraction`]).
+    Complex(Box<num_complex::Complex64>),
     /// Python `str`. Backed by [`CompactString`] — strings up to 24 B
     /// of UTF-8 stay inline (no heap allocation), longer strings spill
     /// to the heap with `String`'s layout. The footprint matches a
@@ -1281,6 +1284,8 @@ impl Value {
             // False`).
             Self::Decimal(d) => !d.is_zero(),
             Self::Fraction(f) => !f.numer().is_zero(),
+            // `bool(complex)` is False only when both parts are zero.
+            Self::Complex(c) => c.re != 0.0 || c.im != 0.0,
             Self::Range { start, stop, step } => {
                 if *step > 0 {
                     start < stop
@@ -1300,6 +1305,7 @@ impl Value {
             Self::Bool(_) => "bool",
             Self::Int(_) | Self::BigInt(_) => "int",
             Self::Float(_) => "float",
+            Self::Complex(_) => "complex",
             Self::String(_) => "str",
             Self::Bytes(_) => "bytes",
             Self::List(_) => "list",
@@ -1450,6 +1456,48 @@ fn write_python_float(f: &mut fmt::Formatter<'_>, v: f64) -> fmt::Result {
     }
 }
 
+/// Format one component of a `complex` (the real or imaginary part). Same
+/// fixed-vs-scientific rules as [`write_python_float`], but a whole number keeps
+/// no trailing `.0` (`3.0` -> `"3"`) and zero is `"0"`/`"-0"` — matching
+/// CPython's complex repr, which drops the `.0` a bare float keeps.
+fn format_complex_component(v: f64) -> String {
+    if v.is_nan() {
+        return "nan".to_string();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+    }
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+    }
+    let scientific = format!("{v:e}");
+    let exponent: i32 = scientific.split_once('e').and_then(|(_, e)| e.parse().ok()).unwrap_or(0);
+    if !(-4..16).contains(&exponent) {
+        match scientific.split_once('e') {
+            Some((mantissa, _)) => format!("{mantissa}e{exponent:+03}"),
+            None => format!("{v}"),
+        }
+    } else {
+        // Rust's shortest form already drops a trailing `.0` (`3.0` -> `"3"`).
+        format!("{v}")
+    }
+}
+
+/// CPython's `repr(complex)` (identical to `str`): `"3j"` / `"(1+2j)"`. The
+/// bare imaginary form is used only when the real part is a positive zero;
+/// otherwise the parenthesised `(real±imagj)` form is used, with the sign taken
+/// from the imaginary part's sign bit (so `-0.0` imag prints as `-0`).
+fn format_complex(c: &num_complex::Complex64) -> String {
+    if c.re == 0.0 && !c.re.is_sign_negative() {
+        return format!("{}j", format_complex_component(c.im));
+    }
+    let re = format_complex_component(c.re);
+    let neg = c.im.is_sign_negative() && !c.im.is_nan();
+    let sign = if neg { "-" } else { "+" };
+    let im = format_complex_component(c.im.abs());
+    format!("({re}{sign}{im}j)")
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1460,6 +1508,7 @@ impl fmt::Display for Value {
             Self::Int(i) => write!(f, "{i}"),
             Self::BigInt(i) => write!(f, "{i}"),
             Self::Float(v) => write_python_float(f, *v),
+            Self::Complex(c) => write!(f, "{}", format_complex(c)),
             Self::String(s) => write!(f, "{s}"),
             // CPython bytes repr — `b'...'` (or `b"..."` if the
             // content contains a single quote). Non-printable bytes,

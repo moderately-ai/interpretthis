@@ -407,6 +407,8 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::Bool(_) => 1,
         // i64 and f64 are both 8 bytes.
         Value::Int(_) | Value::Float(_) => 8,
+        // complex is a boxed pair of f64.
+        Value::Complex(_) => 16,
         // Approximate limb storage for big integers.
         Value::BigInt(b) => 16 + (b.bits() as usize / 8).saturating_add(8),
         Value::String(s) => STRING_HEADER_BYTES + s.len(),

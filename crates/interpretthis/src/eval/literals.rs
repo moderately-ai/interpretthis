@@ -35,9 +35,8 @@ pub fn eval_constant(constant: &Constant) -> Value {
         Constant::Str(s) => Value::String(s.as_str().into()),
         Constant::Bytes(b) => Value::Bytes(b.clone()),
         Constant::Tuple(items) => Value::Tuple(items.iter().map(eval_constant).collect()),
-        Constant::Complex { real, imag: _ } => {
-            // No complex support yet — store as float (real part)
-            Value::Float(*real)
+        Constant::Complex { real, imag } => {
+            Value::Complex(Box::new(num_complex::Complex64::new(*real, *imag)))
         }
     }
 }
