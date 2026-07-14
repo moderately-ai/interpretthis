@@ -207,6 +207,119 @@ pub(super) fn type_arg_name(value: &Value) -> String {
     }
 }
 
+/// Parse a string into a Python `int` for `int(str, base)`.
+///
+/// Correct and panic-free, replacing a `from_str_radix` call whose base was
+/// unvalidated (`int("10", 0)` and any base > 36 panicked). Handles:
+/// - base validation: `0` or `2..=36`, else `ValueError`;
+/// - an optional leading `+`/`-`;
+/// - base-0 prefix auto-detection (`0x`/`0o`/`0b`), and the matching prefix for
+///   base 2/8/16;
+/// - single underscores between digits (CPython's readability separators);
+/// - arbitrary precision — the result promotes to `BigInt`, so a long literal is
+///   exact rather than overflowing `i64`.
+pub(super) fn parse_int_str(raw: &str, base: i64) -> Result<Value, EvalError> {
+    use num_traits::Num as _;
+
+    let invalid = || {
+        EvalError::Exception(ExceptionValue::new(
+            "ValueError",
+            format!("invalid literal for int() with base {base}: {raw:?}"),
+        ))
+    };
+
+    if base != 0 && !(2..=36).contains(&base) {
+        return Err(EvalError::Exception(ExceptionValue::new(
+            "ValueError",
+            "int() base must be >= 2 and <= 36, or 0",
+        )));
+    }
+
+    let trimmed = raw.trim();
+    let (negative, rest) = match trimmed.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+
+    // Resolve the radix and strip any base prefix.
+    let (radix, digits_raw): (u32, &str) = if base == 0 {
+        strip_ci(rest, "0x").map_or_else(
+            || {
+                strip_ci(rest, "0o")
+                    .map_or_else(|| strip_ci(rest, "0b").map_or((10, rest), |r| (2, r)), |r| (8, r))
+            },
+            |r| (16, r),
+        )
+    } else {
+        let radix = base as u32;
+        let stripped = match radix {
+            16 => strip_ci(rest, "0x"),
+            8 => strip_ci(rest, "0o"),
+            2 => strip_ci(rest, "0b"),
+            _ => None,
+        };
+        (radix, stripped.unwrap_or(rest))
+    };
+
+    let cleaned = clean_underscores(digits_raw).ok_or_else(invalid)?;
+    if cleaned.is_empty() {
+        return Err(invalid());
+    }
+    // `int("010", 0)` is rejected by CPython: with base 0 and no prefix a leading
+    // zero is only allowed when the value is all zeros.
+    if base == 0
+        && radix == 10
+        && cleaned.len() > 1
+        && cleaned.starts_with('0')
+        && cleaned.bytes().any(|b| b != b'0')
+    {
+        return Err(invalid());
+    }
+
+    let mut big = num_bigint::BigInt::from_str_radix(&cleaned, radix).map_err(|_| invalid())?;
+    if negative {
+        big = -big;
+    }
+    Ok(crate::value::int_from_bigint(big))
+}
+
+/// Case-insensitively strip a two-char ASCII prefix (`0x`/`0o`/`0b`).
+fn strip_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let bytes = s.as_bytes();
+    let pfx = prefix.as_bytes();
+    if bytes.len() >= pfx.len() && bytes[..pfx.len()].eq_ignore_ascii_case(pfx) {
+        Some(&s[pfx.len()..])
+    } else {
+        None
+    }
+}
+
+/// Validate and strip CPython-style digit-group underscores. Returns `None` if
+/// an underscore is leading, trailing, or doubled (all rejected by CPython).
+fn clean_underscores(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return Some(String::new());
+    }
+    let bytes = s.as_bytes();
+    if bytes[0] == b'_' || bytes[bytes.len() - 1] == b'_' {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut prev_underscore = false;
+    for &b in bytes {
+        if b == b'_' {
+            if prev_underscore {
+                return None;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+            out.push(b as char);
+        }
+    }
+    Some(out)
+}
+
 /// `pow(base, exp, mod)` — integer modular exponentiation. Computes
 /// `base ** exp % mod` efficiently via square-and-multiply, without
 /// materializing the (potentially astronomical) intermediate value.

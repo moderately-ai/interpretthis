@@ -10,10 +10,11 @@ use super::{
     dispatch::call_value_as_function,
     float_to_int_exact,
     helpers::{
-        SortRequest, apply_key_fn, check_isinstance, dsu_sort, pow_three_arg, type_arg_name,
+        SortRequest, apply_key_fn, check_isinstance, dsu_sort, parse_int_str, pow_three_arg,
+        type_arg_name,
     },
     method_dispatch::CallArgs,
-    resolve_proxy, to_len_i64, to_u32, value_to_i64,
+    resolve_proxy, to_len_i64, value_to_i64,
 };
 use crate::{
     error::{EvalError, InterpreterError},
@@ -129,37 +130,36 @@ pub(super) async fn try_builtin(
             if args.is_empty() {
                 return Ok(Some(Value::Int(0)));
             }
-            let base = if args.len() >= 2 { to_u32(value_to_i64(&args[1])?)? } else { 10 };
+            // An explicit base only applies to a string. CPython: `int(255, 16)`
+            // raises TypeError, and any base outside {0} ∪ [2, 36] raises
+            // ValueError (the old code passed the base straight to
+            // `from_str_radix`, which PANICS on 0 or > 36).
+            if args.len() >= 2 {
+                let base = value_to_i64(&args[1])?;
+                return match &args[0] {
+                    Value::String(s) => Ok(Some(parse_int_str(s, base)?)),
+                    Value::Bytes(b) => {
+                        let s = std::str::from_utf8(b).map_err(|_| {
+                            EvalError::from(InterpreterError::ValueError(
+                                "int() bytes argument is not valid UTF-8".into(),
+                            ))
+                        })?;
+                        Ok(Some(parse_int_str(s, base)?))
+                    }
+                    _ => Err(InterpreterError::TypeError(
+                        "int() can't convert non-string with explicit base".into(),
+                    )
+                    .into()),
+                };
+            }
             match &args[0] {
                 Value::Int(i) => Ok(Some(Value::Int(*i))),
+                // Was missing: `int(2**70)` fell to the catch-all and raised
+                // "int() argument must be a string or a number, not 'int'".
+                Value::BigInt(b) => Ok(Some(Value::BigInt(b.clone()))),
                 Value::Float(f) => Ok(Some(float_to_int_exact(*f)?)),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
-                Value::String(s) => {
-                    let trimmed = s.trim();
-                    let parsed = if base == 10 {
-                        trimmed.parse::<i64>().map_err(|_| {
-                            EvalError::Exception(ExceptionValue::new(
-                                "ValueError",
-                                format!("invalid literal for int() with base 10: '{trimmed}'"),
-                            ))
-                        })
-                    } else {
-                        i64::from_str_radix(
-                            trimmed
-                                .trim_start_matches("0x")
-                                .trim_start_matches("0o")
-                                .trim_start_matches("0b"),
-                            base,
-                        )
-                        .map_err(|_| {
-                            EvalError::Exception(ExceptionValue::new(
-                                "ValueError",
-                                format!("invalid literal for int() with base {base}: '{trimmed}'"),
-                            ))
-                        })
-                    };
-                    Ok(Some(Value::Int(parsed?)))
-                }
+                Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
                 _ => Err(InterpreterError::TypeError(format!(
                     "int() argument must be a string or a number, not '{}'",
                     args[0].type_name()

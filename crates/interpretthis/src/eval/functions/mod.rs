@@ -61,17 +61,6 @@ pub(crate) fn to_len_i64(len: usize) -> Result<i64, EvalError> {
         .map_err(|_| InterpreterError::Runtime("collection length overflows i64".into()).into())
 }
 
-/// Convert a non-negative `i64` exponent or shift count (range-checked by
-/// the caller) into a `u32`. Returns a runtime error on invariant violation.
-pub(crate) fn to_u32(n: i64) -> Result<u32, EvalError> {
-    u32::try_from(n).map_err(|_| {
-        InterpreterError::Runtime(
-            "exponent/shift count out of u32 range (internal invariant)".into(),
-        )
-        .into()
-    })
-}
-
 /// Python's `int(float)`: truncate toward zero to the *exact* integer.
 ///
 /// - `NaN` raises `ValueError` (CPython: "cannot convert float NaN to integer").
