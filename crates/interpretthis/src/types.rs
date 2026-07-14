@@ -441,20 +441,36 @@ pub fn dispatch_contains(container: &Value, item: &Value) -> Result<bool, EvalEr
 /// fall through to the standard identity-shaped hash on the type's slot.
 pub fn dispatch_hash(state: &InterpreterState, value: &Value) -> Result<i64, EvalError> {
     if let Value::Instance(inst) = value {
-        if let Some(class) = state.classes.get(&inst.class_name) {
-            // Default `@dataclass` (eq=True, frozen=False) sets
-            // `__hash__ = None`, so the instance is unhashable. A
-            // user-defined `__hash__` is honoured at the async eval
-            // layer only — the sync `dispatch_hash` here doesn't
-            // call it, so user classes overriding `__hash__` reach
-            // the catch-all DefaultHasher route below.
-            if class.dataclass_fields.is_some() && !class.methods.contains_key("__hash__") {
-                return Err(InterpreterError::TypeError(format!(
-                    "unhashable type: '{}'",
-                    inst.class_name
-                ))
-                .into());
-            }
+        let registered = state.classes.get(&inst.class_name);
+        // Does the class (or any MRO ancestor) define this dunder?
+        let defines = |dunder: &str| {
+            registered.is_some_and(|class| {
+                class.mro.iter().any(|anc| {
+                    state.classes.get(anc).is_some_and(|c| c.methods.contains_key(dunder))
+                })
+            })
+        };
+        let has_hash = defines("__hash__");
+        // CPython sets `__hash__ = None` (unhashable) for a default `@dataclass`
+        // (eq=True, frozen=False) and for any class that defines `__eq__`
+        // without also defining `__hash__`.
+        let dataclass_default =
+            registered.is_some_and(|c| c.dataclass_fields.is_some()) && !has_hash;
+        if dataclass_default || (defines("__eq__") && !has_hash) {
+            return Err(InterpreterError::TypeError(format!(
+                "unhashable type: '{}'",
+                inst.class_name
+            ))
+            .into());
+        }
+        if !has_hash {
+            // Default `object.__hash__`: identity, keyed on the shared-fields
+            // Arc address (consistent with identity `==` and `id()`). Covers
+            // plain user classes and the bare `object()` sentinel, whose class
+            // is not registered. A user-defined `__hash__` is honoured on the
+            // async `op::hash` path, which intercepts before this sync route.
+            use std::sync::Arc;
+            return Ok(finalize_hash(Arc::as_ptr(&inst.fields).addr() as i64));
         }
     }
     let type_obj = type_of(value);
