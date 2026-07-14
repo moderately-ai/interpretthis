@@ -178,94 +178,111 @@ pub async fn eval_class_def(
         }
     }
 
-    for stmt in &node.body {
-        match stmt {
-            Stmt::FunctionDef(method) => {
-                let mut params = build_function_params(&method.args)?;
-                // Evaluate the method's default args at def time in
-                // the class body scope — same CPython semantics as
-                // top-level `def` (the `i=i` capture idiom + mutable
-                // default sharing).
-                crate::eval::functions::evaluate_param_defaults(state, &mut params, tools).await?;
-                let source = extract_function_source(&state.current_source, method);
-                let method_name = method.name.as_str().to_string();
-                // The body cache key gets a per-decorator suffix so
-                // `@property def x` / `@x.setter def x` / `@x.deleter
-                // def x` don't collide. Regular methods use the plain
-                // `Class.name` key.
-                classify_decorated_method(
-                    state,
-                    &method.decorator_list,
-                    class_name,
-                    method_name,
-                    params,
-                    method.body.clone(),
-                    source,
-                    &mut methods,
-                    &mut properties,
-                    &mut static_methods,
-                    &mut class_methods,
-                )?;
+    // CPython executes a class body as a code block against its own
+    // namespace: each statement can read names bound earlier in the body
+    // (`x = 1; y = x + 1`), names bound inside nested if/for/while (loop
+    // variables included) become class attributes, and reads fall through
+    // to the enclosing scope. We model the namespace with `state.variables`,
+    // seeding the class dict built so far before each statement and
+    // harvesting freshly-bound names afterwards, then restore the enclosing
+    // scope so nothing leaks out — even if the body raises.
+    let class_scope_saved = state.variables.clone();
+    let body_result: Result<(), EvalError> = async {
+        for stmt in &node.body {
+            // Make the class namespace built so far visible to this statement.
+            for (name, value) in &class_attrs {
+                state.variables.insert(name.clone(), value.clone());
             }
-            Stmt::Assign(assign) => {
-                // Every target receives the value: chained (`a = b = 1`) and
-                // tuple/list unpacking (`X, Y = 1, 2`) both land as class attrs.
-                let value = eval_expr(state, &assign.value, tools).await?;
-                for target in &assign.targets {
-                    bind_class_target(target, &value, enum_kind, class_name, &mut class_attrs)?;
+            match stmt {
+                Stmt::FunctionDef(method) => {
+                    let mut params = build_function_params(&method.args)?;
+                    // Evaluate the method's default args at def time in
+                    // the class body scope — same CPython semantics as
+                    // top-level `def` (the `i=i` capture idiom + mutable
+                    // default sharing).
+                    crate::eval::functions::evaluate_param_defaults(state, &mut params, tools)
+                        .await?;
+                    let source = extract_function_source(&state.current_source, method);
+                    let method_name = method.name.as_str().to_string();
+                    // The body cache key gets a per-decorator suffix so
+                    // `@property def x` / `@x.setter def x` / `@x.deleter
+                    // def x` don't collide. Regular methods use the plain
+                    // `Class.name` key.
+                    classify_decorated_method(
+                        state,
+                        &method.decorator_list,
+                        class_name,
+                        method_name,
+                        params,
+                        method.body.clone(),
+                        source,
+                        &mut methods,
+                        &mut properties,
+                        &mut static_methods,
+                        &mut class_methods,
+                    )?;
                 }
-            }
-            Stmt::AnnAssign(ann) => {
-                if let Expr::Name(target) = ann.target.as_ref() {
-                    let attr_name = target.id.as_str().to_string();
-                    // Record every annotated name, with or without a value,
-                    // in declaration order so `@dataclass` can read fields.
-                    if !annotations.contains(&attr_name) {
-                        annotations.push(attr_name.clone());
-                    }
-                    if let Some(value_expr) = &ann.value {
-                        let value = eval_expr(state, value_expr, tools).await?;
-                        let wrapped = wrap_enum_member(enum_kind, class_name, &attr_name, value);
-                        class_attrs.insert(attr_name, wrapped);
-                    }
-                }
-            }
-            // Nested control flow and nested class definitions. CPython
-            // executes the class body as a code block: names bound inside
-            // if/else/for/while (loop variables included) become class
-            // attributes, while reads fall through to the enclosing scope,
-            // and a nested `class` becomes an attribute. Model that by
-            // layering the class dict over a snapshot of the enclosing
-            // scope, executing the statement, harvesting the names it bound
-            // (new or changed) back into the class dict, then restoring the
-            // enclosing scope so nothing leaks out of the class body.
-            Stmt::If(_) | Stmt::For(_) | Stmt::While(_) | Stmt::ClassDef(_) => {
-                let saved = state.variables.clone();
-                for (name, value) in &class_attrs {
-                    state.variables.insert(name.clone(), value.clone());
-                }
-                crate::eval::eval_stmt(state, stmt, tools).await?;
-                let mut harvested: Vec<(String, Value)> = Vec::new();
-                for (name, value) in &state.variables {
-                    // A name is a class attribute when the body bound it fresh
-                    // or changed it relative to the class dict / enclosing
-                    // scope it was seeded from.
-                    let prior = class_attrs.get(name).or_else(|| saved.get(name));
-                    if prior != Some(value) {
-                        harvested.push((name.clone(), value.clone()));
+                Stmt::Assign(assign) => {
+                    // Every target receives the value: chained (`a = b = 1`) and
+                    // tuple/list unpacking (`X, Y = 1, 2`) both land as class attrs.
+                    let value = eval_expr(state, &assign.value, tools).await?;
+                    for target in &assign.targets {
+                        bind_class_target(target, &value, enum_kind, class_name, &mut class_attrs)?;
                     }
                 }
-                state.variables = saved;
-                for (name, value) in harvested {
-                    let wrapped = wrap_enum_member(enum_kind, class_name, &name, value);
-                    class_attrs.insert(name, wrapped);
+                Stmt::AnnAssign(ann) => {
+                    if let Expr::Name(target) = ann.target.as_ref() {
+                        let attr_name = target.id.as_str().to_string();
+                        // Record every annotated name, with or without a value,
+                        // in declaration order so `@dataclass` can read fields.
+                        if !annotations.contains(&attr_name) {
+                            annotations.push(attr_name.clone());
+                        }
+                        if let Some(value_expr) = &ann.value {
+                            let value = eval_expr(state, value_expr, tools).await?;
+                            let wrapped =
+                                wrap_enum_member(enum_kind, class_name, &attr_name, value);
+                            class_attrs.insert(attr_name, wrapped);
+                        }
+                    }
+                }
+                // Nested control flow / nested class definitions execute against
+                // the class namespace; the names they bind (loop variables and
+                // any attributes they mutate) are harvested just below.
+                Stmt::If(_) | Stmt::For(_) | Stmt::While(_) | Stmt::ClassDef(_) => {
+                    crate::eval::eval_stmt(state, stmt, tools).await?;
+                }
+                // Docstrings and `pass` carry no class state; anything else in a
+                // class body is not modelled and ignored.
+                _ => {}
+            }
+            // Harvest names this statement bound or changed in the live
+            // namespace back into the class dict, so the next statement's seed
+            // (and its reads) see the current values — a `for` that builds up
+            // `total` must be visible to a following `while`. A name matching
+            // the enclosing scope was only read, not bound, so it is skipped;
+            // a name already equal in the class dict needs no rewrap.
+            let mut changed: Vec<(String, Value)> = Vec::new();
+            for (name, value) in &state.variables {
+                if class_attrs.get(name) != Some(value)
+                    && class_scope_saved.get(name) != Some(value)
+                {
+                    changed.push((name.clone(), value.clone()));
                 }
             }
-            // Docstrings and `pass` carry no class state; anything else in a
-            // class body is not modelled and ignored.
-            _ => {}
+            for (name, value) in changed {
+                let wrapped = wrap_enum_member(enum_kind, class_name, &name, value);
+                class_attrs.insert(name, wrapped);
+            }
         }
+        Ok(())
     }
+    .await;
+
+    // Restore the enclosing scope: class-body names live in the class dict,
+    // not the surrounding namespace.
+    state.variables = class_scope_saved;
+    body_result?;
 
     // C3 linearization gives the method resolution order for this
     // class. Each base's MRO is in the registry already (because B1's

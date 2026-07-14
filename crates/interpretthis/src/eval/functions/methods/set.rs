@@ -2,10 +2,12 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `set` method dispatch — union/intersection/difference/issubset/
-//! issuperset/isdisjoint plus mutating add/remove/discard/pop/clear/
-//! update. Sets are stored as `Vec<Value>` (Value is not `Hash`), so
-//! membership is a linear scan keyed on `value_to_key`.
+//! `set` method dispatch — union/intersection/difference/symmetric_difference/
+//! issubset/issuperset/isdisjoint plus mutating add/remove/discard/pop/clear/
+//! update and the `*_update` variants. Sets are stored as `Vec<Value>` (Value
+//! is not `Hash`), so membership is a linear scan under the structural
+//! comparator (`set_contains`), which — unlike `value_to_key` keying — keeps
+//! distinct instances distinct.
 
 use super::super::{MethodOutcome, arg1};
 use crate::{
