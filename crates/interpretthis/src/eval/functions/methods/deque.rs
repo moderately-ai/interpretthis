@@ -13,7 +13,7 @@ use crate::{
     error::{EvalError, InterpreterError},
     eval::{control_flow::iterate_value, place},
     state::estimate_value_size,
-    value::Value,
+    value::{ExceptionValue, Value},
 };
 
 /// Methods on `collections.deque`. The deque is mutated in place;
@@ -64,14 +64,14 @@ pub(crate) fn dispatch_deque_method(
         }
         "pop" => {
             let popped = items.pop_back().ok_or_else(|| {
-                EvalError::from(InterpreterError::Runtime("pop from an empty deque".into()))
+                EvalError::Exception(ExceptionValue::new("IndexError", "pop from an empty deque"))
             })?;
             let freed = place::to_isize(estimate_value_size(&popped));
             Ok(MethodOutcome { value: popped, mem_delta: -freed })
         }
         "popleft" => {
             let popped = items.pop_front().ok_or_else(|| {
-                EvalError::from(InterpreterError::Runtime("pop from an empty deque".into()))
+                EvalError::Exception(ExceptionValue::new("IndexError", "pop from an empty deque"))
             })?;
             let freed = place::to_isize(estimate_value_size(&popped));
             Ok(MethodOutcome { value: popped, mem_delta: -freed })
