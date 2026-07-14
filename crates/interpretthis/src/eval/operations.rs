@@ -817,9 +817,13 @@ pub async fn eval_unaryop(
     let operand = resolve_proxy(&operand).await?;
 
     match node.op {
+        // Unary `+` is identity on every numeric type (`bool` promotes to int).
         ast::UnaryOp::UAdd => match &operand {
-            Value::Int(i) => Ok(Value::Int(*i)),
-            Value::Float(f) => Ok(Value::Float(*f)),
+            Value::Int(_)
+            | Value::BigInt(_)
+            | Value::Float(_)
+            | Value::Decimal(_)
+            | Value::Fraction(_) => Ok(operand.clone()),
             Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
             _ => Err(InterpreterError::TypeError(format!(
                 "bad operand type for unary +: '{}'",
@@ -828,9 +832,17 @@ pub async fn eval_unaryop(
             .into()),
         },
         ast::UnaryOp::USub => match &operand {
-            Value::Int(i) => Ok(Value::Int(-*i)),
+            // `checked_neg` handles i64::MIN, whose negation overflows i64:
+            // promote to BigInt instead of wrapping (release) / panicking (debug).
+            Value::Int(i) => Ok(i.checked_neg().map_or_else(
+                || crate::value::int_from_bigint(-num_bigint::BigInt::from(*i)),
+                Value::Int,
+            )),
+            Value::BigInt(b) => Ok(crate::value::int_from_bigint(-(*b.clone()))),
             Value::Float(f) => Ok(Value::Float(-*f)),
             Value::Bool(b) => Ok(Value::Int(if *b { -1 } else { 0 })),
+            Value::Decimal(d) => Ok(Value::Decimal(Box::new(-(*d.clone())))),
+            Value::Fraction(fr) => Ok(Value::Fraction(Box::new(-(*fr.clone())))),
             _ => Err(InterpreterError::TypeError(format!(
                 "bad operand type for unary -: '{}'",
                 operand.type_name()
@@ -844,10 +856,21 @@ pub async fn eval_unaryop(
             };
             Ok(Value::Bool(!cond))
         }
-        ast::UnaryOp::Invert => {
-            let i = to_int(&operand)?;
-            Ok(Value::Int(!i))
-        }
+        // `~x == -x - 1`. Keep the i64 fast path; fall to BigInt for anything
+        // outside it so `~(2**70)` works instead of raising OverflowError.
+        ast::UnaryOp::Invert => match &operand {
+            Value::Int(i) => Ok(Value::Int(!*i)),
+            Value::Bool(b) => Ok(Value::Int(!i64::from(*b))),
+            Value::BigInt(_) => {
+                let n = to_bigint(&operand)?;
+                Ok(crate::value::int_from_bigint(-n - 1))
+            }
+            _ => Err(InterpreterError::TypeError(format!(
+                "bad operand type for unary ~: '{}'",
+                operand.type_name()
+            ))
+            .into()),
+        },
     }
 }
 
