@@ -264,7 +264,12 @@ pub(super) fn check_isinstance(state: &InterpreterState, obj: &Value, type_name:
             // subclass (Track B3); isinstance honours that even though
             // our Value::Counter is a distinct variant.
             (Value::Bool(_), "int") | (Value::Counter(_), "dict") => true,
-            (Value::Exception(e), tn) => e.type_name == tn || tn == "Exception",
+            // Walk the builtin exception hierarchy, so
+            // `isinstance(KeyError(), LookupError)` is True (was flat: it only
+            // matched the exact type or "Exception").
+            (Value::Exception(e), tn) => {
+                crate::eval::exceptions::builtin_exception_issubclass(&e.type_name, tn)
+            }
             _ => false,
         }
 }

@@ -353,7 +353,7 @@ fn matches_exception_type(
 
 /// Whether `exc_name` is a subclass of `parent` in the hard-coded
 /// builtin tree. Expand as we register more exception constructors.
-fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool {
+pub(crate) fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool {
     let mut cur = exc_name;
     for _ in 0..16 {
         if cur == parent {
