@@ -228,8 +228,15 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(d) = ob.extract::<NaiveDate>() {
         return Ok(Value::Date(d));
     }
-    if let Ok(t) = ob.extract::<NaiveTime>() {
-        return Ok(Value::Time(t));
+    // `datetime.time`: a tz-aware time silently lost its tzinfo through the
+    // NaiveTime extractor. The interpreter has no tz-aware time, so reject it.
+    if is_instance_of(ob, "datetime", "time")? {
+        if !ob.getattr("tzinfo")?.is_none() {
+            return Err(PyTypeError::new_err(
+                "tz-aware datetime.time is not supported (the interpreter models only naive time)",
+            ));
+        }
+        return Ok(Value::Time(ob.extract::<NaiveTime>()?));
     }
     if let Ok(delta) = ob.extract::<TimeDelta>() {
         return Ok(Value::TimeDelta(delta.num_microseconds().ok_or_else(|| {
@@ -240,14 +247,15 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::TimeZone(offset.local_minus_utc()));
     }
 
-    // Decimal and Fraction are checked after the numeric primitives (they are
-    // neither int nor float, so no subclass shadowing applies) but before the
-    // catch-all.
-    if let Ok(d) = ob.extract::<BigDecimal>() {
-        return Ok(Value::Decimal(Box::new(d)));
+    // Decimal / Fraction: gate on the *actual* type first. pyo3's BigDecimal /
+    // BigRational extractors are `str(obj)`-parse / duck-typed, so without the
+    // gate any object with a numeric `__str__` or `.numerator`/`.denominator`
+    // (numpy.int64, a Money class) would be silently reinterpreted.
+    if is_instance_of(ob, "decimal", "Decimal")? {
+        return Ok(Value::Decimal(Box::new(ob.extract::<BigDecimal>()?)));
     }
-    if let Ok(f) = ob.extract::<BigRational>() {
-        return Ok(Value::Fraction(Box::new(f)));
+    if is_instance_of(ob, "fractions", "Fraction")? {
+        return Ok(Value::Fraction(Box::new(ob.extract::<BigRational>()?)));
     }
 
     if let Some(range) = extract_range(ob)? {
@@ -255,6 +263,13 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     Err(unsupported_inbound(ob))
+}
+
+/// Whether `ob` is an instance of `<module>.<name>` (e.g. `decimal.Decimal`).
+/// Used to gate str-parse/duck-typed extractors on the real type.
+fn is_instance_of(ob: &Bound<'_, PyAny>, module: &str, name: &str) -> PyResult<bool> {
+    let ty = ob.py().import(module)?.getattr(name)?;
+    ob.is_instance(&ty)
 }
 
 /// Recognise a builtin `range` object.

@@ -317,6 +317,48 @@ def test_aware_datetime_keeps_its_offset() -> None:
     assert interp.get_variable("out") == aware
 
 
+def test_numeric_lookalike_is_not_silently_a_decimal() -> None:
+    # A non-Decimal object with a numeric __str__ must not be reinterpreted as a
+    # Decimal by the str-parse extractor — it is an unsupported inbound type.
+    class Money:
+        def __str__(self) -> str:
+            return "1.50"
+
+    interp = Interpreter()
+    with pytest.raises(TypeError):
+        interp.execute("out = m", {"m": Money()}).check()
+
+
+def test_fraction_lookalike_is_not_silently_a_fraction() -> None:
+    class Ratio:
+        numerator = 3
+        denominator = 4
+
+    interp = Interpreter()
+    with pytest.raises(TypeError):
+        interp.execute("out = r", {"r": Ratio()}).check()
+
+
+def test_real_decimal_and_fraction_still_round_trip() -> None:
+    interp = Interpreter()
+    interp.execute("out = d", {"d": Decimal("2.5")}).check()
+    assert interp.get_variable("out") == Decimal("2.5")
+    interp.execute("out = f", {"f": Fraction(5, 8)}).check()
+    assert interp.get_variable("out") == Fraction(5, 8)
+
+
+def test_aware_time_is_rejected_not_silently_naive() -> None:
+    # The interpreter has no tz-aware time; dropping the tzinfo would silently
+    # change the value, so an aware time is rejected.
+    aware_time = dt.time(12, 30, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+    interp = Interpreter()
+    with pytest.raises(TypeError):
+        interp.execute("out = t", {"t": aware_time}).check()
+    # A naive time still round-trips.
+    interp.execute("out = t", {"t": dt.time(12, 30)}).check()
+    assert interp.get_variable("out") == dt.time(12, 30)
+
+
 def test_lists_are_copied_not_aliased() -> None:
     # The documented contract. Aliasing would hand sandboxed code a live handle
     # on host memory, which is the thing this interpreter exists to prevent.
