@@ -487,16 +487,19 @@ pub fn dispatch_timedelta_method(
 /// the reflected slot or raise TypeError.
 pub fn try_arith(op: &str, lhs: &Value, rhs: &Value) -> Option<EvalResult> {
     match (op, lhs, rhs) {
-        // date + timedelta -> date
+        // date + timedelta -> date. A date has no time, so only the timedelta's
+        // whole-day count matters — and that is `timedelta.days`, the *floored*
+        // day count (div_euclid), not truncation toward zero. `timedelta(hours=-1)`
+        // has .days == -1, so it moves the date back a day.
         ("+", Value::Date(d), Value::TimeDelta(us))
         | ("+", Value::TimeDelta(us), Value::Date(d)) => {
-            let days = i32::try_from(us / 86_400_000_000).ok()?;
+            let days = i32::try_from(us.div_euclid(86_400_000_000)).ok()?;
             let result = d.checked_add_signed(Duration::days(i64::from(days)))?;
             Some(Ok(Value::Date(result)))
         }
-        // date - timedelta -> date
+        // date - timedelta -> date (subtract the floored whole-day count).
         ("-", Value::Date(d), Value::TimeDelta(us)) => {
-            let days = i32::try_from(us / 86_400_000_000).ok()?;
+            let days = i32::try_from(us.div_euclid(86_400_000_000)).ok()?;
             let result = d.checked_sub_signed(Duration::days(i64::from(days)))?;
             Some(Ok(Value::Date(result)))
         }
