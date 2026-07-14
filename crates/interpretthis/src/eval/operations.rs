@@ -939,17 +939,37 @@ pub fn compare_builtin(
         ast::CmpOp::Lt => crate::types::dispatch_lt(left, right),
         ast::CmpOp::LtE => {
             let lt = crate::types::dispatch_lt(left, right)?;
-            Ok(lt || values_equal(left, right))
+            // The equality half of `<=` must be the SAME equality as `==` —
+            // `dispatch_eq`, which covers BigInt/Decimal/Fraction/etc. The old
+            // `values_equal` here was a second, incomplete table with no arm for
+            // any of those, so `x <= x` was False for every value outside i64.
+            Ok(lt || eq_via_dispatch(state, left, right)?)
         }
         ast::CmpOp::Gt => crate::types::dispatch_lt(right, left),
         ast::CmpOp::GtE => {
             let gt = crate::types::dispatch_lt(right, left)?;
-            Ok(gt || values_equal(left, right))
+            Ok(gt || eq_via_dispatch(state, left, right)?)
         }
         ast::CmpOp::Is | ast::CmpOp::IsNot | ast::CmpOp::In | ast::CmpOp::NotIn => {
             unreachable!("identity/membership ops handled at eval_compare before reaching here")
         }
     }
+}
+
+/// Equality as `==` computes it, for the equality half of `<=` / `>=`.
+///
+/// Routes through `crate::types::dispatch_eq` (the same entry `==` uses) rather
+/// than the local `values_equal` table, so wide-numeric and stdlib value types
+/// (`BigInt`, `Decimal`, `Fraction`, `Date`, ...) compare correctly.
+fn eq_via_dispatch(
+    state: &InterpreterState,
+    left: &Value,
+    right: &Value,
+) -> Result<bool, EvalError> {
+    let Value::Bool(b) = crate::types::dispatch_eq(state, left, right)? else {
+        unreachable!("dispatch_eq always returns Value::Bool");
+    };
+    Ok(b)
 }
 
 /// Public wrapper for value equality (used by other modules).
