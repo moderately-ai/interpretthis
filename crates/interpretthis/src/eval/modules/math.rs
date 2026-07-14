@@ -97,7 +97,21 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         "acos" => Ok(Value::Float(arg_f64(func, args, 0)?.acos())),
         "atan" => Ok(Value::Float(arg_f64(func, args, 0)?.atan())),
         "atan2" => Ok(Value::Float(arg_f64(func, args, 0)?.atan2(arg_f64(func, args, 1)?))),
-        "hypot" => Ok(Value::Float(arg_f64(func, args, 0)?.hypot(arg_f64(func, args, 1)?))),
+        "hypot" => {
+            // n-dimensional Euclidean norm: sqrt(sum of squares). Two args use
+            // the numerically stable `f64::hypot`; other arities sum directly.
+            match args.len() {
+                2 => Ok(Value::Float(arg_f64(func, args, 0)?.hypot(arg_f64(func, args, 1)?))),
+                _ => {
+                    let mut sum = 0.0f64;
+                    for i in 0..args.len() {
+                        let x = arg_f64(func, args, i)?;
+                        sum += x * x;
+                    }
+                    Ok(Value::Float(sum.sqrt()))
+                }
+            }
+        }
         "radians" => Ok(Value::Float(arg_f64(func, args, 0)?.to_radians())),
         "degrees" => Ok(Value::Float(arg_f64(func, args, 0)?.to_degrees())),
         "copysign" => Ok(Value::Float(arg_f64(func, args, 0)?.copysign(arg_f64(func, args, 1)?))),
