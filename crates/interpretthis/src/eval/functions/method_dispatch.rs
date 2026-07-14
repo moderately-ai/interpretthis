@@ -293,6 +293,30 @@ fn int_methods(
     }
 }
 
+/// `complex` methods: `conjugate()` (and `real`/`imag` for parity with `int`,
+/// though those are normally read as attributes). All are argument-less.
+fn complex_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Complex(c) = obj else { return Err(type_mismatch("complex")) };
+    reject_kwargs(method, kwargs)?;
+    if !args.is_empty() {
+        return Err(InterpreterError::TypeError(format!("{method}() takes no arguments")).into());
+    }
+    match method {
+        "conjugate" => Ok(MethodOutcome::pure(Value::Complex(Box::new(c.conj())))),
+        "real" => Ok(MethodOutcome::pure(Value::Float(c.re))),
+        "imag" => Ok(MethodOutcome::pure(Value::Float(c.im))),
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'complex' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 fn bytes_methods(
     obj: &mut Value,
     method: &str,
@@ -405,6 +429,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Set(_) => Some(set_methods),
         Value::Tuple(_) => Some(tuple_methods),
         Value::Int(_) | Value::BigInt(_) => Some(int_methods),
+        Value::Complex(_) => Some(complex_methods),
         Value::Bytes(_) => Some(bytes_methods),
         Value::Date(_) => Some(date_methods),
         Value::DateTime { .. } => Some(datetime_methods),

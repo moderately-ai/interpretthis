@@ -594,6 +594,8 @@ pub(super) async fn try_builtin(
                     Ok(Some(crate::value::int_from_bigint((**b).abs())))
                 }
                 Value::Float(f) => Ok(Some(Value::Float(f.abs()))),
+                // abs(complex) is the magnitude (a float): sqrt(re^2 + im^2).
+                Value::Complex(c) => Ok(Some(Value::Float(c.norm()))),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
                 Value::Decimal(d) => Ok(Some(Value::Decimal(Box::new(d.abs())))),
                 Value::Fraction(fr) => {

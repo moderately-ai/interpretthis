@@ -691,10 +691,11 @@ static COMPLEX_TYPE: TypeObject = TypeObject {
     del_item_slot: None,
     missing_slot: None,
     len_slot: None,
-    // `.real`/`.imag`/`.conjugate()` are wired in a later commit.
-    get_attr_slot: Some(noattr_get_attr),
+    // `.real`/`.imag` are attributes; `.conjugate()` is dispatched via the
+    // method table (has_methods_table below).
+    get_attr_slot: Some(complex_get_attr),
     set_attr_slot: None,
-    has_methods_table: false,
+    has_methods_table: true,
 };
 static STR_TYPE: TypeObject = TypeObject {
     name: "str",
@@ -2271,6 +2272,17 @@ fn attribute_error(type_name: &str, attr_name: &str) -> EvalError {
 /// int, float, bytes, range). Always raises `AttributeError`.
 fn noattr_get_attr(value: &Value, name: &str) -> EvalResult {
     Err(attribute_error(value.type_name(), name))
+}
+
+/// `complex.real` / `complex.imag` attribute access (both `float`). `.conjugate`
+/// is a method, dispatched through the method table.
+fn complex_get_attr(value: &Value, name: &str) -> EvalResult {
+    let Value::Complex(c) = value else { unreachable!("complex_get_attr sees only Complex") };
+    match name {
+        "real" => Ok(Value::Float(c.re)),
+        "imag" => Ok(Value::Float(c.im)),
+        _ => Err(attribute_error("complex", name)),
+    }
 }
 
 /// `dict.attr`: method dispatch only. CPython does not expose dict
