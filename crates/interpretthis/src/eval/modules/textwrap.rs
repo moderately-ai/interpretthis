@@ -18,7 +18,7 @@ pub fn has_function(name: &str) -> bool {
     matches!(name, "dedent" | "indent" | "wrap" | "fill" | "shorten")
 }
 
-pub fn call(func: &str, args: &[Value]) -> EvalResult {
+pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
     match func {
         "dedent" => {
             let s = arg_str(func, args, 0)?;
@@ -49,18 +49,18 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         }
         "fill" => {
             let s = arg_str(func, args, 0)?;
-            let width = opt_width(args, 1).unwrap_or(70);
+            let width = opt_width(width_value(args, kwargs)).unwrap_or(70);
             Ok(Value::String(fill(s, width).into()))
         }
         "wrap" => {
             let s = arg_str(func, args, 0)?;
-            let width = opt_width(args, 1).unwrap_or(70);
+            let width = opt_width(width_value(args, kwargs)).unwrap_or(70);
             let lines = wrap(s, width).into_iter().map(|w| Value::String(w.into())).collect();
             Ok(Value::List(shared_list(lines)))
         }
         "shorten" => {
             let s = arg_str(func, args, 0)?;
-            let width = opt_width(args, 1).ok_or_else(|| {
+            let width = opt_width(width_value(args, kwargs)).ok_or_else(|| {
                 EvalError::from(InterpreterError::TypeError(
                     "shorten() requires a width argument".into(),
                 ))
@@ -175,8 +175,19 @@ fn shorten(text: &str, width: usize, placeholder: &str) -> String {
     format!("{truncated}{placeholder}")
 }
 
-fn opt_width(args: &[Value], index: usize) -> Option<usize> {
-    match args.get(index)? {
+/// The `width` argument: a `width=` keyword takes precedence over the second
+/// positional. Other textwrap keywords (initial_indent, break_long_words, …)
+/// are not modelled and are ignored rather than rejected, since CPython accepts
+/// them.
+fn width_value<'a>(
+    args: &'a [Value],
+    kwargs: &'a indexmap::IndexMap<String, Value>,
+) -> Option<&'a Value> {
+    kwargs.get("width").or_else(|| args.get(1))
+}
+
+fn opt_width(v: Option<&Value>) -> Option<usize> {
+    match v? {
         Value::Int(n) => usize::try_from(*n).ok(),
         Value::Bool(b) => Some(usize::from(*b)),
         _ => None,
@@ -199,9 +210,9 @@ impl crate::eval::modules::Module for TextwrapModule {
         _state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
-        _kwargs: &indexmap::IndexMap<String, Value>,
+        kwargs: &indexmap::IndexMap<String, Value>,
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
-        call(func, args)
+        call(func, args, kwargs)
     }
 }
