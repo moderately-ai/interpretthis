@@ -12,7 +12,10 @@
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
-    eval::{control_flow::iterate_value, modules::need_arg},
+    eval::{
+        control_flow::iterate_value,
+        modules::{need_arg, value_error},
+    },
     value::{Value, shared_list},
 };
 
@@ -34,7 +37,7 @@ pub fn has_function(name: &str) -> bool {
     )
 }
 
-pub fn call(func: &str, args: &[Value]) -> EvalResult {
+pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
     match func {
         "chain" => {
             // chain(*iterables) — concatenate every iterable arg.
@@ -134,11 +137,31 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
             Ok(Value::List(shared_list(permutations(&items, r))))
         }
         "product" => {
-            // product(*iterables, repeat=1) — Cartesian product.
-            // repeat kwarg not threaded; users wanting it write
-            // product(a, a, a).
-            let pools: Vec<Vec<Value>> =
+            // product(*iterables, repeat=1) — Cartesian product of the pools
+            // repeated `repeat` times (`product(a, b, repeat=2)` pools are
+            // [a, b, a, b]).
+            let repeat = match kwargs.get("repeat") {
+                None => 1,
+                Some(Value::Int(n)) => usize::try_from(*n)
+                    .map_err(|_| value_error("product() repeat must be non-negative"))?,
+                Some(Value::Bool(b)) => usize::from(*b),
+                Some(other) => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "product() repeat must be an integer (got '{}')",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            if let Some(bad) = kwargs.keys().find(|k| k.as_str() != "repeat") {
+                return Err(InterpreterError::TypeError(format!(
+                    "product() got an unexpected keyword argument '{bad}'"
+                ))
+                .into());
+            }
+            let base: Vec<Vec<Value>> =
                 args.iter().map(iterate_value).collect::<Result<Vec<_>, _>>()?;
+            let pools: Vec<Vec<Value>> = std::iter::repeat_n(base, repeat).flatten().collect();
             Ok(Value::List(shared_list(cartesian_product(&pools))))
         }
         _ => Err(InterpreterError::AttributeError(format!(
@@ -350,6 +373,7 @@ async fn dropwhile_impl(
 async fn accumulate_impl(
     state: &mut crate::state::InterpreterState,
     args: &[Value],
+    call_kwargs: &indexmap::IndexMap<String, Value>,
     tools: &crate::tools::Tools,
 ) -> EvalResult {
     let iter_val = need_arg("accumulate", args, 0)?;
@@ -357,7 +381,15 @@ async fn accumulate_impl(
     let reducer = args.get(1).cloned();
     let kwargs = indexmap::IndexMap::new();
     let mut out: Vec<Value> = Vec::new();
-    let mut acc: Option<Value> = None;
+    // `initial=`: seed the accumulator and emit it first, so the output has one
+    // more element than the input (CPython 3.8+).
+    let mut acc: Option<Value> = match call_kwargs.get("initial") {
+        None | Some(Value::None) => None,
+        Some(seed) => {
+            out.push(seed.clone());
+            Some(seed.clone())
+        }
+    };
     for item in items {
         acc = Some(match acc {
             None => item,
@@ -406,15 +438,15 @@ impl crate::eval::modules::Module for ItertoolsModule {
         state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
-        _kwargs: &indexmap::IndexMap<String, Value>,
+        kwargs: &indexmap::IndexMap<String, Value>,
         tools: &crate::tools::Tools,
     ) -> EvalResult {
         match func {
             "takewhile" => takewhile_impl(state, args, tools).await,
             "dropwhile" => dropwhile_impl(state, args, tools).await,
-            "accumulate" => accumulate_impl(state, args, tools).await,
+            "accumulate" => accumulate_impl(state, args, kwargs, tools).await,
             "compress" => compress_impl(args),
-            _ => call(func, args),
+            _ => call(func, args, kwargs),
         }
     }
 }
