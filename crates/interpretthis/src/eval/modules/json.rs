@@ -175,7 +175,12 @@ fn json_key(key: &ValueKey) -> String {
         ValueKey::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         ValueKey::None => "null".to_string(),
         ValueKey::Float(bits) => float_repr(f64::from_bits(*bits)),
-        ValueKey::Complex(..) | ValueKey::Tuple(_) | ValueKey::Instance { .. } => format!("{key}"),
+        ValueKey::Ellipsis
+        | ValueKey::Complex(..)
+        | ValueKey::Tuple(_)
+        | ValueKey::Instance { .. } => {
+            format!("{key}")
+        }
     }
 }
 

@@ -1013,6 +1013,8 @@ pub fn compare_lt(left: &Value, right: &Value) -> Result<bool, EvalError> {
 fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::None, Value::None) => true,
+        // Singletons: identical to themselves, distinct from everything else.
+        (Value::Ellipsis, Value::Ellipsis) | (Value::NotImplemented, Value::NotImplemented) => true,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Float(a), Value::Float(b)) => a == b,

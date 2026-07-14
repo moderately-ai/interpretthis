@@ -403,7 +403,7 @@ const INDEXMAP_PER_ENTRY_BYTES: usize = 16;
 pub fn estimate_value_size(value: &crate::value::Value) -> usize {
     use crate::value::Value;
     match value {
-        Value::None | Value::NotImplemented => 0,
+        Value::None | Value::NotImplemented | Value::Ellipsis => 0,
         Value::Bool(_) => 1,
         // i64 and f64 are both 8 bytes.
         Value::Int(_) | Value::Float(_) => 8,
@@ -548,7 +548,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
 pub fn estimate_key_size(key: &crate::value::ValueKey) -> usize {
     use crate::value::ValueKey;
     match key {
-        ValueKey::None => 0,
+        ValueKey::None | ValueKey::Ellipsis => 0,
         ValueKey::Bool(_) => 1,
         ValueKey::Int(_) | ValueKey::Float(_) => 8,
         ValueKey::Complex(..) => 16,

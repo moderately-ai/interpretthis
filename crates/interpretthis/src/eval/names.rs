@@ -37,6 +37,9 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
     if name == "NotImplemented" {
         return Ok(Value::NotImplemented);
     }
+    if name == "Ellipsis" {
+        return Ok(Value::Ellipsis);
+    }
 
     // Builtin function names — these are handled by the call evaluator,
     // but we need to make them resolvable as names (for isinstance, callable checks etc.)

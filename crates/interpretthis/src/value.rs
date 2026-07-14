@@ -187,6 +187,9 @@ pub enum Value {
     /// Python `NotImplemented` singleton — dunder methods return this to
     /// signal "try the reflected operand / other protocol path".
     NotImplemented,
+    /// Python `Ellipsis` (`...`) singleton — a distinct truthy object, not
+    /// `None`.
+    Ellipsis,
     /// Python `bool`.
     Bool(bool),
     /// Python `int` that fits in i64 (fast path).
@@ -824,6 +827,8 @@ impl PartialEq for Value {
 #[non_exhaustive]
 pub enum ValueKey {
     None,
+    /// The `Ellipsis` singleton as a dict/set key.
+    Ellipsis,
     Bool(bool),
     Int(i64),
     /// Arbitrary-precision int key (outside i64).
@@ -866,6 +871,7 @@ impl PartialEq for ValueKey {
         // `value_to_key` happens before construction).
         match (self, other) {
             (Self::None, Self::None) => true,
+            (Self::Ellipsis, Self::Ellipsis) => true,
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Bool(b), Self::Int(i)) | (Self::Int(i), Self::Bool(b)) => *i == i64::from(*b),
             (Self::Int(a), Self::Int(b)) => a == b,
@@ -909,8 +915,10 @@ impl core::hash::Hash for ValueKey {
         const TUPLE_TAG: u8 = 4;
         const INSTANCE_TAG: u8 = 5;
         const COMPLEX_TAG: u8 = 6;
+        const ELLIPSIS_TAG: u8 = 7;
         match self {
             Self::None => NONE_TAG.hash(state),
+            Self::Ellipsis => ELLIPSIS_TAG.hash(state),
             Self::Bool(b) => {
                 NUMERIC_TAG.hash(state);
                 i64::from(*b).hash(state);
@@ -1240,6 +1248,8 @@ impl Value {
     pub fn is_truthy(&self) -> bool {
         match self {
             Self::None | Self::NotImplemented => false,
+            // `bool(...)` is True — Ellipsis is a truthy singleton.
+            Self::Ellipsis => true,
             Self::Bool(b) => *b,
             Self::Int(i) => *i != 0,
             Self::BigInt(i) => {
@@ -1314,6 +1324,7 @@ impl Value {
         match self {
             Self::None => "NoneType",
             Self::NotImplemented => "NotImplementedType",
+            Self::Ellipsis => "ellipsis",
             Self::Bool(_) => "bool",
             Self::Int(_) | Self::BigInt(_) => "int",
             Self::Float(_) => "float",
@@ -1515,6 +1526,7 @@ impl fmt::Display for Value {
         match self {
             Self::None => write!(f, "None"),
             Self::NotImplemented => write!(f, "NotImplemented"),
+            Self::Ellipsis => write!(f, "Ellipsis"),
             Self::Bool(true) => write!(f, "True"),
             Self::Bool(false) => write!(f, "False"),
             Self::Int(i) => write!(f, "{i}"),
@@ -2101,6 +2113,7 @@ impl ValueKey {
     pub fn to_value(&self) -> Value {
         match self {
             Self::None => Value::None,
+            Self::Ellipsis => Value::Ellipsis,
             Self::Bool(b) => Value::Bool(*b),
             Self::Int(i) => Value::Int(*i),
             Self::BigInt(i) => crate::value::int_from_bigint(i.clone()),
@@ -2120,6 +2133,7 @@ impl fmt::Display for ValueKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => write!(f, "None"),
+            Self::Ellipsis => write!(f, "Ellipsis"),
             Self::Bool(true) => write!(f, "True"),
             Self::Bool(false) => write!(f, "False"),
             Self::Int(i) => write!(f, "{i}"),

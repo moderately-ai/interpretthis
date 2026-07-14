@@ -16,10 +16,9 @@ use crate::{
 #[inline]
 pub fn eval_constant(constant: &Constant) -> Value {
     match constant {
-        // None and Ellipsis both evaluate to Value::None — Python's `...`
-        // is a distinct object but we don't need a separate runtime value
-        // for it yet, and None is the closest analogue.
-        Constant::None | Constant::Ellipsis => Value::None,
+        Constant::None => Value::None,
+        // `...` is the distinct Ellipsis singleton, not None.
+        Constant::Ellipsis => Value::Ellipsis,
         Constant::Bool(b) => Value::Bool(*b),
         Constant::Int(i) => {
             // The parser is built with its `num-bigint` feature, so the AST's
@@ -187,6 +186,7 @@ pub async fn eval_set(
 pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
     match val {
         Value::None => Ok(ValueKey::None),
+        Value::Ellipsis => Ok(ValueKey::Ellipsis),
         Value::Bool(b) => Ok(ValueKey::Bool(*b)),
         Value::Int(i) => Ok(ValueKey::Int(*i)),
         Value::BigInt(i) => Ok(ValueKey::BigInt((**i).clone())),
