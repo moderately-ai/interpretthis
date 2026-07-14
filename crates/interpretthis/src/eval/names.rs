@@ -314,34 +314,31 @@ pub(crate) async fn getattr_on_value(
         // navigable place. Mutations through the captured bound
         // method then navigate back to the original variable instead
         // of mutating a discarded clone.
-        if let (
-            Value::BoundMethod { receiver: crate::value::BoundMethodReceiver::Snapshot(_), method },
-            Some(place),
-        ) = (&val, place_for_upgrade)
+        return Ok(upgrade_bound_method_place(val, place_for_upgrade));
+    }
+    // A bare instance method accessed but not called (`m = p.go`) binds
+    // to the instance and becomes a first-class callable. CPython's
+    // lookup order makes a plain method a non-data descriptor, so the
+    // instance dict (a field of the same name) shadows it; only bind
+    // when no such field exists. Data descriptors (@property) and user
+    // descriptors are already handled above.
+    if let Value::Instance(inst) = &obj {
+        let has_field = inst.fields.lock().get(attr_name).is_some();
+        if !has_field
+            && crate::eval::classes::lookup_method_in_mro(state, &inst.class_name, attr_name)
+                .is_some()
         {
-            let bm_steps: Vec<crate::value::BoundMethodStep> = place
-                .steps
-                .iter()
-                .filter_map(|s| match s {
-                    crate::eval::place::PlaceStep::Index(v) => {
-                        Some(crate::value::BoundMethodStep::Index(v.clone()))
-                    }
-                    crate::eval::place::PlaceStep::Attr(n) => {
-                        Some(crate::value::BoundMethodStep::Attr(n.clone()))
-                    }
-                    // `is_navigable` filtered out Slice steps above.
-                    crate::eval::place::PlaceStep::Slice(_) => None,
-                })
-                .collect();
+            // Snapshot (not Place): an instance's `fields` are shared via
+            // Arc, so mutations through the bound method already propagate
+            // to the original object, and — like a CPython bound method —
+            // it stays pinned to that object even if the source variable
+            // is later reassigned. A Place receiver would wrongly re-bind
+            // to the variable's current value at call time.
             return Ok(Value::BoundMethod {
-                receiver: crate::value::BoundMethodReceiver::Place {
-                    root: place.root.clone(),
-                    steps: bm_steps,
-                },
-                method: method.clone(),
+                receiver: crate::value::BoundMethodReceiver::Snapshot(Box::new(obj.clone())),
+                method: attr_name.to_string(),
             });
         }
-        return Ok(val);
     }
     match legacy_attribute(state, &obj, attr_name) {
         Ok(v) => Ok(v),
@@ -372,6 +369,45 @@ pub(crate) async fn getattr_on_value(
             }
             Err(err)
         }
+    }
+}
+
+/// Upgrade a Snapshot-receiver bound method to a Place receiver when the
+/// attribute was read off a navigable place (a variable, or a chain of
+/// index/attr steps rooted at one). Mutations through the captured bound
+/// method then navigate back to the live binding instead of a discarded
+/// clone. Non-BoundMethod values and Snapshots with no place pass through.
+fn upgrade_bound_method_place(
+    val: Value,
+    place_for_upgrade: Option<&crate::eval::place::Place>,
+) -> Value {
+    let (
+        Value::BoundMethod { receiver: crate::value::BoundMethodReceiver::Snapshot(_), method },
+        Some(place),
+    ) = (&val, place_for_upgrade)
+    else {
+        return val;
+    };
+    let bm_steps: Vec<crate::value::BoundMethodStep> = place
+        .steps
+        .iter()
+        .filter_map(|s| match s {
+            crate::eval::place::PlaceStep::Index(v) => {
+                Some(crate::value::BoundMethodStep::Index(v.clone()))
+            }
+            crate::eval::place::PlaceStep::Attr(n) => {
+                Some(crate::value::BoundMethodStep::Attr(n.clone()))
+            }
+            // `is_navigable` filtered out Slice steps at the call site.
+            crate::eval::place::PlaceStep::Slice(_) => None,
+        })
+        .collect();
+    Value::BoundMethod {
+        receiver: crate::value::BoundMethodReceiver::Place {
+            root: place.root.clone(),
+            steps: bm_steps,
+        },
+        method: method.clone(),
     }
 }
 

@@ -432,6 +432,32 @@ pub(crate) async fn call_value_as_function(
                         )
                         .await;
                     }
+                    // A bound user-instance method (`m = p.go; m()`) runs the
+                    // async class method against the captured instance. Its
+                    // `fields` are shared via Arc, so self-mutations propagate
+                    // back to the original object. dispatch_method is sync and
+                    // has no view of the class registry, so it cannot run this.
+                    if let Value::Instance(inst) = &**value {
+                        if let Some((_, def)) = crate::eval::classes::lookup_method_in_mro(
+                            state,
+                            &inst.class_name,
+                            method,
+                        ) {
+                            let call = crate::eval::functions::CallArgs {
+                                positional: args,
+                                keyword: kwargs,
+                            };
+                            let (returned, _self) = crate::eval::classes::call_method(
+                                state,
+                                &def,
+                                (**value).clone(),
+                                call,
+                                tools,
+                            )
+                            .await?;
+                            return Ok(returned);
+                        }
+                    }
                     let mut recv = (**value).clone();
                     Ok(dispatch_method(&mut recv, method, args, kwargs)?.value)
                 }
