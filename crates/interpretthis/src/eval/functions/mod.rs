@@ -92,6 +92,17 @@ pub(crate) fn sequence_index_range(
     Ok((to_index(start)?, to_index(end.max(start))?))
 }
 
+/// Optional integer index argument: missing or `None` → `None` (use the
+/// default); otherwise coerced via `value_to_i64` (non-integers raise
+/// `TypeError`). Shared by the `str`/`bytes` search-method families, whose
+/// `start`/`end` bounds accept `None` (unlike `list`/`tuple` `.index`).
+pub(crate) fn opt_index_arg(arg: Option<&Value>) -> Result<Option<i64>, EvalError> {
+    match arg {
+        None | Some(Value::None) => Ok(None),
+        Some(v) => Ok(Some(value_to_i64(v)?)),
+    }
+}
+
 /// Python's `int(float)`: truncate toward zero to the *exact* integer.
 ///
 /// - `NaN` raises `ValueError` (CPython: "cannot convert float NaN to integer").

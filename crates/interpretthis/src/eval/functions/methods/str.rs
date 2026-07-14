@@ -13,7 +13,9 @@
 
 use indexmap::IndexMap;
 
-use super::super::{bind_method_params, reject_kwargs, to_index, to_len_i64, value_to_i64};
+use super::super::{
+    bind_method_params, opt_index_arg, reject_kwargs, to_index, to_len_i64, value_to_i64,
+};
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
     eval::control_flow::iterate_value,
@@ -605,14 +607,6 @@ fn parse_search_args<'a>(
         return Err(InterpreterError::TypeError(format!("{method}() argument must be str")).into());
     };
     Ok((sub.as_str(), opt_index_arg(args.get(1))?, opt_index_arg(args.get(2))?))
-}
-
-/// Missing or `None` → default; otherwise coerce to an integer index.
-fn opt_index_arg(arg: Option<&Value>) -> Result<Option<i64>, EvalError> {
-    match arg {
-        None | Some(Value::None) => Ok(None),
-        Some(v) => Ok(Some(value_to_i64(v)?)),
-    }
 }
 
 /// Resolve CPython `start`/`end` char indices to a `(clamped_start_char,
