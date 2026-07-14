@@ -949,9 +949,33 @@ pub(super) async fn try_builtin(
                 ))
                 .into());
             }
-            // One-arg form: return the iterable itself — no lazy
-            // iteration in this interpreter.
-            Ok(Some(args[0].clone()))
+            // One-arg form: return a real iterator that `next()` can advance.
+            match &args[0] {
+                // Already an iterator — CPython returns it unchanged (iter(it) is it).
+                Value::Lazy { .. } | Value::Generator { .. } => Ok(Some(args[0].clone())),
+                // A user object that already defines __next__ is its own iterator.
+                Value::Instance(inst)
+                    if crate::eval::classes::lookup_method_in_mro(
+                        state,
+                        &inst.class_name,
+                        "__next__",
+                    )
+                    .is_some() =>
+                {
+                    Ok(Some(args[0].clone()))
+                }
+                // Any other iterable: materialise into a fresh cursor-backed
+                // iterator (a list/tuple/str/range/dict/set is iterable but not
+                // itself an iterator). `op::iter` raises TypeError for a
+                // non-iterable.
+                other => {
+                    let items = crate::eval::op::iter(state, other, tools).await?;
+                    let cursor_id = state.next_cursor_id;
+                    state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
+                    state.lazy_cursors.insert(cursor_id, 0);
+                    Ok(Some(Value::Lazy { items, cursor_id }))
+                }
+            }
         }
         "bytes" | "bytearray" => {
             // CPython: bytes() -> b''; bytes(int) -> b'\x00' * n;
@@ -1078,20 +1102,16 @@ pub(super) async fn try_builtin(
                     };
                 }
             }
-            let items = crate::eval::op::iter(state, &args[0], tools).await;
-            match items {
-                Ok(items) if !items.is_empty() => Ok(Some(items[0].clone())),
-                _ => {
-                    if args.len() >= 2 {
-                        Ok(Some(args[1].clone()))
-                    } else {
-                        Err(EvalError::Exception(ExceptionValue::new(
-                            "StopIteration",
-                            String::new(),
-                        )))
-                    }
-                }
-            }
+            // Everything else (list, tuple, str, dict, int, ...) is iterable
+            // but NOT an iterator, so CPython raises — `next([1,2,3])` is a
+            // TypeError, not the first element. The old fallback materialised
+            // the iterable and returned items[0] every call (never advancing),
+            // and swallowed the not-an-iterator error into the default.
+            Err(InterpreterError::TypeError(format!(
+                "'{}' object is not an iterator",
+                args[0].type_name()
+            ))
+            .into())
         }
         "filter" => {
             check_arg_count(name, args, 2, 2)?;
