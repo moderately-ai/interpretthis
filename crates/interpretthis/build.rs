@@ -36,9 +36,16 @@ fn main() -> BuildResult {
     println!("cargo:rerun-if-changed=build.rs");
 
     let mut tree = TopicTree::default();
-    if corpus_root.is_dir() {
-        walk(&corpus_root, &corpus_root, &mut tree)?;
+    // Hard-error if the corpus is missing: a moved/renamed directory would
+    // otherwise emit zero tests and let CI go green with no parity coverage.
+    if !corpus_root.is_dir() {
+        return Err(format!(
+            "parity corpus directory not found: {} — the differential test suite would be empty",
+            corpus_root.display()
+        )
+        .into());
     }
+    walk(&corpus_root, &corpus_root, &mut tree)?;
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let generated = out_dir.join("parity_corpus_generated.rs");
@@ -88,7 +95,10 @@ impl TopicTree {
 
 fn walk(root: &Path, current: &Path, tree: &mut TopicTree) -> BuildResult {
     let read = fs::read_dir(current)?;
-    let mut entries: Vec<PathBuf> = read.filter_map(Result::ok).map(|entry| entry.path()).collect();
+    // Propagate a read error rather than filter_map(Result::ok), which would
+    // silently drop an unreadable entry and lose that snippet's test.
+    let mut entries: Vec<PathBuf> =
+        read.map(|entry| entry.map(|e| e.path())).collect::<Result<_, _>>()?;
     entries.sort();
     for path in entries {
         if path.is_dir() {
