@@ -1,0 +1,5 @@
+[profile.default]
+# Only surface failing/skipped tests in the output; passing tests stay quiet so
+# the signal (what broke) is not buried under hundreds of PASS lines.
+status-level = "fail"
+final-status-level = "fail"
