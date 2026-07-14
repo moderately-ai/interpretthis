@@ -446,6 +446,19 @@ fn re_pattern_methods(
         .map(MethodOutcome::pure)
 }
 
+fn decimal_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Decimal(d) = obj else {
+        return Err(type_mismatch("Decimal"));
+    };
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    crate::eval::modules::decimal::dispatch_decimal_method(d, method, args).map(MethodOutcome::pure)
+}
+
 fn hash_digest_methods(
     obj: &mut Value,
     method: &str,
@@ -485,6 +498,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::TimeDelta(_) => Some(timedelta_methods),
         Value::ReMatch(_) => Some(re_match_methods),
         Value::RePattern(_) => Some(re_pattern_methods),
+        Value::Decimal(_) => Some(decimal_methods),
         Value::HashDigest { .. } => Some(hash_digest_methods),
         _ => None,
     }

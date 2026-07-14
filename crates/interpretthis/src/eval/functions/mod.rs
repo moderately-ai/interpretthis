@@ -2,14 +2,6 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-#![expect(
-    clippy::cast_precision_loss,
-    reason = "Python built-ins (sum, min, max, `**`, int(float)) convert Int ↔ \
-              Float; precision loss above 2^53 is CPython's behaviour and we \
-              faithfully reproduce it. Scoped to this module since the numeric \
-              built-ins are here"
-)]
-
 use crate::{
     error::{EvalError, InterpreterError},
     value::Value,

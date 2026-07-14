@@ -25,7 +25,10 @@ use crate::{
 
 /// Whether `re` provides a function named `name`.
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "findall" | "sub" | "split" | "match" | "search" | "fullmatch" | "compile")
+    matches!(
+        name,
+        "findall" | "sub" | "subn" | "split" | "match" | "search" | "fullmatch" | "compile"
+    )
 }
 
 /// Invoke a `re` function. `sub`/`split` accept their `count`/`maxsplit`
@@ -35,6 +38,7 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
         "compile" => compile_pattern(func, args),
         "findall" => findall(args),
         "sub" => sub(func, args, kwargs),
+        "subn" => subn(func, args, kwargs),
         "split" => split(func, args, kwargs),
         "match" => {
             anchored_search(func, args, /* anchor_start */ true, /* anchor_end */ false)
@@ -89,7 +93,7 @@ pub fn dispatch_pattern_method(
     kwargs: &IndexMap<String, Value>,
 ) -> EvalResult {
     match method {
-        "match" | "search" | "fullmatch" | "findall" | "sub" | "split" => {
+        "match" | "search" | "fullmatch" | "findall" | "sub" | "subn" | "split" => {
             let mut full = Vec::with_capacity(args.len() + 1);
             full.push(Value::String(pattern.to_string().into()));
             full.extend_from_slice(args);
@@ -148,6 +152,31 @@ fn sub(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResu
         re.replacen(text, usize::try_from(count).unwrap_or(0), translated.as_str())
     };
     Ok(Value::String(replaced.into_owned().into()))
+}
+
+/// `re.subn(pattern, repl, string, count=0)` — like `sub`, but returns a
+/// `(new_string, number_of_subs_made)` tuple.
+fn subn(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
+    let pattern = arg_str(func, args, 0)?;
+    let repl = arg_str(func, args, 1)?;
+    let text = arg_str(func, args, 2)?;
+    let count = count_arg(args, 3, kwargs, "count");
+    let re = compile(pattern)?;
+    let translated = translate_python_repl(repl);
+    let (replaced, made): (String, usize) = if count < 0 {
+        (text.to_string(), 0)
+    } else if count == 0 {
+        let n = re.find_iter(text).count();
+        (re.replace_all(text, translated.as_str()).into_owned(), n)
+    } else {
+        let limit = usize::try_from(count).unwrap_or(0);
+        let n = re.find_iter(text).take(limit).count();
+        (re.replacen(text, limit, translated.as_str()).into_owned(), n)
+    };
+    Ok(Value::Tuple(vec![
+        Value::String(replaced.into()),
+        Value::Int(i64::try_from(made).unwrap_or(i64::MAX)),
+    ]))
 }
 
 /// Translate Python's regex replacement syntax to the Rust `regex`

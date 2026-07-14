@@ -2793,14 +2793,44 @@ fn decimal_arith(
                     InterpreterError::Runtime("Decimal division by zero".into()).into()
                 ));
             }
-            // BigDecimal lacks a direct floor-div; round toward negative
-            // infinity by computing the quotient and truncating its
-            // fractional part.
+            // BigDecimal lacks a direct floor-div; Decimal `//` truncates the
+            // quotient toward zero (unlike int floor division).
             (a / b).with_scale(0)
         }
-        // Decimal modulo/power parity is tracked by
-        // gap-decimal-mod-pow-operator-parity.
-        _ => return None,
+        BinOp::Mod => {
+            if b.is_zero() {
+                return Some(Err(
+                    InterpreterError::Runtime("Decimal division by zero".into()).into()
+                ));
+            }
+            // CPython Decimal remainder: `a - (a // b) * b`, where `//`
+            // truncates toward zero, so the remainder takes the sign of `a`.
+            let q = (a.clone() / b.clone()).with_scale(0);
+            a - q * b
+        }
+        BinOp::Pow => {
+            use num_traits::ToPrimitive as _;
+            // Integer exponent -> exact repeated multiplication; a negative
+            // exponent inverts and rounds to the context precision. A
+            // fractional exponent is not modelled.
+            let exp = (b.fractional_digit_count() <= 0).then(|| b.to_i64()).flatten()?;
+            let mut acc = bigdecimal::BigDecimal::from(1);
+            for _ in 0..exp.unsigned_abs() {
+                acc *= &a;
+            }
+            if exp < 0 {
+                if a.is_zero() {
+                    return Some(Err(
+                        InterpreterError::Runtime("Decimal division by zero".into()).into()
+                    ));
+                }
+                let digits = u64::try_from(decimal_prec).unwrap_or(28);
+                let inv = bigdecimal::BigDecimal::from(1) / acc;
+                if inv.digits() > digits { inv.with_prec(digits) } else { inv }
+            } else {
+                acc
+            }
+        }
     };
     Some(Ok(Value::Decimal(Box::new(result))))
 }
@@ -2884,8 +2914,33 @@ fn fraction_arith(
             }
             (a / b).floor()
         }
-        // Fraction modulo/power parity is tracked by gap-fraction-mod-pow-parity.
-        BinOp::Mod | BinOp::Pow => return None,
+        BinOp::Mod => {
+            if b.numer().sign() == num_bigint::Sign::NoSign {
+                return Some(Err(
+                    InterpreterError::Runtime("Fraction division by zero".into()).into()
+                ));
+            }
+            // `a - floor(a / b) * b` — floored remainder, matching CPython.
+            let q = (a.clone() / b.clone()).floor();
+            a - q * b
+        }
+        BinOp::Pow => {
+            use num_traits::ToPrimitive as _;
+            // An integer exponent is exact (`Ratio::pow` inverts for negative);
+            // a non-integer exponent falls back to float via the caller.
+            if !b.is_integer() {
+                let base = fraction_to_f64(lhs)?;
+                let exp = fraction_to_f64(rhs)?;
+                return Some(Ok(Value::Float(base.powf(exp))));
+            }
+            let exp = b.numer().to_i32()?;
+            if exp < 0 && a.numer().sign() == num_bigint::Sign::NoSign {
+                return Some(Err(
+                    InterpreterError::Runtime("Fraction division by zero".into()).into()
+                ));
+            }
+            a.pow(exp)
+        }
     };
     Some(Ok(Value::Fraction(Box::new(result))))
 }

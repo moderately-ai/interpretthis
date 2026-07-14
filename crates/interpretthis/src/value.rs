@@ -1996,6 +1996,15 @@ impl Value {
                 use num_traits::ToPrimitive as _;
                 b.to_f64()
             }
+            Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Self::Decimal(d) => {
+                use num_traits::ToPrimitive as _;
+                d.to_f64()
+            }
+            Self::Fraction(fr) => {
+                use num_traits::ToPrimitive as _;
+                fr.to_f64()
+            }
             _ => None,
         }
     }

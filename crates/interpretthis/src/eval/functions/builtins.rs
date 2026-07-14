@@ -160,6 +160,13 @@ pub(super) async fn try_builtin(
                 Value::Float(f) => Ok(Some(float_to_int_exact(*f)?)),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
                 Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
+                // Decimal / Fraction truncate toward zero, as CPython's int()
+                // does for the numeric tower.
+                Value::Decimal(d) => {
+                    let (int_val, _) = d.with_scale(0).as_bigint_and_exponent();
+                    Ok(Some(crate::value::int_from_bigint(int_val)))
+                }
+                Value::Fraction(fr) => Ok(Some(crate::value::int_from_bigint(fr.to_integer()))),
                 _ => Err(InterpreterError::TypeError(format!(
                     "int() argument must be a string or a number, not '{}'",
                     args[0].type_name()
@@ -173,9 +180,6 @@ pub(super) async fn try_builtin(
                 return Ok(Some(Value::Float(0.0)));
             }
             match &args[0] {
-                Value::Int(i) => Ok(Some(Value::Float(*i as f64))),
-                Value::Float(f) => Ok(Some(Value::Float(*f))),
-                Value::Bool(b) => Ok(Some(Value::Float(if *b { 1.0 } else { 0.0 }))),
                 Value::String(s) => {
                     let trimmed = s.trim();
                     if trimmed == "inf" || trimmed == "Infinity" {
@@ -195,11 +199,15 @@ pub(super) async fn try_builtin(
                     })?;
                     Ok(Some(Value::Float(f)))
                 }
-                _ => Err(InterpreterError::TypeError(format!(
-                    "float() argument must be a string or a number, not '{}'",
-                    args[0].type_name()
-                ))
-                .into()),
+                // int/float/bool/Decimal/Fraction/BigInt all convert via the
+                // numeric-tower accessor.
+                other => other.as_float().map(Value::Float).map(Some).ok_or_else(|| {
+                    InterpreterError::TypeError(format!(
+                        "float() argument must be a string or a number, not '{}'",
+                        other.type_name()
+                    ))
+                    .into()
+                }),
             }
         }
         "complex" => {

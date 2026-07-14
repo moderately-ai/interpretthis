@@ -1,0 +1,11 @@
+from decimal import Decimal, getcontext
+print(Decimal("0.1") + Decimal("0.2"))
+print(Decimal("1.5") * Decimal("2"))
+print(Decimal("10") / Decimal("3"))
+print(Decimal("0.1") + Decimal("0.2") == Decimal("0.3"))
+print(Decimal("2.5").quantize(Decimal("1")))
+print(Decimal("1.23456").quantize(Decimal("0.01")))
+print(Decimal(10) % Decimal(3), Decimal(10) // Decimal(3))
+print(Decimal("2") ** 3)
+print(float(Decimal("1.5")), int(Decimal("7.9")))
+print(Decimal("-3.14").copy_abs(), abs(Decimal("-5")))

@@ -1,0 +1,11 @@
+from fractions import Fraction
+print(Fraction(1, 3) + Fraction(1, 6))
+print(Fraction(2, 4))
+print(Fraction(3, 4) * Fraction(2, 3))
+print(Fraction(1, 2) < Fraction(2, 3))
+print(Fraction(10, 4).numerator, Fraction(10, 4).denominator)
+print(Fraction(1, 3) + 1)
+print(float(Fraction(1, 4)))
+print(Fraction(6, 3) == 2)
+print(Fraction(1, 2) ** 2)
+print(Fraction(7, 2) // 1, Fraction(7, 2) % 1)

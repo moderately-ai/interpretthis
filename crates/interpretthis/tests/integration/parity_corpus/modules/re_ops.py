@@ -1,0 +1,12 @@
+import re
+print(re.findall(r"\d+", "a12b34c5"))
+print(re.sub(r"\d", "#", "a1b2c3"))
+m = re.search(r"(\w+)@(\w+)", "user@host")
+print(m.group(0), m.group(1), m.group(2))
+print(re.match(r"\d+", "123abc").group())
+print(re.split(r"\s+", "a  b   c"))
+print(re.findall(r"(\d)(\d)", "1234"))
+print(bool(re.match(r"^\d+$", "12345")), bool(re.match(r"^\d+$", "12a45")))
+print(re.sub(r"(\w+) (\w+)", r"\2 \1", "hello world"))
+n = re.subn(r"\d", "X", "a1b2")
+print(n)

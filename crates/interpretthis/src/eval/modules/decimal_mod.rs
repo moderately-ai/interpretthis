@@ -26,6 +26,69 @@ use crate::{
     value::Value,
 };
 
+/// Dispatch a method call on a `Decimal` receiver.
+pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Value]) -> EvalResult {
+    use num_traits::{Signed as _, Zero as _};
+    match method {
+        // `quantize(exp)` rounds to the exponent (decimal scale) of `exp`,
+        // using banker's rounding (CPython's default ROUND_HALF_EVEN).
+        "quantize" => {
+            let Some(Value::Decimal(exp)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "quantize() requires a Decimal argument".into(),
+                )
+                .into());
+            };
+            let scale = exp.fractional_digit_count();
+            Ok(Value::Decimal(Box::new(
+                d.with_scale_round(scale, bigdecimal::RoundingMode::HalfEven),
+            )))
+        }
+        "copy_abs" => Ok(Value::Decimal(Box::new(d.abs()))),
+        "copy_negate" => Ok(Value::Decimal(Box::new(-d.clone()))),
+        "copy_sign" => {
+            let Some(Value::Decimal(other)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "copy_sign() requires a Decimal argument".into(),
+                )
+                .into());
+            };
+            let magnitude = d.abs();
+            Ok(Value::Decimal(Box::new(if other.is_negative() { -magnitude } else { magnitude })))
+        }
+        "is_zero" => Ok(Value::Bool(d.is_zero())),
+        "is_signed" => Ok(Value::Bool(d.is_negative())),
+        "is_nan" | "is_infinite" | "is_qnan" | "is_snan" => Ok(Value::Bool(false)),
+        "normalize" => Ok(Value::Decimal(Box::new(d.normalized()))),
+        "sqrt" => d.sqrt().map(|r| Value::Decimal(Box::new(r))).ok_or_else(|| {
+            EvalError::Exception(crate::value::ExceptionValue::new(
+                "InvalidOperation",
+                "sqrt of negative Decimal",
+            ))
+        }),
+        "to_integral_value" | "to_integral" => {
+            Ok(Value::Decimal(Box::new(d.with_scale_round(0, bigdecimal::RoundingMode::HalfEven))))
+        }
+        "as_integer_ratio" => {
+            let (mantissa, scale) = d.as_bigint_and_exponent();
+            let (num, den) = if scale >= 0 {
+                (mantissa, num_bigint::BigInt::from(10).pow(u32::try_from(scale).unwrap_or(0)))
+            } else {
+                (
+                    mantissa * num_bigint::BigInt::from(10).pow(u32::try_from(-scale).unwrap_or(0)),
+                    num_bigint::BigInt::from(1),
+                )
+            };
+            let ratio = num_rational::BigRational::new(num, den);
+            Ok(Value::Fraction(Box::new(ratio)))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'Decimal' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 pub const CONTEXT_CLASS: &str = "decimal.Context";
 /// Marker class for `with localcontext() as ctx:`.
 pub const LOCAL_CONTEXT_CLASS: &str = "decimal.LocalContext";
