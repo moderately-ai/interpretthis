@@ -522,6 +522,18 @@ pub async fn eval_call(
         }
     }
 
+    // Computed callable: the func is an expression (another call, a lambda
+    // literal, a subscript, ...), not a bare name or `obj.method`. Evaluate it
+    // and dispatch the resulting value. Without this, `(lambda x: x)(5)`,
+    // `functools.partial(f)(x)`, and `operator.itemgetter(1)(seq)` all fell
+    // through to the name-based lookup with an empty name and raised NameError.
+    if func_name.is_none() && !is_method_call {
+        let callable = eval_expr(state, &node.func, tools).await?;
+        let callable = crate::eval::functions::resolve_proxy(&callable).await?;
+        let resolved_args = resolve_method_args(&args).await?;
+        return call_value_as_function(state, &callable, &resolved_args, &kwargs, tools).await;
+    }
+
     let name = func_name.as_deref().unwrap_or("");
 
     // 1. Tool dispatch — short-circuits on builtins so a host-registered tool named e.g. `print`
