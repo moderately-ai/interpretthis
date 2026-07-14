@@ -1919,11 +1919,24 @@ impl Value {
         match json {
             serde_json::Value::Null => Self::None,
             serde_json::Value::Bool(b) => Self::Bool(b),
-            serde_json::Value::Number(n) => n
-                .as_i64()
-                .map(Self::Int)
-                .or_else(|| n.as_f64().map(Self::Float))
-                .unwrap_or(Self::None),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Self::Int(i)
+                } else {
+                    // Beyond i64. With serde_json's `arbitrary_precision`, the
+                    // raw literal is preserved: an integer literal (no `.`/`e`)
+                    // promotes to an exact BigInt rather than a lossy float.
+                    let raw = n.to_string();
+                    if raw.contains(['.', 'e', 'E']) {
+                        n.as_f64().map(Self::Float).unwrap_or(Self::None)
+                    } else {
+                        raw.parse::<num_bigint::BigInt>().map_or_else(
+                            |_| n.as_f64().map(Self::Float).unwrap_or(Self::None),
+                            int_from_bigint,
+                        )
+                    }
+                }
+            }
             serde_json::Value::String(s) => Self::String(s.into()),
             serde_json::Value::Array(arr) => {
                 Self::List(shared_list(arr.into_iter().map(Self::from_json).collect()))
