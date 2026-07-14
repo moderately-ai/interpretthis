@@ -208,11 +208,11 @@ pub async fn eval_class_def(
                 )?;
             }
             Stmt::Assign(assign) => {
-                if let [Expr::Name(target)] = assign.targets.as_slice() {
-                    let value = eval_expr(state, &assign.value, tools).await?;
-                    let attr_name = target.id.as_str().to_string();
-                    let wrapped = wrap_enum_member(enum_kind, class_name, &attr_name, value);
-                    class_attrs.insert(attr_name, wrapped);
+                // Every target receives the value: chained (`a = b = 1`) and
+                // tuple/list unpacking (`X, Y = 1, 2`) both land as class attrs.
+                let value = eval_expr(state, &assign.value, tools).await?;
+                for target in &assign.targets {
+                    bind_class_target(target, &value, enum_kind, class_name, &mut class_attrs)?;
                 }
             }
             Stmt::AnnAssign(ann) => {
@@ -600,6 +600,66 @@ async fn invoke_init_subclass(
         // `__init_subclass__(cls=NewSubclass)`.
         let call = CallArgs { positional: &[], keyword: &empty_kwargs };
         let (_ret, _self) = call_method(state, &def, new_cls.clone(), call, tools).await?;
+    }
+    Ok(())
+}
+
+/// Bind one class-body assignment target to `value`, inserting into
+/// `class_attrs`. Handles a plain `Name` and tuple/list unpacking
+/// (`X, Y = 1, 2`), recursing for nested targets.
+fn bind_class_target(
+    target: &Expr,
+    value: &Value,
+    enum_kind: Option<crate::value::EnumKind>,
+    class_name: &str,
+    class_attrs: &mut BTreeMap<String, Value>,
+) -> Result<(), EvalError> {
+    match target {
+        Expr::Name(name) => {
+            let attr = name.id.as_str().to_string();
+            let wrapped = wrap_enum_member(enum_kind, class_name, &attr, value.clone());
+            class_attrs.insert(attr, wrapped);
+            Ok(())
+        }
+        Expr::Tuple(t) => unpack_class_targets(&t.elts, value, enum_kind, class_name, class_attrs),
+        Expr::List(l) => unpack_class_targets(&l.elts, value, enum_kind, class_name, class_attrs),
+        // Attribute / subscript / starred class-body targets are unusual and
+        // left unmodelled (as before).
+        _ => Ok(()),
+    }
+}
+
+/// Unpack an iterable `value` across `elts` class-body targets, requiring the
+/// arity to match (CPython raises ValueError otherwise).
+fn unpack_class_targets(
+    elts: &[Expr],
+    value: &Value,
+    enum_kind: Option<crate::value::EnumKind>,
+    class_name: &str,
+    class_attrs: &mut BTreeMap<String, Value>,
+) -> Result<(), EvalError> {
+    let items: Vec<Value> = match value {
+        Value::Tuple(items) => items.clone(),
+        Value::List(items) => items.lock().clone(),
+        Value::String(s) => s.chars().map(|c| Value::String(c.to_string().into())).collect(),
+        _ => {
+            return Err(InterpreterError::TypeError(format!(
+                "cannot unpack non-iterable {} object",
+                value.type_name()
+            ))
+            .into());
+        }
+    };
+    if items.len() != elts.len() {
+        return Err(InterpreterError::ValueError(if items.len() > elts.len() {
+            format!("too many values to unpack (expected {})", elts.len())
+        } else {
+            format!("not enough values to unpack (expected {}, got {})", elts.len(), items.len())
+        })
+        .into());
+    }
+    for (elt, item) in elts.iter().zip(items) {
+        bind_class_target(elt, &item, enum_kind, class_name, class_attrs)?;
     }
     Ok(())
 }
