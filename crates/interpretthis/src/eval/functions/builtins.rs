@@ -517,9 +517,23 @@ pub(super) async fn try_builtin(
         "abs" => {
             check_arg_count(name, args, 1, 1)?;
             match &args[0] {
-                Value::Int(i) => Ok(Some(Value::Int(i.abs()))),
+                // `checked_abs` handles i64::MIN, whose abs overflows i64:
+                // promote to BigInt instead of panicking (debug) / wrapping.
+                Value::Int(i) => Ok(Some(i.checked_abs().map_or_else(
+                    || crate::value::int_from_bigint(-num_bigint::BigInt::from(*i)),
+                    Value::Int,
+                ))),
+                Value::BigInt(b) => {
+                    use num_traits::Signed as _;
+                    Ok(Some(crate::value::int_from_bigint((**b).abs())))
+                }
                 Value::Float(f) => Ok(Some(Value::Float(f.abs()))),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
+                Value::Decimal(d) => Ok(Some(Value::Decimal(Box::new(d.abs())))),
+                Value::Fraction(fr) => {
+                    use num_traits::Signed as _;
+                    Ok(Some(Value::Fraction(Box::new((**fr).abs()))))
+                }
                 _ => Err(InterpreterError::TypeError(format!(
                     "bad operand type for abs(): '{}'",
                     args[0].type_name()
