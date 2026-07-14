@@ -645,6 +645,11 @@ pub struct ClassValue {
     /// value wrapping (raw `RED = 1` becomes `Color.RED` enum member).
     #[serde(default)]
     pub enum_kind: Option<EnumKind>,
+    /// Enum member names in class-body declaration order. Drives iteration
+    /// (`for m in Color`) and `list(Color)`, which CPython yields in definition
+    /// order — class_attrs is a BTreeMap and would sort them alphabetically.
+    #[serde(default)]
+    pub enum_members: Vec<String>,
     /// Annotated attribute names in class-body declaration order. Populated
     /// by every `name: Type` line (with or without a value). Drives the
     /// `@dataclass` decorator's field discovery — class_attrs is alphabetical
@@ -688,6 +693,7 @@ impl ClassValue {
             static_methods: BTreeMap::new(),
             class_methods: BTreeMap::new(),
             enum_kind: None,
+            enum_members: Vec::new(),
             annotations: Vec::new(),
             dataclass_fields: None,
             frozen: false,

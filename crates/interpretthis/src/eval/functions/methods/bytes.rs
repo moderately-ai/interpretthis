@@ -125,6 +125,123 @@ pub(crate) fn dispatch_bytes_method(
             let (needle, bs, be) = bytes_search_args(b, method, args)?;
             Ok(Value::Int(to_len_i64(count_occurrences(&b[bs..be], &needle))?))
         }
+        // Case operations act on ASCII letters only; other bytes pass through
+        // (CPython `bytes.upper` is ASCII-only).
+        "upper" => Ok(Value::Bytes(b.iter().map(u8::to_ascii_uppercase).collect())),
+        "lower" => Ok(Value::Bytes(b.iter().map(u8::to_ascii_lowercase).collect())),
+        "swapcase" => Ok(Value::Bytes(
+            b.iter()
+                .map(|c| {
+                    if c.is_ascii_uppercase() {
+                        c.to_ascii_lowercase()
+                    } else if c.is_ascii_lowercase() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        *c
+                    }
+                })
+                .collect(),
+        )),
+        "capitalize" => {
+            let mut out: Vec<u8> = b.iter().map(u8::to_ascii_lowercase).collect();
+            if let Some(first) = out.first_mut() {
+                *first = first.to_ascii_uppercase();
+            }
+            Ok(Value::Bytes(out))
+        }
+        "title" => {
+            let mut out = Vec::with_capacity(b.len());
+            let mut start_word = true;
+            for &c in b {
+                if c.is_ascii_alphabetic() {
+                    out.push(if start_word {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c.to_ascii_lowercase()
+                    });
+                    start_word = false;
+                } else {
+                    out.push(c);
+                    start_word = true;
+                }
+            }
+            Ok(Value::Bytes(out))
+        }
+        "isdigit" => Ok(Value::Bool(!b.is_empty() && b.iter().all(u8::is_ascii_digit))),
+        "isalpha" => Ok(Value::Bool(!b.is_empty() && b.iter().all(u8::is_ascii_alphabetic))),
+        "isalnum" => Ok(Value::Bool(!b.is_empty() && b.iter().all(u8::is_ascii_alphanumeric))),
+        "isspace" => Ok(Value::Bool(!b.is_empty() && b.iter().all(u8::is_ascii_whitespace))),
+        "isupper" => Ok(Value::Bool(
+            b.iter().any(u8::is_ascii_uppercase) && !b.iter().any(u8::is_ascii_lowercase),
+        )),
+        "islower" => Ok(Value::Bool(
+            b.iter().any(u8::is_ascii_lowercase) && !b.iter().any(u8::is_ascii_uppercase),
+        )),
+        "strip" | "lstrip" | "rstrip" => {
+            let set = match args.first() {
+                None | Some(Value::None) => None,
+                Some(Value::Bytes(chars)) => Some(chars.clone()),
+                Some(_) => {
+                    return Err(InterpreterError::TypeError(
+                        "a bytes-like object is required".into(),
+                    )
+                    .into());
+                }
+            };
+            let strip_it = |c: u8| set.as_ref().map_or(c.is_ascii_whitespace(), |s| s.contains(&c));
+            let mut lo = 0usize;
+            let mut hi = b.len();
+            if method != "rstrip" {
+                while lo < hi && strip_it(b[lo]) {
+                    lo += 1;
+                }
+            }
+            if method != "lstrip" {
+                while hi > lo && strip_it(b[hi - 1]) {
+                    hi -= 1;
+                }
+            }
+            Ok(Value::Bytes(b[lo..hi].to_vec()))
+        }
+        "join" => {
+            let items =
+                crate::eval::control_flow::iterate_value(args.first().ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(
+                        "join() takes exactly one argument".into(),
+                    ))
+                })?)?;
+            let mut out = Vec::new();
+            for (i, item) in items.iter().enumerate() {
+                let Value::Bytes(part) = item else {
+                    return Err(InterpreterError::TypeError(format!(
+                        "sequence item {i}: expected a bytes-like object, {} found",
+                        item.type_name()
+                    ))
+                    .into());
+                };
+                if i > 0 {
+                    out.extend_from_slice(b);
+                }
+                out.extend_from_slice(part);
+            }
+            Ok(Value::Bytes(out))
+        }
+        "removeprefix" => {
+            let Some(Value::Bytes(prefix)) = args.first() else {
+                return Err(
+                    InterpreterError::TypeError("a bytes-like object is required".into()).into()
+                );
+            };
+            Ok(Value::Bytes(b.strip_prefix(prefix.as_slice()).unwrap_or(b).to_vec()))
+        }
+        "removesuffix" => {
+            let Some(Value::Bytes(suffix)) = args.first() else {
+                return Err(
+                    InterpreterError::TypeError("a bytes-like object is required".into()).into()
+                );
+            };
+            Ok(Value::Bytes(b.strip_suffix(suffix.as_slice()).unwrap_or(b).to_vec()))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "'bytes' object has no attribute '{method}'"
         ))

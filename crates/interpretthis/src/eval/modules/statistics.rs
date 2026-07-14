@@ -29,13 +29,29 @@ use crate::{
 
 /// Whether `statistics` provides a function named `name`.
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "mean" | "median" | "stdev" | "variance" | "pstdev" | "pvariance" | "mode")
+    matches!(
+        name,
+        "mean"
+            | "median"
+            | "stdev"
+            | "variance"
+            | "pstdev"
+            | "pvariance"
+            | "mode"
+            | "quantiles"
+            | "fmean"
+    )
 }
 
 /// Invoke a `statistics` function.
-pub fn call(func: &str, args: &[Value]) -> EvalResult {
+pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
     let data = iterate_value(need_arg(func, args, 0)?)?;
     match func {
+        "quantiles" => quantiles(func, &data, kwargs),
+        "fmean" => {
+            let nums = numbers(func, &data, 1)?;
+            Ok(Value::Float(mean(&nums)))
+        }
         "mean" => {
             let nums = numbers(func, &data, 1)?;
             Ok(coerce(mean(&nums), all_integer(&data)))
@@ -62,6 +78,56 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         ))
         .into()),
     }
+}
+
+/// `statistics.quantiles(data, *, n=4, method='exclusive')` — divide `data`
+/// into `n` equal-probability intervals, returning the `n - 1` cut points.
+/// Implements CPython's default 'exclusive' method (and 'inclusive').
+fn quantiles(func: &str, data: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
+    let n = match kwargs.get("n") {
+        None => 4usize,
+        Some(Value::Int(v)) if *v >= 1 => usize::try_from(*v).unwrap_or(4),
+        Some(_) => {
+            return Err(crate::eval::modules::statistics_error("n must be at least 1"));
+        }
+    };
+    let inclusive = match kwargs.get("method") {
+        None => false,
+        Some(Value::String(s)) if s.as_str() == "inclusive" => true,
+        Some(Value::String(s)) if s.as_str() == "exclusive" => false,
+        Some(_) => {
+            return Err(crate::eval::modules::statistics_error("unknown method"));
+        }
+    };
+    let mut sorted = numbers(func, data, 1)?;
+    if sorted.len() < 2 {
+        return Err(crate::eval::modules::statistics_error("must have at least two data points"));
+    }
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let ld = sorted.len();
+    let mut result = Vec::with_capacity(n - 1);
+    if inclusive {
+        let m = ld - 1;
+        for i in 1..n {
+            let j_full = i * m / n;
+            let delta = i * m - j_full * n;
+            let interpolated = (sorted[j_full] * (n - delta) as f64
+                + sorted[j_full + 1] * delta as f64)
+                / n as f64;
+            result.push(Value::Float(interpolated));
+        }
+    } else {
+        let m = ld + 1;
+        for i in 1..n {
+            let mut j = i * m / n;
+            j = j.clamp(1, ld - 1);
+            let delta = (i * m) as isize - (j * n) as isize;
+            let interpolated =
+                (sorted[j - 1] * (n as isize - delta) as f64 + sorted[j] * delta as f64) / n as f64;
+            result.push(Value::Float(interpolated));
+        }
+    }
+    Ok(Value::List(crate::value::shared_list(result)))
 }
 
 /// Coerce a numeric result to CPython's return type: an integral result from
@@ -214,9 +280,9 @@ impl crate::eval::modules::Module for StatisticsModule {
         _state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
-        _kwargs: &indexmap::IndexMap<String, Value>,
+        kwargs: &indexmap::IndexMap<String, Value>,
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
-        call(func, args)
+        call(func, args, kwargs)
     }
 }

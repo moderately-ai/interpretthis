@@ -213,6 +213,20 @@ pub async fn iter(
         // Boxed to satisfy async recursion rules (iter → next → body → iter).
         return Box::pin(drain_generator(state, *id, tools)).await;
     }
+    // Iterating an enum class yields its members in definition order
+    // (`for color in Color`, `list(Color)`).
+    if let Value::Class(class_name) = value {
+        if let Some(class) = state.classes.get(class_name) {
+            if class.enum_kind.is_some() {
+                let members = class
+                    .enum_members
+                    .iter()
+                    .filter_map(|name| class.class_attrs.get(name).cloned())
+                    .collect();
+                return Ok(members);
+            }
+        }
+    }
     // namedtuple: iterate field values in `_fields` order (CPython
     // inherits tuple iteration). Checked before generic Instance
     // `__iter__` so a bare namedtuple without a user `__iter__` works.

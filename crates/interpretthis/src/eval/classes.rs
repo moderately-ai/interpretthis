@@ -164,6 +164,8 @@ pub async fn eval_class_def(
     // re-order them alphabetically and break the synthesized `__init__`
     // parameter order.
     let mut annotations: Vec<String> = Vec::new();
+    // Enum member names in declaration order, for order-preserving iteration.
+    let mut enum_members: Vec<String> = Vec::new();
 
     // PEP 3115: Meta.__prepare__(name, bases) may supply the initial namespace.
     if let Some(ref meta) = metaclass_name {
@@ -228,6 +230,18 @@ pub async fn eval_class_def(
                     let value = eval_expr(state, &assign.value, tools).await?;
                     for target in &assign.targets {
                         bind_class_target(target, &value, enum_kind, class_name, &mut class_attrs)?;
+                        // Record enum member declaration order (simple-name
+                        // targets that wrap into a member).
+                        if enum_kind.is_some() {
+                            if let Expr::Name(n) = target {
+                                let member = n.id.as_str();
+                                if matches!(class_attrs.get(member), Some(Value::EnumMember { .. }))
+                                    && !enum_members.iter().any(|m| m == member)
+                                {
+                                    enum_members.push(member.to_string());
+                                }
+                            }
+                        }
                     }
                 }
                 Stmt::AnnAssign(ann) => {
@@ -319,6 +333,7 @@ pub async fn eval_class_def(
         cv.static_methods = static_methods;
         cv.class_methods = class_methods;
         cv.enum_kind = enum_kind;
+        cv.enum_members = enum_members;
         cv.annotations = annotations;
         cv.slots = slots;
         cv.slot_names = slot_names;
