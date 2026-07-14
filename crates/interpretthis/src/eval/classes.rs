@@ -230,8 +230,39 @@ pub async fn eval_class_def(
                     }
                 }
             }
-            // Docstrings and `pass` carry no class state; other statements in a
-            // class body (nested classes, etc.) are not modelled and ignored.
+            // Nested control flow and nested class definitions. CPython
+            // executes the class body as a code block: names bound inside
+            // if/else/for/while (loop variables included) become class
+            // attributes, while reads fall through to the enclosing scope,
+            // and a nested `class` becomes an attribute. Model that by
+            // layering the class dict over a snapshot of the enclosing
+            // scope, executing the statement, harvesting the names it bound
+            // (new or changed) back into the class dict, then restoring the
+            // enclosing scope so nothing leaks out of the class body.
+            Stmt::If(_) | Stmt::For(_) | Stmt::While(_) | Stmt::ClassDef(_) => {
+                let saved = state.variables.clone();
+                for (name, value) in &class_attrs {
+                    state.variables.insert(name.clone(), value.clone());
+                }
+                crate::eval::eval_stmt(state, stmt, tools).await?;
+                let mut harvested: Vec<(String, Value)> = Vec::new();
+                for (name, value) in &state.variables {
+                    // A name is a class attribute when the body bound it fresh
+                    // or changed it relative to the class dict / enclosing
+                    // scope it was seeded from.
+                    let prior = class_attrs.get(name).or_else(|| saved.get(name));
+                    if prior != Some(value) {
+                        harvested.push((name.clone(), value.clone()));
+                    }
+                }
+                state.variables = saved;
+                for (name, value) in harvested {
+                    let wrapped = wrap_enum_member(enum_kind, class_name, &name, value);
+                    class_attrs.insert(name, wrapped);
+                }
+            }
+            // Docstrings and `pass` carry no class state; anything else in a
+            // class body is not modelled and ignored.
             _ => {}
         }
     }
