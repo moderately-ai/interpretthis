@@ -22,8 +22,49 @@ use crate::{
     value::{FunctionDef, LambdaDef, Value},
 };
 
-/// Call a user-defined function.
+/// Grow the host stack on demand around a Python-call future.
+///
+/// The interpreter is a recursive-descent async evaluator: one Python
+/// frame descends through a chain of ~8 nested async-fn poll frames, so
+/// recursion depth is bounded by the host thread's stack, not by
+/// `config.max_recursion_depth`. Without this a depth of a few dozen
+/// (debug) / few hundred (release) overflows the stack and aborts the
+/// process — a sandbox DoS. `stacker` (the crate rustc uses for the
+/// same reason) checks the remaining stack on each poll and switches to
+/// a fresh segment when it runs low, so recursion runs up to the
+/// configured depth limit (which then raises `RecursionError`)
+/// regardless of the caller's base stack size.
+const STACK_RED_ZONE: usize = 512 * 1024;
+const STACK_GROW_SIZE: usize = 32 * 1024 * 1024;
+
+/// Wrap a future so each poll grows the host stack when it runs low.
+/// The inner future is `Box::pin`'d (moving that Python frame's future
+/// state onto the heap, which also shrinks the per-frame poll stack),
+/// then polled under `stacker::maybe_grow` via `poll_fn` — no `unsafe`
+/// pin projection needed.
+pub(crate) fn grow_stack<'a, T: 'a>(
+    inner: impl std::future::Future<Output = T> + 'a,
+) -> impl std::future::Future<Output = T> + 'a {
+    let mut boxed = Box::pin(inner);
+    std::future::poll_fn(move |cx| {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || boxed.as_mut().poll(cx))
+    })
+}
+
+/// Call a user-defined function. The heavy recursion runs behind
+/// [`grow_stack`] so deep Python recursion doesn't overflow the host
+/// stack (see its docs).
 pub(crate) async fn call_user_function(
+    state: &mut InterpreterState,
+    func_def: &FunctionDef,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> EvalResult {
+    grow_stack(call_user_function_inner(state, func_def, args, kwargs, tools)).await
+}
+
+async fn call_user_function_inner(
     state: &mut InterpreterState,
     func_def: &FunctionDef,
     args: &[Value],
@@ -317,6 +358,16 @@ fn try_eval_trivial_body(body: &[ast::Stmt]) -> Option<Value> {
 
 /// Call a lambda expression.
 pub(crate) async fn call_lambda(
+    state: &mut InterpreterState,
+    lambda_def: &LambdaDef,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> EvalResult {
+    grow_stack(call_lambda_inner(state, lambda_def, args, kwargs, tools)).await
+}
+
+async fn call_lambda_inner(
     state: &mut InterpreterState,
     lambda_def: &LambdaDef,
     args: &[Value],

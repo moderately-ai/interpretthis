@@ -52,6 +52,7 @@ num-integer = { workspace = true }
 num-complex = { workspace = true }
 rustc-hash = { workspace = true }
 compact_str = { workspace = true }
+stacker = { workspace = true }
 
 # Optional alternative global allocators for the bench harness.
 # Activated only via the corresponding feature flag. The crate itself

@@ -444,6 +444,11 @@ fn interpreter_error_to_exception(err: &InterpreterError) -> ExceptionValue {
         InterpreterError::Runtime(msg) => {
             ExceptionValue::new("RuntimeError", strip_line_marker(msg))
         }
+        // CPython raises a catchable `RecursionError` (a `RuntimeError`
+        // subclass) when the recursion limit is hit.
+        InterpreterError::RecursionLimitExceeded { .. } => {
+            ExceptionValue::new("RecursionError", "maximum recursion depth exceeded")
+        }
         // Tool failures are catchable as generic Exception (see ToolHandler docs).
         InterpreterError::Tool { tool_name, message } => ExceptionValue::new(
             "Exception",

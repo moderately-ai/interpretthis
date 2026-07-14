@@ -46,6 +46,7 @@ pub fn is_exception_type_name(name: &str) -> bool {
             | "NameError"
             | "ArithmeticError"
             | "LookupError"
+            | "RecursionError"
             | "ExceptionGroup"
             | "BaseExceptionGroup"
     )

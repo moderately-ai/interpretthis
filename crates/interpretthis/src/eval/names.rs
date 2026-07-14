@@ -121,6 +121,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "NameError",
         "ArithmeticError",
         "LookupError",
+        "RecursionError",
         "ExceptionGroup",
         "BaseExceptionGroup",
     ];

@@ -1182,6 +1182,21 @@ pub async fn call_method(
     call: CallArgs<'_>,
     tools: &Tools,
 ) -> Result<(Value, Value), EvalError> {
+    // Grow the host stack on demand so deep method recursion doesn't
+    // overflow it (see `dispatch::grow_stack`).
+    crate::eval::functions::dispatch::grow_stack(call_method_inner(
+        state, method, self_value, call, tools,
+    ))
+    .await
+}
+
+async fn call_method_inner(
+    state: &mut InterpreterState,
+    method: &FunctionDef,
+    self_value: Value,
+    call: CallArgs<'_>,
+    tools: &Tools,
+) -> Result<(Value, Value), EvalError> {
     state.enter_call().map_err(EvalError::Interpreter)?;
     // Method frames also own a cell-owners scope; nested `def` inside
     // a method body that declares `nonlocal` registers here.

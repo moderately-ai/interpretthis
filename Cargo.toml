@@ -83,6 +83,13 @@ num-complex = { version = "=0.4.6", features = ["serde"] }
 # shows up in benches. Public API surfaces keep std HashMap for
 # downstream-caller compatibility.
 rustc-hash = "=2.1.1"
+# On-demand stack growth at the Python-call boundary. The interpreter's
+# async eval recurses deeply per Python frame; without growing the stack
+# a modest recursion depth overflows the host thread's stack (a sandbox
+# DoS). `stacker` (the same crate rustc uses) allocates a fresh segment
+# when the remaining stack is low, so recursion works up to the
+# configured depth limit regardless of the caller's base stack size.
+stacker = "=0.1.21"
 # Inline-storage `String` replacement. CompactString fits up to 24 bytes
 # of UTF-8 in the same 24-byte footprint as a plain `String` header
 # without allocating — small strings (dict keys like "id", "name", short
