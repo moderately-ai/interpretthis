@@ -35,6 +35,10 @@ pub fn has_function(name: &str) -> bool {
             | "compress"
             | "accumulate"
             | "groupby"
+            | "zip_longest"
+            | "starmap"
+            | "pairwise"
+            | "filterfalse"
     )
 }
 
@@ -71,18 +75,12 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
             };
             Ok(Value::List(shared_list(std::iter::repeat_n(obj, times).collect())))
         }
-        "count" => {
-            // count(start, [step]) — unbounded; we reject because
-            // there's no terminating condition. User code should use
-            // range() instead.
-            Err(InterpreterError::Runtime(
-                "itertools.count is not supported (would not terminate); use range() for bounded counters".into(),
-            )
-            .into())
-        }
-        "cycle" => Err(InterpreterError::Runtime(
-            "itertools.cycle is not supported (would not terminate)".into(),
-        )
+        // `count` / `cycle` are the unbounded lazy producers; they need
+        // interpreter state to register their cursor, so they are
+        // handled in the async `Module::call` and never reach here.
+        "count" | "cycle" => Err(InterpreterError::Runtime(format!(
+            "itertools.{func} must be evaluated through the module dispatch"
+        ))
         .into()),
         "islice" => {
             // islice(iterable, stop) or islice(iterable, start, stop, [step]).
@@ -171,6 +169,36 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
                 args.iter().map(iterate_value).collect::<Result<Vec<_>, _>>()?;
             let pools: Vec<Vec<Value>> = std::iter::repeat_n(base, repeat).flatten().collect();
             Ok(Value::List(shared_list(cartesian_product(&pools))))
+        }
+        "zip_longest" => {
+            // zip_longest(*iterables, fillvalue=None) — zip to the
+            // longest input, padding short ones with `fillvalue`.
+            if let Some(bad) = kwargs.keys().find(|k| k.as_str() != "fillvalue") {
+                return Err(InterpreterError::TypeError(format!(
+                    "zip_longest() got an unexpected keyword argument '{bad}'"
+                ))
+                .into());
+            }
+            let fill = kwargs.get("fillvalue").cloned().unwrap_or(Value::None);
+            let pools: Vec<Vec<Value>> =
+                args.iter().map(iterate_value).collect::<Result<Vec<_>, _>>()?;
+            let max_len = pools.iter().map(Vec::len).max().unwrap_or(0);
+            let mut out = Vec::with_capacity(max_len);
+            for i in 0..max_len {
+                let row: Vec<Value> = pools
+                    .iter()
+                    .map(|p| p.get(i).cloned().unwrap_or_else(|| fill.clone()))
+                    .collect();
+                out.push(Value::Tuple(row));
+            }
+            Ok(Value::List(shared_list(out)))
+        }
+        "pairwise" => {
+            // pairwise(iterable) — successive overlapping pairs.
+            let items = iterate_value(need_arg(func, args, 0)?)?;
+            let out: Vec<Value> =
+                items.windows(2).map(|w| Value::Tuple(vec![w[0].clone(), w[1].clone()])).collect();
+            Ok(Value::List(shared_list(out)))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'itertools' has no attribute '{func}'"
@@ -338,7 +366,7 @@ async fn islice_impl(
     tools: &crate::tools::Tools,
 ) -> EvalResult {
     let input = need_arg("islice", args, 0)?;
-    if !matches!(input, Value::Generator { .. } | Value::Lazy { .. }) {
+    if !matches!(input, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. }) {
         return call("islice", args, &indexmap::IndexMap::new());
     }
     let bound = |v: Option<&Value>| -> Result<Option<usize>, EvalError> {
@@ -461,7 +489,8 @@ async fn takewhile_impl(
     let mut out = Vec::new();
     // Lazy consumption for a generator input, so `takewhile(pred, infinite())`
     // stops as soon as the predicate fails instead of draining forever.
-    if matches!(iter_val, Value::Generator { .. } | Value::Lazy { .. }) {
+    if matches!(iter_val, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. })
+    {
         loop {
             let item = match crate::eval::functions::dispatch_generator_method(
                 state,
@@ -539,6 +568,96 @@ async fn dropwhile_impl(
             dropping = false;
         }
         out.push(item);
+    }
+    Ok(Value::List(shared_list(out)))
+}
+
+/// `count(start=0, step=1)` — register an unbounded counter. `start`
+/// and `step` must be numbers (CPython rejects non-numeric with
+/// TypeError).
+fn make_count(state: &mut crate::state::InterpreterState, args: &[Value]) -> EvalResult {
+    let numeric = |v: &Value, what: &str| -> Result<Value, EvalError> {
+        match v {
+            Value::Int(_) | Value::BigInt(_) | Value::Float(_) | Value::Bool(_) => Ok(v.clone()),
+            other => Err(InterpreterError::TypeError(format!(
+                "a number is required for count() {what}, not '{}'",
+                other.type_name()
+            ))
+            .into()),
+        }
+    };
+    let start = match args.first() {
+        None | Some(Value::None) => Value::Int(0),
+        Some(v) => numeric(v, "start")?,
+    };
+    let step = match args.get(1) {
+        None | Some(Value::None) => Value::Int(1),
+        Some(v) => numeric(v, "step")?,
+    };
+    Ok(state.alloc_builtin_iter(
+        crate::value::BuiltinIterName::Count,
+        crate::state::BuiltinIterState::Count { next: start, step },
+    ))
+}
+
+/// `cycle(iterable)` — buffer the (finite) input eagerly, then repeat it
+/// forever.
+fn make_cycle(state: &mut crate::state::InterpreterState, args: &[Value]) -> EvalResult {
+    let items = iterate_value(need_arg("cycle", args, 0)?)?;
+    Ok(state.alloc_builtin_iter(
+        crate::value::BuiltinIterName::Cycle,
+        crate::state::BuiltinIterState::Cycle { items, pos: 0 },
+    ))
+}
+
+/// `starmap(function, iterable)`: call `function(*args)` for each
+/// `args` tuple/iterable in the input.
+async fn starmap_impl(
+    state: &mut crate::state::InterpreterState,
+    args: &[Value],
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let func = need_arg("starmap", args, 0)?.clone();
+    let iter_val = need_arg("starmap", args, 1)?.clone();
+    let kwargs = indexmap::IndexMap::new();
+    let mut out = Vec::new();
+    for item in crate::eval::op::iter(state, &iter_val, tools).await? {
+        let call_args = iterate_value(&item)?;
+        out.push(
+            crate::eval::modules::call_callable(state, &func, &call_args, &kwargs, tools).await?,
+        );
+    }
+    Ok(Value::List(shared_list(out)))
+}
+
+/// `filterfalse(predicate, iterable)`: keep items where `predicate` is
+/// falsy (`predicate=None` keeps falsy items directly).
+async fn filterfalse_impl(
+    state: &mut crate::state::InterpreterState,
+    args: &[Value],
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let pred = need_arg("filterfalse", args, 0)?.clone();
+    let iter_val = need_arg("filterfalse", args, 1)?.clone();
+    let kwargs = indexmap::IndexMap::new();
+    let mut out = Vec::new();
+    for item in crate::eval::op::iter(state, &iter_val, tools).await? {
+        let keep = if matches!(pred, Value::None) {
+            !item.is_truthy()
+        } else {
+            !crate::eval::modules::call_callable(
+                state,
+                &pred,
+                std::slice::from_ref(&item),
+                &kwargs,
+                tools,
+            )
+            .await?
+            .is_truthy()
+        };
+        if keep {
+            out.push(item);
+        }
     }
     Ok(Value::List(shared_list(out)))
 }
@@ -623,6 +742,18 @@ impl crate::eval::modules::Module for ItertoolsModule {
             "compress" => compress_impl(args),
             "groupby" => groupby_impl(state, args, kwargs, tools).await,
             "islice" => islice_impl(state, args, tools).await,
+            "starmap" => starmap_impl(state, args, tools).await,
+            "filterfalse" => filterfalse_impl(state, args, tools).await,
+            "count" => make_count(state, args),
+            "cycle" => make_cycle(state, args),
+            // `repeat(obj)` with no count is the unbounded form (the
+            // counted form stays eager in the sync `call`).
+            "repeat" if args.len() < 2 => Ok(state.alloc_builtin_iter(
+                crate::value::BuiltinIterName::Repeat,
+                crate::state::BuiltinIterState::Repeat {
+                    value: need_arg("repeat", args, 0)?.clone(),
+                },
+            )),
             _ => call(func, args, kwargs),
         }
     }

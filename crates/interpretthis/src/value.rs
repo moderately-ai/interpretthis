@@ -200,6 +200,27 @@ fn deserialize_dict<'de, D: serde::Deserializer<'de>>(
 
 /// The dynamic value type flowing through the interpreter.
 ///
+/// Which builtin lazy iterator a [`Value::BuiltinIter`] is, carried
+/// inline so `type()`/`repr` need no state lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BuiltinIterName {
+    Count,
+    Cycle,
+    Repeat,
+}
+
+impl BuiltinIterName {
+    /// The CPython type name (`type(itertools.count()).__name__`).
+    #[must_use]
+    pub const fn type_name(self) -> &'static str {
+        match self {
+            Self::Count => "count",
+            Self::Cycle => "cycle",
+            Self::Repeat => "repeat",
+        }
+    }
+}
+
 /// Every variable, tool argument, and return value is a `Value`. This enum
 /// covers all Python types the interpreter supports. Use the `as_*()` methods
 /// for borrowing access, `try_into_*()` for consuming access, or pattern matching.
@@ -313,6 +334,14 @@ pub enum Value {
     /// Suspended generator function (`def g(): yield ...`). Frame state
     /// lives in `InterpreterState::generators` keyed by `id`.
     Generator { id: u64 },
+    /// A builtin lazy iterator with no backing AST — the potentially
+    /// infinite `itertools` producers (`count`, `cycle`, unbounded
+    /// `repeat`). Cursor state lives in
+    /// `InterpreterState::builtin_iters` keyed by `id`, so the handle
+    /// stays cheaply cloneable and two names share one cursor (CPython
+    /// iterator reference semantics). `kind` is carried inline for
+    /// `type()`/`repr` without a state lookup.
+    BuiltinIter { id: u64, kind: BuiltinIterName },
     /// A type object — `type(x)` for a built-in type, or a built-in type name.
     /// Carries the type name surfaced by `.__name__` and `repr` (`<class 'int'>`).
     Type(String),
@@ -1430,6 +1459,7 @@ impl Value {
             | Self::UnboundClassMethod { .. }
             | Self::Lazy { .. }
             | Self::Generator { .. }
+            | Self::BuiltinIter { .. }
             | Self::Partial { .. }
             | Self::OperatorGetter(_)
             | Self::LruCache(_) => true,
@@ -1522,6 +1552,7 @@ impl Value {
             Self::Decimal(_) => "Decimal",
             Self::Fraction(_) => "Fraction",
             Self::Lazy { .. } | Self::Generator { .. } => "generator",
+            Self::BuiltinIter { kind, .. } => kind.type_name(),
             Self::Partial { .. } => "functools.partial",
             Self::LruCache(_) => "functools._lru_cache_wrapper",
         }
@@ -1918,6 +1949,7 @@ impl fmt::Display for Value {
             // placeholder suffices for printing.
             Self::Lazy { .. } => write!(f, "<generator object>"),
             Self::Generator { .. } => write!(f, "<generator object>"),
+            Self::BuiltinIter { kind, .. } => write!(f, "<{} object>", kind.type_name()),
             Self::Partial(data) => write!(f, "functools.partial({})", data.func),
             Self::OperatorGetter(g) => match &**g {
                 OperatorGetter::ItemGetter(items) => {

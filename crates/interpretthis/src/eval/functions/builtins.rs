@@ -832,6 +832,12 @@ pub(super) async fn try_builtin(
                 return Ok(Some(Value::List(shared_list(Vec::new()))));
             }
             let strict = kwargs.get("strict").is_some_and(Value::is_truthy);
+            // If any argument is an infinite lazy producer, zip must pull
+            // lazily (bounded by the shortest finite argument) rather
+            // than materialise — otherwise `zip(count(), "abc")` hangs.
+            if args.iter().any(|a| matches!(a, Value::BuiltinIter { .. })) {
+                return zip_lazy(state, args, tools).await.map(Some);
+            }
             let mut iterables: Vec<Vec<Value>> = Vec::with_capacity(args.len());
             for arg in args {
                 iterables.push(crate::eval::op::iter(state, arg, tools).await?);
@@ -1149,11 +1155,10 @@ pub(super) async fn try_builtin(
                     Err(EvalError::Exception(ExceptionValue::new("StopIteration", String::new())))
                 };
             }
-            if let Value::Generator { id } = &args[0] {
-                let id = *id;
+            if matches!(&args[0], Value::Generator { .. } | Value::BuiltinIter { .. }) {
                 match super::generators::dispatch_generator_method(
                     state,
-                    &Value::Generator { id },
+                    &args[0],
                     "__next__",
                     &[],
                     &IndexMap::new(),
@@ -1404,4 +1409,61 @@ pub(super) async fn try_builtin(
         .into()),
         _ => Ok(None),
     }
+}
+
+/// `zip(...)` when at least one argument is an infinite `BuiltinIter`.
+/// Finite arguments are materialised; the lazy ones are pulled one item
+/// per round. Iteration stops as soon as any argument is exhausted —
+/// pulling left-to-right and discarding a partial round, matching
+/// CPython. `zip(count(), count())` (all-infinite) never terminates,
+/// same as CPython.
+async fn zip_lazy(
+    state: &mut InterpreterState,
+    args: &[Value],
+    tools: &Tools,
+) -> Result<Value, EvalError> {
+    enum Src {
+        Eager(Vec<Value>),
+        Lazy(Value),
+    }
+    let mut srcs: Vec<Src> = Vec::with_capacity(args.len());
+    for arg in args {
+        if matches!(arg, Value::BuiltinIter { .. }) {
+            srcs.push(Src::Lazy(arg.clone()));
+        } else {
+            srcs.push(Src::Eager(crate::eval::op::iter(state, arg, tools).await?));
+        }
+    }
+    let empty = IndexMap::new();
+    let mut out = Vec::new();
+    let mut round = 0usize;
+    'outer: loop {
+        let mut tuple = Vec::with_capacity(srcs.len());
+        for src in &srcs {
+            let item = match src {
+                Src::Eager(v) => match v.get(round) {
+                    Some(item) => item.clone(),
+                    None => break 'outer,
+                },
+                Src::Lazy(handle) => match super::generators::dispatch_generator_method(
+                    state,
+                    handle,
+                    "__next__",
+                    &[],
+                    &empty,
+                    tools,
+                )
+                .await
+                {
+                    Ok(item) => item,
+                    Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break 'outer,
+                    Err(e) => return Err(e),
+                },
+            };
+            tuple.push(item);
+        }
+        out.push(Value::Tuple(tuple));
+        round += 1;
+    }
+    Ok(Value::List(shared_list(out)))
 }

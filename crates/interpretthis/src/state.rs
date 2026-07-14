@@ -13,6 +13,55 @@ use crate::{
     value::{ClassValue, Value},
 };
 
+/// Mutable cursor for a [`crate::value::Value::BuiltinIter`] — the
+/// infinite `itertools` producers. Each `__next__` advances it in place.
+#[derive(Debug, Clone)]
+pub enum BuiltinIterState {
+    /// `itertools.count(start, step)` — yields `start, start+step, ...`.
+    /// Holds `Value`s so a float `start`/`step` counts like CPython.
+    Count { next: crate::value::Value, step: crate::value::Value },
+    /// `itertools.cycle(iterable)` — repeats a buffered sequence forever
+    /// (empty buffer is immediately exhausted).
+    Cycle { items: Vec<crate::value::Value>, pos: usize },
+    /// `itertools.repeat(obj)` with no count — yields `obj` forever.
+    Repeat { value: crate::value::Value },
+}
+
+/// `itertools.count` step: `next + step` over the numeric types count
+/// accepts (int/bigint/bool stay exact and promote past i64; any float
+/// operand yields a float, matching CPython).
+fn count_add(next: &Value, step: &Value) -> Value {
+    use num_bigint::BigInt;
+    let as_big = |v: &Value| -> Option<BigInt> {
+        match v {
+            Value::Int(n) => Some(BigInt::from(*n)),
+            Value::BigInt(b) => Some((**b).clone()),
+            Value::Bool(b) => Some(BigInt::from(i64::from(*b))),
+            _ => None,
+        }
+    };
+    let as_f64 = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Float(f) => Some(*f),
+            Value::Int(n) => Some(*n as f64),
+            Value::Bool(b) => Some(f64::from(u8::from(*b))),
+            Value::BigInt(b) => {
+                Some(num_traits::ToPrimitive::to_f64(&**b).unwrap_or(f64::INFINITY))
+            }
+            _ => None,
+        }
+    };
+    match (as_big(next), as_big(step)) {
+        (Some(a), Some(b)) => crate::value::int_from_bigint(a + b),
+        _ => match (as_f64(next), as_f64(step)) {
+            (Some(a), Some(b)) => Value::Float(a + b),
+            // Non-numeric operands can't occur (make_count validates),
+            // but degrade gracefully rather than panic.
+            _ => next.clone(),
+        },
+    }
+}
+
 /// Suspended generator function frame (true yield/resume, not eager buffer).
 #[derive(Debug, Clone)]
 pub struct GeneratorFrame {
@@ -135,6 +184,12 @@ pub struct InterpreterState {
     /// each new generator-iterator allocation; never reused so two
     /// concurrent generators can't collide.
     pub next_cursor_id: u64,
+    /// Cursor state for `Value::BuiltinIter` (the infinite `itertools`
+    /// producers), keyed by the variant's `id`. Two handles sharing an
+    /// `id` advance the same cursor, matching CPython iterator identity.
+    pub builtin_iters: FxHashMap<u64, BuiltinIterState>,
+    /// Monotonic id source for `Value::BuiltinIter::id`.
+    pub next_builtin_iter_id: u64,
     /// Shared storage for `nonlocal`-bound variables, keyed by the
     /// owning `FunctionDef::nonlocal_cell_id`. Every call to the same
     /// function sees and updates the same cell, so `n += 1` inside an
@@ -208,6 +263,8 @@ impl InterpreterState {
             active_exception_stack: Vec::new(),
             lazy_cursors: FxHashMap::default(),
             next_cursor_id: 0,
+            builtin_iters: FxHashMap::default(),
+            next_builtin_iter_id: 0,
             nonlocal_cells: FxHashMap::default(),
             next_nonlocal_cell_id: 0,
             frame_cell_owners: Vec::new(),
@@ -278,6 +335,39 @@ impl InterpreterState {
     #[inline]
     pub fn get_variable(&self, name: &str) -> Option<&Value> {
         self.variables.get(name)
+    }
+
+    /// Register a builtin lazy iterator, returning its `Value` handle.
+    pub fn alloc_builtin_iter(
+        &mut self,
+        kind: crate::value::BuiltinIterName,
+        st: BuiltinIterState,
+    ) -> Value {
+        let id = self.next_builtin_iter_id;
+        self.next_builtin_iter_id = self.next_builtin_iter_id.wrapping_add(1);
+        self.builtin_iters.insert(id, st);
+        Value::BuiltinIter { id, kind }
+    }
+
+    /// Advance a builtin lazy iterator by one. Returns `None` only when
+    /// exhausted (an empty `cycle`) or the id is unknown.
+    pub fn step_builtin_iter(&mut self, id: u64) -> Option<Value> {
+        match self.builtin_iters.get_mut(&id)? {
+            BuiltinIterState::Count { next, step } => {
+                let v = next.clone();
+                *next = count_add(next, step);
+                Some(v)
+            }
+            BuiltinIterState::Cycle { items, pos } => {
+                if items.is_empty() {
+                    return None;
+                }
+                let v = items[*pos].clone();
+                *pos = (*pos + 1) % items.len();
+                Some(v)
+            }
+            BuiltinIterState::Repeat { value } => Some(value.clone()),
+        }
     }
 
     pub fn delete_variable(&mut self, name: &str) -> Result<(), crate::error::InterpreterError> {
@@ -547,6 +637,9 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::UnboundClassMethod { class, method } => 16 + class.len() + method.len(),
         Value::Lazy { items, .. } => 24 + items.iter().map(estimate_value_size).sum::<usize>(),
         Value::Generator { .. } => 16,
+        // Handle is a flat id + kind tag; cursor state lives in
+        // `builtin_iters` and is accounted there.
+        Value::BuiltinIter { .. } => 16,
         Value::Partial(data) => {
             16 + estimate_value_size(&data.func)
                 + data.args.iter().map(estimate_value_size).sum::<usize>()

@@ -626,13 +626,6 @@ async fn list_eq_method(
 ) -> Result<Option<Value>, EvalError> {
     use crate::eval::functions::{reject_kwargs, sequence_index_range, to_len_i64};
 
-    reject_kwargs(method_name, kwargs)?;
-    let needle = args.first().ok_or_else(|| {
-        EvalError::from(InterpreterError::TypeError(format!(
-            "{method_name}() takes exactly 1 argument"
-        )))
-    })?;
-
     let raw_place = place::eval_place(state, obj_expr, tools).await?;
     let usable_place =
         raw_place.filter(|p| p.is_navigable() && state.variables.contains_key(&p.root));
@@ -664,10 +657,19 @@ async fn list_eq_method(
         }
     };
 
+    // Arity / kwargs are validated only now that the receiver is
+    // confirmed to be a list, so a non-list receiver of the same method
+    // name (e.g. `itertools.count()`) already returned `None` above and
+    // reaches its own dispatch instead of erroring here.
+    reject_kwargs(method_name, kwargs)?;
+    let needle = args.first().ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "{method_name}() takes exactly one argument (0 given)"
+        )))
+    })?;
+
     // `index` searches only the `[start, stop)` window; `count`/`remove` scan
-    // the whole list and take exactly the needle. (Arity is checked here, once
-    // the receiver is confirmed to be a list, so non-list receivers still fall
-    // through to their own method table above.)
+    // the whole list and take exactly the needle.
     let (start, end) = if method_name == "index" {
         sequence_index_range(method_name, args, items.len())?
     } else {

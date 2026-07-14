@@ -65,6 +65,32 @@ pub async fn eval_for(
             let Some(next) = i.checked_add(step) else { break };
             i = next;
         }
+    } else if matches!(iterable, Value::BuiltinIter { .. }) {
+        // Infinite `itertools` producers cannot be materialised — step
+        // them lazily so `for x in count(): ... break` terminates.
+        let empty = indexmap::IndexMap::new();
+        loop {
+            let item = match crate::eval::functions::dispatch_generator_method(
+                state,
+                &iterable,
+                "__next__",
+                &[],
+                &empty,
+                tools,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
+                Err(e) => return Err(e),
+            };
+            let body = ForBodyArgs { state, item, node, tools };
+            let cont = run_for_body(body, &mut result, &mut broke).await?;
+            if broke {
+                break;
+            }
+            let _ = cont;
+        }
     } else {
         let items = crate::eval::op::iter(state, &iterable, tools).await?;
         for item in items {

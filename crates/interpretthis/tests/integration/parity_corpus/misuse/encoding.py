@@ -1,0 +1,8 @@
+print("héllo".encode("utf-8"))
+print(b"h\xc3\xa9llo".decode("utf-8"))
+print("abc".encode())
+print(len("héllo"))
+print(ord("é"), chr(233))
+print("café".upper())
+print("HELLO".encode("ascii").decode())
+print("a\nb".encode("utf-8"))

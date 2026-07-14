@@ -164,6 +164,10 @@ pub(crate) async fn dispatch_generator_method(
         return dispatch_suspended(state, *id, method, args, tools).await;
     }
 
+    if let Value::BuiltinIter { id, .. } = receiver {
+        return dispatch_builtin_iter(state, receiver, *id, method, args);
+    }
+
     // Legacy eager Lazy buffer path.
     dispatch_lazy(state, receiver, method, args)
 }
@@ -670,6 +674,37 @@ async fn resume_for(
         }
     }
     Ok(())
+}
+
+/// Single-step a `Value::BuiltinIter` (the infinite `itertools`
+/// producers). `__iter__` returns the iterator itself; `__next__`
+/// advances the cursor, raising `StopIteration` only for an exhausted
+/// (empty) `cycle`.
+fn dispatch_builtin_iter(
+    state: &mut InterpreterState,
+    receiver: &Value,
+    id: u64,
+    method: &str,
+    args: &[Value],
+) -> EvalResult {
+    match method {
+        "__iter__" => Ok(receiver.clone()),
+        "__next__" => {
+            if !args.is_empty() {
+                return Err(
+                    InterpreterError::TypeError("__next__() takes no arguments".into()).into()
+                );
+            }
+            state.step_builtin_iter(id).ok_or_else(|| {
+                EvalError::Exception(crate::value::ExceptionValue::new("StopIteration", ""))
+            })
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'{}' object has no attribute '{method}'",
+            receiver.type_name()
+        ))
+        .into()),
+    }
 }
 
 fn dispatch_lazy(

@@ -1,0 +1,12 @@
+import itertools
+print(list(itertools.chain([1, 2], [3, 4])))
+print(list(itertools.combinations([1, 2, 3], 2)))
+print(list(itertools.permutations([1, 2], 2)))
+print(list(itertools.accumulate([1, 2, 3, 4])))
+print(list(itertools.accumulate([1, 2, 3], initial=100)))
+print(list(itertools.takewhile(lambda x: x < 3, [1, 2, 3, 1])))
+print([(k, list(g)) for k, g in itertools.groupby("aabbc")])
+print(list(itertools.zip_longest([1, 2], [3], fillvalue=0)))
+print(list(itertools.starmap(lambda a, b: a + b, [(1, 2), (3, 4)])))
+print(list(itertools.filterfalse(lambda x: x % 2, range(6))))
+print(list(itertools.pairwise([1, 2, 3, 4])))
