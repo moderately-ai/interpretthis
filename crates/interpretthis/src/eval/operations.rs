@@ -1125,6 +1125,12 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         // CPython caches compiled patterns, so `re.compile(p) == re.compile(p)`
         // is True (same cached object). We model that by comparing sources.
         (Value::RePattern(a), Value::RePattern(b)) => a == b,
+        // Two slices are equal iff their start/stop/step all match.
+        (Value::Slice(a), Value::Slice(b)) => {
+            values_equal(&a.start, &b.start)
+                && values_equal(&a.stop, &b.stop)
+                && values_equal(&a.step, &b.step)
+        }
         // Types / classes / exception types are singletons keyed by name, so
         // two handles for the same name are identical (`ValueError is
         // ValueError`, which `values_is` routes here). The variant a name

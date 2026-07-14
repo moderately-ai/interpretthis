@@ -292,6 +292,29 @@ pub(super) async fn try_builtin(
             };
             Ok(Some(type_obj))
         }
+        "slice" => {
+            // slice(stop) or slice(start, stop[, step]). Each bound is an int
+            // or None; bool folds to int (bool is an int subclass).
+            check_arg_count(name, args, 1, 3)?;
+            let bound = |v: &Value| -> Result<Value, EvalError> {
+                match v {
+                    Value::None | Value::Int(_) | Value::BigInt(_) => Ok(v.clone()),
+                    Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
+                    other => Err(InterpreterError::TypeError(format!(
+                        "slice indices must be integers or None, not '{}'",
+                        other.type_name()
+                    ))
+                    .into()),
+                }
+            };
+            let (start, stop, step) = match args {
+                [stop] => (Value::None, bound(stop)?, Value::None),
+                [start, stop] => (bound(start)?, bound(stop)?, Value::None),
+                [start, stop, step] => (bound(start)?, bound(stop)?, bound(step)?),
+                _ => unreachable!("check_arg_count bounds args to 1..=3"),
+            };
+            Ok(Some(Value::Slice(Box::new(crate::value::SliceValue { start, stop, step }))))
+        }
         "object" => {
             // Bare `object()` — CPython's universal base. Takes no arguments
             // and yields a fresh identity, supporting the common sentinel

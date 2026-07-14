@@ -82,6 +82,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "map",
         "repr",
         "ascii",
+        "slice",
         "hash",
         "id",
         "input",
@@ -450,6 +451,12 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
             }
         }
         Value::Module(module) => crate::eval::modules::module_member(module, attr_name),
+        Value::Slice(slice) => match attr_name {
+            "start" => Ok(slice.start.clone()),
+            "stop" => Ok(slice.stop.clone()),
+            "step" => Ok(slice.step.clone()),
+            _ => Err(attribute_error("slice", attr_name)),
+        },
         // `re.compile(p).pattern` reads the source back.
         Value::RePattern(pattern) => {
             if attr_name == "pattern" {
@@ -575,7 +582,7 @@ pub async fn eval_subscript(
                     // Instance keys need async `__hash__` / `__eq__` via
                     // `op::getitem`. The sync `dispatch_getitem` path rejects
                     // them as unhashable (`type_name() == "object"`).
-                    if take_fast_path && !matches!(index, Value::Instance(_)) {
+                    if take_fast_path && !matches!(index, Value::Instance(_) | Value::Slice(_)) {
                         return crate::types::dispatch_getitem(container, &index);
                     }
                 }
@@ -592,6 +599,12 @@ pub async fn eval_subscript(
     }
 
     let index = eval_expr(state, &node.slice, tools).await?;
+
+    // A first-class `slice()` object used as an index applies the same slice
+    // semantics as the `a[i:j:k]` syntax.
+    if let Value::Slice(slice) = &index {
+        return apply_value_slice(&obj, Some(&slice.start), Some(&slice.stop), Some(&slice.step));
+    }
 
     // namedtuple subscript intercept: `nt[0]` returns the value of the
     // 0-th declared field. Instances don't have a get_item_slot, so
@@ -746,21 +759,28 @@ async fn eval_subscript_slice(
         None
     };
 
-    let stride = match &step_expr {
-        // `bool` is an `int` subclass, so `a[::False]` is a step of 0 (a
-        // ValueError), not a type error.
-        Some(Value::Int(_) | Value::Bool(_)) => {
-            let s = match &step_expr {
-                Some(Value::Int(s)) => *s,
-                Some(Value::Bool(b)) => i64::from(*b),
-                _ => unreachable!(),
-            };
-            if s == 0 {
-                return Err(InterpreterError::ValueError("slice step cannot be zero".into()).into());
-            }
-            s
-        }
-        Some(Value::None) | None => 1,
+    apply_value_slice(obj, lower.as_ref(), upper.as_ref(), step_expr.as_ref())
+}
+
+/// Apply Python slice semantics to `obj` given already-evaluated `start`/`stop`/
+/// `step` bounds (each an `Int`/`Bool`/`None`). Shared by the `a[i:j:k]` syntax
+/// and a first-class `slice()` object used as a subscript index.
+pub(crate) fn apply_value_slice(
+    obj: &Value,
+    lower: Option<&Value>,
+    upper: Option<&Value>,
+    step_expr: Option<&Value>,
+) -> EvalResult {
+    // A `None` bound is equivalent to an absent one.
+    let lower = lower.filter(|v| !matches!(v, Value::None));
+    let upper = upper.filter(|v| !matches!(v, Value::None));
+
+    // `bool` is an `int` subclass, so `a[::False]` is a step of 0 (a
+    // ValueError), not a type error.
+    let stride = match step_expr {
+        Some(Value::Int(s)) => *s,
+        Some(Value::Bool(b)) => i64::from(*b),
+        None | Some(Value::None) => 1,
         Some(other) => {
             return Err(InterpreterError::TypeError(format!(
                 "slice indices must be integers or None, not '{}'",
@@ -769,21 +789,24 @@ async fn eval_subscript_slice(
             .into());
         }
     };
+    if stride == 0 {
+        return Err(InterpreterError::ValueError("slice step cannot be zero".into()).into());
+    }
 
     match obj {
         Value::List(items) => {
             let snapshot = items.lock().clone();
-            let sliced = slice_sequence(&snapshot, lower.as_ref(), upper.as_ref(), stride)?;
+            let sliced = slice_sequence(&snapshot, lower, upper, stride)?;
             Ok(Value::List(shared_list(sliced)))
         }
         Value::Tuple(items) => {
-            let sliced = slice_sequence(items, lower.as_ref(), upper.as_ref(), stride)?;
+            let sliced = slice_sequence(items, lower, upper, stride)?;
             Ok(Value::Tuple(sliced))
         }
         Value::String(s) => {
             let chars: Vec<Value> =
                 s.chars().map(|c| Value::String(c.to_string().into())).collect();
-            let sliced = slice_sequence(&chars, lower.as_ref(), upper.as_ref(), stride)?;
+            let sliced = slice_sequence(&chars, lower, upper, stride)?;
             let result: String = sliced
                 .into_iter()
                 .map(|v| match v {
@@ -799,7 +822,7 @@ async fn eval_subscript_slice(
             // slice_sequence helper, then the result collapses back
             // into Value::Bytes.
             let elems: Vec<Value> = b.iter().map(|&n| Value::Int(i64::from(n))).collect();
-            let sliced = slice_sequence(&elems, lower.as_ref(), upper.as_ref(), stride)?;
+            let sliced = slice_sequence(&elems, lower, upper, stride)?;
             let bytes: Vec<u8> = sliced
                 .into_iter()
                 .filter_map(|v| match v {

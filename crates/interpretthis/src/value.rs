@@ -251,6 +251,10 @@ pub enum Value {
     Lambda(Arc<LambdaDef>),
     /// Python `range()` result.
     Range { start: i64, stop: i64, step: i64 },
+    /// A `slice(start, stop, step)` object. Each bound is a `Value` (an `Int`
+    /// or `None`, mirroring CPython's `slice.start`/`.stop`/`.step`), boxed to
+    /// keep the enum slot narrow. Usable as a subscript index.
+    Slice(Box<SliceValue>),
     /// Runtime exception instance (for `try`/`except`/`raise`).
     Exception(Box<ExceptionValue>),
     /// Bound method on an exception instance (`eg.subgroup`, `eg.split`).
@@ -588,6 +592,17 @@ pub struct MatchGroup {
     pub text: String,
     pub start: usize,
     pub end: usize,
+}
+
+/// A `slice(start, stop, step)` object's bounds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SliceValue {
+    /// Start bound — `Value::None` or `Value::Int`.
+    pub start: Value,
+    /// Stop bound — `Value::None` or `Value::Int`.
+    pub stop: Value,
+    /// Step — `Value::None` or `Value::Int`.
+    pub step: Value,
 }
 
 /// A user-defined class instance: its class name plus its own attributes.
@@ -1344,6 +1359,7 @@ impl Value {
             | Self::Date(_)
             | Self::ReMatch(_)
             | Self::RePattern(_)
+            | Self::Slice(_)
             | Self::Super { .. }
             | Self::DateTime { .. }
             | Self::Time(_)
@@ -1430,6 +1446,7 @@ impl Value {
             Self::Date(_) => "date",
             Self::ReMatch(_) => "re.Match",
             Self::RePattern(_) => "re.Pattern",
+            Self::Slice(_) => "slice",
             Self::Super { .. } => "super",
             Self::Counter(_) => "Counter",
             Self::DateTime { .. } => "datetime",
@@ -1873,6 +1890,8 @@ impl fmt::Display for Value {
             // pattern is rendered via its string repr, so backslashes and
             // quotes escape as in `re.compile('(\\d+)')`.
             Self::RePattern(p) => write!(f, "re.compile({})", python_str_repr(p)),
+            // CPython: `repr(slice(1, 5, 2))` == "slice(1, 5, 2)".
+            Self::Slice(s) => write!(f, "slice({}, {}, {})", s.start, s.stop, s.step),
         }
     }
 }

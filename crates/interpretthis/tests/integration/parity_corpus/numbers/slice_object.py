@@ -1,0 +1,11 @@
+# slice() objects: constructor, attributes, and use in subscription.
+s = slice(1, 5, 2)
+print(s.start, s.stop, s.step)
+print([0, 1, 2, 3, 4, 5, 6][s])
+print("abcdefg"[slice(2, 5)])
+s2 = slice(3)
+print(s2.start, s2.stop, s2.step)
+print([10, 20, 30, 40, 50][slice(1, None)])
+print([1, 2, 3, 4, 5][slice(None, None, -1)])
+print(list(range(10))[slice(2, 8, 2)])
+print(s == slice(1, 5, 2), s == slice(1, 5, 3))
