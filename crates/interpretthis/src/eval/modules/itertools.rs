@@ -127,8 +127,12 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
             // permutations(iterable, [r]) — all r-length permutations.
             let items = iterate_value(need_arg(func, args, 0)?)?;
             let r = match args.get(1) {
-                Some(Value::Int(n)) => usize::try_from(*n).unwrap_or(items.len()),
-                Some(Value::None) | None => items.len(),
+                None | Some(Value::None) => items.len(),
+                Some(Value::Bool(b)) => usize::from(*b),
+                // A negative r is a ValueError (not "treat as len"); a huge r
+                // that overflows usize is likewise out of range.
+                Some(Value::Int(n)) => usize::try_from(*n)
+                    .map_err(|_| value_error("permutations() r must be non-negative"))?,
                 Some(other) => {
                     return Err(InterpreterError::TypeError(format!(
                         "permutations() r must be an integer (got '{}')",
