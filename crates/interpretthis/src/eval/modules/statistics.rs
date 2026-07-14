@@ -122,12 +122,27 @@ fn median(data: &[Value]) -> EvalResult {
     if data.is_empty() {
         return Err(crate::eval::modules::statistics_error("no median for empty data"));
     }
+    // Every element must be numeric; otherwise the sort key would fold a
+    // non-number to NaN and silently tolerate it (CPython raises TypeError).
+    // `bool` counts as numeric (int subclass), which `Value::as_float` does not
+    // cover, so use a median-local numeric view.
+    let key = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Bool(b) => Some(f64::from(*b)),
+            _ => v.as_float(),
+        }
+    };
+    for v in data {
+        if key(v).is_none() {
+            return Err(InterpreterError::TypeError("can't convert value to float".into()).into());
+        }
+    }
     // Order the original values numerically so an odd-length median can return
     // the middle element unchanged (preserving int vs float), as CPython does.
     let mut ordered: Vec<&Value> = data.iter().collect();
     ordered.sort_by(|a, b| {
-        let av = a.as_float().unwrap_or(f64::NAN);
-        let bv = b.as_float().unwrap_or(f64::NAN);
+        let av = key(a).unwrap_or(f64::NAN);
+        let bv = key(b).unwrap_or(f64::NAN);
         av.partial_cmp(&bv).unwrap_or(Ordering::Equal)
     });
     let n = ordered.len();
@@ -136,8 +151,8 @@ fn median(data: &[Value]) -> EvalResult {
         Ok(ordered[mid].clone())
     } else {
         // Even length always averages the two central values into a float.
-        let lo = ordered[mid - 1].as_float().unwrap_or(f64::NAN);
-        let hi = ordered[mid].as_float().unwrap_or(f64::NAN);
+        let lo = key(ordered[mid - 1]).unwrap_or(f64::NAN);
+        let hi = key(ordered[mid]).unwrap_or(f64::NAN);
         Ok(Value::Float(f64::midpoint(lo, hi)))
     }
 }
