@@ -359,7 +359,25 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
     }
 
     let fill_char = fill.unwrap_or(if zero_pad { '0' } else { ' ' });
-    let padded = match align.unwrap_or(if zero_pad { '=' } else { '<' }) {
+    // Default alignment is type-dependent: numeric values right-align, every
+    // other value (chiefly str) left-aligns; `0`-padding forces sign-aware `=`.
+    let default_align = if zero_pad {
+        '='
+    } else if matches!(
+        value,
+        Value::Int(_)
+            | Value::BigInt(_)
+            | Value::Float(_)
+            | Value::Bool(_)
+            | Value::Complex(_)
+            | Value::Decimal(_)
+            | Value::Fraction(_)
+    ) {
+        '>'
+    } else {
+        '<'
+    };
+    let padded = match align.unwrap_or(default_align) {
         '<' => {
             let padding = width - display_width;
             format!("{with_sign}{}", fill_char.to_string().repeat(padding))
