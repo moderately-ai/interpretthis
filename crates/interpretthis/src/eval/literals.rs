@@ -146,7 +146,11 @@ pub async fn eval_set(
             }
             found
         } else {
-            value_to_key(&candidate).is_ok_and(|ck| !seen.insert(ck))
+            // A non-instance candidate that is not hashable (list, dict, set)
+            // raises `TypeError: unhashable type` — propagate rather than
+            // swallowing the error and pushing the element into the set.
+            let ck = value_to_key(&candidate)?;
+            !seen.insert(ck)
         };
         if !exists {
             items.push(candidate);
