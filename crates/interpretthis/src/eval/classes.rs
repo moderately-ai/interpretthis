@@ -807,6 +807,52 @@ fn build_mro(
     Ok(result)
 }
 
+/// Whether a class's MRO reaches `Exception` / `BaseException` (so its
+/// instances are exception objects).
+fn class_mro_is_exception(class: &ClassValue) -> bool {
+    class.mro.iter().any(|b| {
+        b == "Exception"
+            || b == "BaseException"
+            || crate::eval::functions::is_exception_type_name(b)
+    })
+}
+
+/// CPython's `str(exc)` for a `BaseException` built from `args`:
+/// empty for no args, `str(arg)` for a single arg, and the tuple's
+/// repr (`(1, 2)`) for multiple.
+fn exception_message_from_args(args: &[Value]) -> String {
+    match args {
+        [] => String::new(),
+        [single] => format!("{single}"),
+        _ => format!("{}", Value::Tuple(args.to_vec())),
+    }
+}
+
+/// Convert an exception-subclass instance (after its `__init__` ran)
+/// into a `Value::Exception`. The `args` field — set by the
+/// object-level `super().__init__(*args)` — drives `e.args` and the
+/// `str(e)` message; every other attribute becomes a custom field so
+/// `except E as e: e.code` resolves.
+fn instance_to_exception(class_name: &str, inst: &InstanceValue) -> crate::value::ExceptionValue {
+    let fields = inst.fields.lock();
+    let args: Vec<Value> = match fields.get("args") {
+        Some(Value::Tuple(items)) => items.clone(),
+        Some(Value::List(items)) => items.lock().clone(),
+        _ => Vec::new(),
+    };
+    let mut exc = crate::value::ExceptionValue::new(
+        class_name.to_string(),
+        exception_message_from_args(&args),
+    )
+    .with_args(args);
+    for (name, value) in fields.iter() {
+        if name != "args" {
+            exc.fields.insert(name.clone(), value.clone());
+        }
+    }
+    exc
+}
+
 /// Instantiate `class_name(args, kwargs)`: allocate an empty instance and run
 /// `__init__` if the class defines one.
 pub async fn instantiate(
@@ -839,21 +885,49 @@ pub async fn instantiate(
         // Exception subclasses: `class E(Exception): ...; raise E("msg")`
         // constructs a Value::Exception with the class name as type_name so
         // except-matching can walk the MRO. Mirrors ExceptionType constructors.
-        let is_exception_subclass = class.mro.iter().any(|b| {
-            b == "Exception"
-                || b == "BaseException"
-                || crate::eval::functions::is_exception_type_name(b)
-        });
+        let is_exception_subclass = class_mro_is_exception(class);
         if is_exception_subclass {
-            let message = match args.len() {
-                0 => String::new(),
-                1 => format!("{}", args[0]),
-                _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
-            };
-            return Ok(Value::Exception(Box::new(
-                crate::value::ExceptionValue::new(class_name.to_string(), message)
+            // A user-defined `__init__` may set custom attributes
+            // (`self.code = ...`) and/or forward a computed message via
+            // `super().__init__(...)`. Run it on a real instance and
+            // fold the resulting fields into the Exception so
+            // `except E as e: e.code` and `str(e)` both work. When no
+            // user `__init__` exists, the args ARE the exception args
+            // directly (CPython's `BaseException.__init__`).
+            let has_user_init = lookup_method_in_mro(state, class_name, "__init__").is_some();
+            if !has_user_init {
+                return Ok(Value::Exception(Box::new(
+                    crate::value::ExceptionValue::new(
+                        class_name.to_string(),
+                        exception_message_from_args(args),
+                    )
                     .with_args(args.to_vec()),
-            )));
+                )));
+            }
+            let instance = Value::Instance(InstanceValue {
+                class_name: class_name.to_string(),
+                fields: crate::value::shared_fields(BTreeMap::new()),
+            });
+            let init = lookup_method_in_mro(state, class_name, "__init__");
+            let Some((_defining_class, init_def)) = init else {
+                unreachable!("has_user_init just confirmed an __init__ in the MRO");
+            };
+            let call = CallArgs { positional: args, keyword: kwargs };
+            let (_returned, configured_self) =
+                call_method(state, &init_def, instance, call, tools).await?;
+            let Value::Instance(inst) = configured_self else {
+                // A user `__init__` cannot legally return a non-instance
+                // (CPython raises `TypeError: __init__() should return
+                // None`); fall back to the plain arg-based construction.
+                return Ok(Value::Exception(Box::new(
+                    crate::value::ExceptionValue::new(
+                        class_name.to_string(),
+                        exception_message_from_args(args),
+                    )
+                    .with_args(args.to_vec()),
+                )));
+            };
+            return Ok(Value::Exception(Box::new(instance_to_exception(class_name, &inst))));
         }
     }
     let instance = Value::Instance(InstanceValue {
@@ -1490,6 +1564,27 @@ pub async fn super_method_call(
                         "'{class_name}' object has no attribute '{attr_name}'"
                     ))
                     .into());
+                }
+                let updated = Value::Instance(inst);
+                if let Some(name) =
+                    state.method_frame_stack.last().and_then(|f| f.self_local_name.clone())
+                {
+                    state.set_variable(&name, updated.clone()).map_err(EvalError::Interpreter)?;
+                }
+                Ok((Value::None, updated))
+            }
+            "__init__" => {
+                // `object.__init__` / `BaseException.__init__`: for an
+                // exception subclass, `super().__init__(*args)` sets
+                // `self.args = args` (which drives `str(self)`); for a
+                // plain object it is a no-op that ignores extra args.
+                let inst = instance;
+                let is_exc =
+                    state.classes.get(&inst.class_name).is_some_and(class_mro_is_exception);
+                if is_exc {
+                    inst.fields
+                        .lock()
+                        .insert("args".into(), Value::Tuple(call.positional.to_vec()));
                 }
                 let updated = Value::Instance(inst);
                 if let Some(name) =

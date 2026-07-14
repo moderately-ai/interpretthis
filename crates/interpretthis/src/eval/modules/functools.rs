@@ -5,9 +5,8 @@
 //! Emulation of Python's `functools` module.
 //!
 //! Supports `reduce` (call-back into the evaluator's `call_user_function`
-//! / `call_lambda` for each pair) and `wraps` (no-op identity decorator
-//! — CPython's wraps copies metadata; we approximate as identity since
-//! our FunctionDef metadata isn't observable beyond `__name__`).
+//! / `call_lambda` for each pair) and `wraps` (stamps the wrapped function's
+//! `__name__` onto the wrapper via the `wraps_name` override).
 //!
 //! Also: `partial`, `cmp_to_key`. `lru_cache` / `cache` / `singledispatch`
 //! remain open (see tickets).

@@ -523,7 +523,13 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
             Ok(exc.cause.as_ref().map_or(Value::None, |cause| Value::Exception(cause.clone())))
         }
         "message" => Ok(Value::String(exc.message.clone().into())),
-        _ => Err(attribute_error(&exc.type_name, attr_name)),
+        // Custom attributes set by a user exception's `__init__`
+        // (`self.code = ...`), preserved through instantiation.
+        _ => exc
+            .fields
+            .get(attr_name)
+            .cloned()
+            .map_or_else(|| Err(attribute_error(&exc.type_name, attr_name)), Ok),
     }
 }
 

@@ -1118,6 +1118,10 @@ pub struct ExceptionValue {
     /// Nested exceptions for `ExceptionGroup` / `BaseExceptionGroup` (PEP 654).
     #[serde(default)]
     pub exceptions: Option<Vec<Self>>,
+    /// Custom instance attributes set by a user exception's `__init__`
+    /// (`self.code = ...`), preserved so `except E as e: e.code` works.
+    #[serde(default)]
+    pub fields: BTreeMap<String, Value>,
 }
 
 impl ExceptionValue {
@@ -1145,6 +1149,7 @@ impl ExceptionValue {
             args,
             stamped_line: None,
             exceptions: None,
+            fields: BTreeMap::new(),
         }
     }
 
@@ -1165,6 +1170,7 @@ impl ExceptionValue {
             args: vec![Value::String(message.into()), Value::List(shared_list(nested))],
             stamped_line: None,
             exceptions: Some(exceptions),
+            fields: BTreeMap::new(),
         }
     }
 
