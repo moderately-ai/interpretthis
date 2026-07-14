@@ -181,7 +181,7 @@ pub async fn eval_class_def(
     for stmt in &node.body {
         match stmt {
             Stmt::FunctionDef(method) => {
-                let mut params = build_function_params(&method.args);
+                let mut params = build_function_params(&method.args)?;
                 // Evaluate the method's default args at def time in
                 // the class body scope — same CPython semantics as
                 // top-level `def` (the `i=i` capture idiom + mutable

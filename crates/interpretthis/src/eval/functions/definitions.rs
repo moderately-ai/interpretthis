@@ -48,7 +48,7 @@ pub async fn eval_function_def(
         .into());
     }
     // Build parameter spec
-    let mut params = build_function_params(&node.args);
+    let mut params = build_function_params(&node.args)?;
 
     // Evaluate default argument expressions at def time and stash
     // the values on `params`. CPython evaluates defaults once at
@@ -768,7 +768,7 @@ pub(crate) fn extract_function_source(source: &str, node: &ast::StmtFunctionDef)
 }
 
 /// Build `FunctionParams` from an AST Arguments node.
-pub fn build_function_params(args: &ast::Arguments) -> FunctionParams {
+pub fn build_function_params(args: &ast::Arguments) -> Result<FunctionParams, EvalError> {
     let positional: Vec<Param> = args
         .posonlyargs
         .iter()
@@ -782,7 +782,7 @@ pub fn build_function_params(args: &ast::Arguments) -> FunctionParams {
     let mut defaults: Vec<String> = Vec::new();
     for awd in &all_args_with_default {
         if let Some(ref default_expr) = awd.default {
-            defaults.push(unparse_expr(default_expr));
+            defaults.push(unparse_expr(default_expr)?);
         }
     }
 
@@ -792,13 +792,18 @@ pub fn build_function_params(args: &ast::Arguments) -> FunctionParams {
         .map(|awd| Param { name: awd.def.arg.as_str().to_string() })
         .collect();
 
-    let kw_defaults: Vec<Option<String>> =
-        args.kwonlyargs.iter().map(|awd| awd.default.as_ref().map(|d| unparse_expr(d))).collect();
+    let mut kw_defaults: Vec<Option<String>> = Vec::with_capacity(args.kwonlyargs.len());
+    for awd in &args.kwonlyargs {
+        kw_defaults.push(match &awd.default {
+            Some(d) => Some(unparse_expr(d)?),
+            None => None,
+        });
+    }
 
     let vararg = args.vararg.as_ref().map(|a| a.arg.as_str().to_string());
     let kwarg = args.kwarg.as_ref().map(|a| a.arg.as_str().to_string());
 
-    FunctionParams {
+    Ok(FunctionParams {
         args: positional,
         defaults,
         default_values: Vec::new(),
@@ -807,7 +812,7 @@ pub fn build_function_params(args: &ast::Arguments) -> FunctionParams {
         kw_defaults,
         kw_default_values: Vec::new(),
         kwarg,
-    }
+    })
 }
 
 /// Convert an expression AST node back to Python source code.
@@ -816,8 +821,13 @@ pub fn build_function_params(args: &ast::Arguments) -> FunctionParams {
 /// be re-parsed and re-evaluated at each call (matching CPython's "defaults
 /// are evaluated fresh" semantics) without holding a reference to the
 /// original AST that `rustpython_parser` won't let us serialise.
-fn unparse_expr(expr: &ast::Expr) -> String {
-    match expr {
+fn unparse_expr(expr: &ast::Expr) -> Result<String, EvalError> {
+    // Unparse each element of a slice, joined by `sep`.
+    let join = |exprs: &[ast::Expr], sep: &str| -> Result<String, EvalError> {
+        Ok(exprs.iter().map(unparse_expr).collect::<Result<Vec<_>, _>>()?.join(sep))
+    };
+
+    Ok(match expr {
         ast::Expr::Constant(c) => match &c.value {
             ast::Constant::None => "None".to_string(),
             ast::Constant::Bool(true) => "True".to_string(),
@@ -843,18 +853,20 @@ fn unparse_expr(expr: &ast::Expr) -> String {
                             kind: None,
                         }))
                     })
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 format!("({})", parts.join(", "))
             }
             ast::Constant::Complex { real, imag } => format!("complex({real}, {imag})"),
         },
         ast::Expr::Name(n) => n.id.to_string(),
-        ast::Expr::List(l) => {
-            let parts: Vec<String> = l.elts.iter().map(unparse_expr).collect();
-            format!("[{}]", parts.join(", "))
+        ast::Expr::List(l) => format!("[{}]", join(&l.elts, ", ")?),
+        ast::Expr::Set(s) => {
+            // `{}` is an empty dict, never an empty set; a set literal always has
+            // at least one element, so this branch is only reached with elements.
+            format!("{{{}}}", join(&s.elts, ", ")?)
         }
         ast::Expr::Tuple(t) => {
-            let parts: Vec<String> = t.elts.iter().map(unparse_expr).collect();
+            let parts: Vec<String> = t.elts.iter().map(unparse_expr).collect::<Result<_, _>>()?;
             if parts.len() == 1 {
                 format!("({},)", parts[0])
             } else {
@@ -862,17 +874,13 @@ fn unparse_expr(expr: &ast::Expr) -> String {
             }
         }
         ast::Expr::Dict(d) => {
-            let parts: Vec<String> = d
-                .keys
-                .iter()
-                .zip(d.values.iter())
-                .map(|(k, v)| {
-                    k.as_ref().map_or_else(
-                        || format!("**{}", unparse_expr(v)),
-                        |key| format!("{}: {}", unparse_expr(key), unparse_expr(v)),
-                    )
-                })
-                .collect();
+            let mut parts = Vec::with_capacity(d.keys.len());
+            for (k, v) in d.keys.iter().zip(d.values.iter()) {
+                parts.push(match k {
+                    None => format!("**{}", unparse_expr(v)?),
+                    Some(key) => format!("{}: {}", unparse_expr(key)?, unparse_expr(v)?),
+                });
+            }
             format!("{{{}}}", parts.join(", "))
         }
         ast::Expr::UnaryOp(u) => {
@@ -882,7 +890,7 @@ fn unparse_expr(expr: &ast::Expr) -> String {
                 ast::UnaryOp::Not => "not ",
                 ast::UnaryOp::Invert => "~",
             };
-            format!("{op}{}", unparse_expr(&u.operand))
+            format!("{op}{}", unparse_expr(&u.operand)?)
         }
         ast::Expr::BinOp(b) => {
             let op = match b.op {
@@ -900,25 +908,99 @@ fn unparse_expr(expr: &ast::Expr) -> String {
                 ast::Operator::BitAnd => "&",
                 ast::Operator::MatMult => "@",
             };
-            format!("({} {op} {})", unparse_expr(&b.left), unparse_expr(&b.right))
+            format!("({} {op} {})", unparse_expr(&b.left)?, unparse_expr(&b.right)?)
+        }
+        ast::Expr::BoolOp(b) => {
+            let op = match b.op {
+                ast::BoolOp::And => " and ",
+                ast::BoolOp::Or => " or ",
+            };
+            format!("({})", join(&b.values, op)?)
+        }
+        ast::Expr::Compare(c) => {
+            let mut out = format!("({}", unparse_expr(&c.left)?);
+            for (op, comparator) in c.ops.iter().zip(c.comparators.iter()) {
+                let op = match op {
+                    ast::CmpOp::Eq => "==",
+                    ast::CmpOp::NotEq => "!=",
+                    ast::CmpOp::Lt => "<",
+                    ast::CmpOp::LtE => "<=",
+                    ast::CmpOp::Gt => ">",
+                    ast::CmpOp::GtE => ">=",
+                    ast::CmpOp::Is => "is",
+                    ast::CmpOp::IsNot => "is not",
+                    ast::CmpOp::In => "in",
+                    ast::CmpOp::NotIn => "not in",
+                };
+                out.push_str(&format!(" {op} {}", unparse_expr(comparator)?));
+            }
+            out.push(')');
+            out
+        }
+        ast::Expr::IfExp(f) => format!(
+            "({} if {} else {})",
+            unparse_expr(&f.body)?,
+            unparse_expr(&f.test)?,
+            unparse_expr(&f.orelse)?,
+        ),
+        ast::Expr::Attribute(a) => format!("{}.{}", unparse_expr(&a.value)?, a.attr),
+        ast::Expr::Subscript(s) => {
+            format!("{}[{}]", unparse_expr(&s.value)?, unparse_expr(&s.slice)?)
+        }
+        ast::Expr::Slice(s) => {
+            let part = |o: &Option<Box<ast::Expr>>| -> Result<String, EvalError> {
+                match o {
+                    Some(e) => unparse_expr(e),
+                    None => Ok(String::new()),
+                }
+            };
+            match &s.step {
+                Some(step) => {
+                    format!("{}:{}:{}", part(&s.lower)?, part(&s.upper)?, unparse_expr(step)?)
+                }
+                None => format!("{}:{}", part(&s.lower)?, part(&s.upper)?),
+            }
+        }
+        ast::Expr::Starred(s) => format!("*{}", unparse_expr(&s.value)?),
+        ast::Expr::Lambda(l) => {
+            let params = build_function_params(&l.args)?;
+            let mut names = params.args.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+            if let Some(v) = &params.vararg {
+                names.push(format!("*{v}"));
+            }
+            for kw in &params.kwonlyargs {
+                names.push(kw.name.clone());
+            }
+            if let Some(kw) = &params.kwarg {
+                names.push(format!("**{kw}"));
+            }
+            format!("lambda {}: {}", names.join(", "), unparse_expr(&l.body)?)
         }
         ast::Expr::Call(c) => {
-            let func = unparse_expr(&c.func);
-            let mut arg_strs: Vec<String> = c.args.iter().map(unparse_expr).collect();
+            let func = unparse_expr(&c.func)?;
+            let mut arg_strs: Vec<String> =
+                c.args.iter().map(unparse_expr).collect::<Result<_, _>>()?;
             for kw in &c.keywords {
-                if let Some(ref name) = kw.arg {
-                    arg_strs.push(format!("{}={}", name, unparse_expr(&kw.value)));
-                } else {
-                    arg_strs.push(format!("**{}", unparse_expr(&kw.value)));
+                match &kw.arg {
+                    Some(name) => arg_strs.push(format!("{name}={}", unparse_expr(&kw.value)?)),
+                    None => arg_strs.push(format!("**{}", unparse_expr(&kw.value)?)),
                 }
             }
             format!("{func}({})", arg_strs.join(", "))
         }
-        // Fallback for complex expressions — use Debug format
-        // Limited fallback; complex default-source round-trip is tracked by
-        // gap-complex-default-argument-source-roundtrip.
-        _ => format!("None  # unparseable: {:?}", std::mem::discriminant(expr)),
-    }
+        // A default expression we cannot round-trip through source (comprehension,
+        // f-string, walrus, yield, await, ...). CPython evaluates defaults once at
+        // def time; if we cannot represent one, fail loudly at def time rather than
+        // silently substituting `None` — the old fallback emitted a source comment
+        // that parsed to None, so `def f(x=<unsupported>)` gave a wrong answer.
+        other => {
+            return Err(InterpreterError::TypeError(format!(
+                "unsupported default argument expression: {:?}",
+                std::mem::discriminant(other)
+            ))
+            .into());
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +1016,7 @@ pub async fn eval_lambda_def(
     node: &ast::ExprLambda,
     tools: &Tools,
 ) -> EvalResult {
-    let mut params = build_lambda_params(&node.args);
+    let mut params = build_lambda_params(&node.args)?;
 
     // CPython evaluates lambda defaults at def time — the canonical
     // `lambda x, i=i: x + i` loop-capture idiom depends on this.
@@ -993,7 +1075,7 @@ fn extract_lambda_source(source: &str, node: &ast::ExprLambda) -> String {
     }
 }
 
-fn build_lambda_params(args: &ast::Arguments) -> FunctionParams {
+fn build_lambda_params(args: &ast::Arguments) -> Result<FunctionParams, EvalError> {
     build_function_params(args)
 }
 
