@@ -1239,6 +1239,11 @@ pub struct FunctionDef {
     /// the call path falls back to the dynamic walk in that case.
     #[serde(default)]
     pub is_generator: bool,
+    /// `__name__` override set by `functools.wraps`. When `Some`, attribute
+    /// access reports this instead of `name` (which stays the body-cache key,
+    /// so the wrapper still dispatches correctly).
+    #[serde(default)]
+    pub wraps_name: Option<String>,
     /// Cell id for the shared `nonlocal` storage, allocated at
     /// definition time when `nonlocal_names` is non-empty. The cell
     /// lives in `InterpreterState::nonlocal_cells`; all Value::Function

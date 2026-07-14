@@ -439,7 +439,10 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
         }
         Value::Function(func_def) => {
             if attr_name == "__name__" || attr_name == "__qualname__" {
-                Ok(Value::String(func_def.name.clone().into()))
+                // `functools.wraps` overrides the reported name; the real
+                // `name` stays the body-cache key.
+                let reported = func_def.wraps_name.as_ref().unwrap_or(&func_def.name);
+                Ok(Value::String(reported.clone().into()))
             } else {
                 Err(attribute_error("function", attr_name))
             }

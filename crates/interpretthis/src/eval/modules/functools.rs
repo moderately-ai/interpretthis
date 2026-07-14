@@ -206,55 +206,26 @@ pub async fn call(
             }))
         }
         "wraps" => {
-            // wraps(wrapped) -> identity decorator. CPython's wraps
-            // returns a decorator that copies metadata from `wrapped`
-            // onto the decorated function. We approximate with a
-            // no-op identity: wraps(_) returns a lambda `x -> x` so
-            // `@wraps(f) def g: ...` reduces to `g = (lambda x: x)(g)
-            // = g`. The metadata-copy semantics aren't observable in
-            // this interpreter beyond FunctionDef.name.
-            //
-            // Construct the identity lambda by registering an `x`
-            // body in state.lambda_bodies under a synthetic key, then
-            // returning a LambdaDef pointing to it. The key is
-            // shared across calls (the body is the same expression).
-            if args.is_empty() {
+            // wraps(wrapped) -> a decorator that stamps the wrapped function's
+            // `__name__` onto the function it decorates. Modelled as a partial
+            // over the internal `__apply_wraps__` builtin capturing the name:
+            // `@wraps(f) def w(): ...` reduces to `w = __apply_wraps__(f_name, w)`,
+            // which returns `w` with its `wraps_name` override set.
+            let Some(wrapped) = args.first() else {
                 return Err(InterpreterError::TypeError(
                     "wraps() missing required argument".into(),
                 )
                 .into());
-            }
-            let key = "__functools_wraps_identity__";
-            if !state.lambda_bodies.contains_key(key) {
-                state.lambda_bodies.insert(
-                    key.to_string(),
-                    std::sync::Arc::new(rustpython_parser::ast::Expr::Name(
-                        rustpython_parser::ast::ExprName {
-                            id: rustpython_parser::ast::Identifier::new("x"),
-                            ctx: rustpython_parser::ast::ExprContext::Load,
-                            range: rustpython_parser::text_size::TextRange::default(),
-                        },
-                    )),
-                );
-            }
-            Ok(Value::Lambda(std::sync::Arc::new(crate::value::LambdaDef {
-                params: crate::value::FunctionParams {
-                    args: vec![crate::value::Param { name: "x".to_string() }],
-                    defaults: Vec::new(),
-                    default_values: Vec::new(),
-                    vararg: None,
-                    kwonlyargs: Vec::new(),
-                    kw_defaults: Vec::new(),
-                    kw_default_values: Vec::new(),
-                    kwarg: None,
-                },
-                lambda_id: key.to_string(),
-                source: "lambda x: x".to_string(),
-                closure: std::collections::BTreeMap::new(),
-                assigned_names: Vec::new(),
-                // Synthesized lambda; treat as module-level to avoid
-                // applying its empty closure as an overlay.
-                is_module_level: true,
+            };
+            let wrapped_name = match wrapped {
+                Value::Function(fd) => fd.wraps_name.clone().unwrap_or_else(|| fd.name.clone()),
+                Value::Lambda(_) => "<lambda>".to_string(),
+                other => other.type_name().to_string(),
+            };
+            Ok(Value::Partial(Box::new(crate::value::PartialData {
+                func: Value::BuiltinName("__apply_wraps__".to_string()),
+                args: vec![Value::String(wrapped_name.into())],
+                keywords: indexmap::IndexMap::new(),
             })))
         }
         "reduce" => {

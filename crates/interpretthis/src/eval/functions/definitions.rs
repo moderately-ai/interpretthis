@@ -124,6 +124,7 @@ pub async fn eval_function_def(
 
     let mut func = Value::Function(std::sync::Arc::new(FunctionDef {
         name: name.to_string(),
+        wraps_name: None,
         params,
         closure,
         source,

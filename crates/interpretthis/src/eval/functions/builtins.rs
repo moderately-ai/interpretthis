@@ -292,6 +292,26 @@ pub(super) async fn try_builtin(
             };
             Ok(Some(type_obj))
         }
+        // Internal helper produced by functools.wraps — stamps the captured
+        // name onto the decorated function's `__name__`. Not user-callable
+        // (the name doesn't resolve as a bare builtin).
+        "__apply_wraps__" => {
+            let [Value::String(new_name), target] = args else {
+                return Err(InterpreterError::TypeError(
+                    "__apply_wraps__ expects (name, function)".into(),
+                )
+                .into());
+            };
+            match target {
+                Value::Function(fd) => {
+                    let mut renamed = (**fd).clone();
+                    renamed.wraps_name = Some(new_name.to_string());
+                    Ok(Some(Value::Function(std::sync::Arc::new(renamed))))
+                }
+                // Non-function targets pass through unchanged.
+                other => Ok(Some(other.clone())),
+            }
+        }
         "memoryview" => {
             check_arg_count(name, args, 1, 1)?;
             match &args[0] {
