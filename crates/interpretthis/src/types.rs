@@ -511,9 +511,17 @@ pub fn dispatch_eq(state: &InterpreterState, lhs: &Value, rhs: &Value) -> EvalRe
         // — at which point the class has no `__eq__` or we're in a
         // context where method dispatch isn't possible (hash, set
         // membership). Identity fallback matches CPython's default.
-        return Ok(Value::Bool(
-            matches!(rhs, Value::Instance(other_inst) if std::ptr::eq(inst, other_inst)),
-        ));
+        //
+        // Identity is `Arc::ptr_eq` on the shared field storage — NOT
+        // `std::ptr::eq(inst, other_inst)`, which compares the addresses of two
+        // separately-cloned `InstanceValue` structs (each `Value::Instance` clone
+        // is a fresh struct sharing the same `Arc<fields>`) and is therefore
+        // false for every pair, including true aliases. This is the same identity
+        // the unified `is` and structural-eq paths use.
+        return Ok(Value::Bool(matches!(
+            rhs,
+            Value::Instance(other_inst) if std::sync::Arc::ptr_eq(&inst.fields, &other_inst.fields)
+        )));
     }
     let lhs_type = type_of(lhs);
     if let Some(result) = (lhs_type.eq_slot)(lhs, rhs) {
