@@ -51,7 +51,7 @@ pub async fn eval_match(
             }
             if let Some(ref guard) = case.guard {
                 let pass = eval_expr(state, guard, tools).await?;
-                if !pass.is_truthy() {
+                if !crate::eval::op::truthy(state, &pass, tools).await? {
                     continue;
                 }
             }

@@ -225,7 +225,7 @@ fn eval_list_generators<'a>(
                 for if_clause in &generator.ifs {
                     let cond = eval_expr(state, if_clause, tools).await?;
                     let cond = resolve_proxy(&cond).await?;
-                    if !cond.is_truthy() {
+                    if !crate::eval::op::truthy(state, &cond, tools).await? {
                         include = false;
                         break;
                     }
@@ -259,7 +259,7 @@ fn eval_list_generators<'a>(
             for if_clause in &generator.ifs {
                 let cond = eval_expr(state, if_clause, tools).await?;
                 let cond = resolve_proxy(&cond).await?;
-                if !cond.is_truthy() {
+                if !crate::eval::op::truthy(state, &cond, tools).await? {
                     include = false;
                     break;
                 }
@@ -333,7 +333,7 @@ fn eval_dict_generators<'a>(
                 for if_clause in &generator.ifs {
                     let cond = eval_expr(state, if_clause, tools).await?;
                     let cond = resolve_proxy(&cond).await?;
-                    if !cond.is_truthy() {
+                    if !crate::eval::op::truthy(state, &cond, tools).await? {
                         include = false;
                         break;
                     }
@@ -366,7 +366,7 @@ fn eval_dict_generators<'a>(
             for if_clause in &generator.ifs {
                 let cond = eval_expr(state, if_clause, tools).await?;
                 let cond = resolve_proxy(&cond).await?;
-                if !cond.is_truthy() {
+                if !crate::eval::op::truthy(state, &cond, tools).await? {
                     include = false;
                     break;
                 }
