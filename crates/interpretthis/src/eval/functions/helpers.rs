@@ -47,6 +47,33 @@ fn hex_digit(b: u8) -> Result<u8, EvalError> {
     }
 }
 
+/// Build a byte vector from an iterable of ints, for `bytes(iterable)`.
+///
+/// Each element must be an int in `range(0, 256)`; an out-of-range value raises
+/// `ValueError`. Regression: the old inline versions (duplicated for `list` and
+/// `tuple`) used `u8::try_from(n & 0xFF)`, and the mask made the conversion
+/// always succeed — `bytes([300])` silently produced `b','` instead of raising.
+pub(super) fn bytes_from_int_items(items: &[Value]) -> Result<Vec<u8>, EvalError> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let n = match item {
+            Value::Int(i) => *i,
+            Value::Bool(b) => i64::from(*b),
+            _ => {
+                return Err(InterpreterError::TypeError(
+                    "bytes() argument items must be ints".into(),
+                )
+                .into());
+            }
+        };
+        let byte = u8::try_from(n).map_err(|_| {
+            EvalError::from(InterpreterError::ValueError("bytes must be in range(0, 256)".into()))
+        })?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
 /// `dict.fromkeys(iterable, value=None)` — build a dict mapping each
 /// element of `iterable` to `value`. Async because `op::iter` may
 /// dispatch a user-class `__iter__`/`__next__`.

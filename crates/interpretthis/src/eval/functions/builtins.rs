@@ -10,8 +10,8 @@ use super::{
     dispatch::call_value_as_function,
     float_to_int_exact,
     helpers::{
-        SortRequest, apply_key_fn, check_isinstance, dsu_sort, parse_int_str, pow_three_arg,
-        type_arg_name,
+        SortRequest, apply_key_fn, bytes_from_int_items, check_isinstance, dsu_sort, parse_int_str,
+        pow_three_arg, type_arg_name,
     },
     method_dispatch::CallArgs,
     resolve_proxy, to_len_i64, value_to_i64,
@@ -964,7 +964,11 @@ pub(super) async fn try_builtin(
             }
             match &args[0] {
                 Value::Int(n) => {
-                    let count = usize::try_from((*n).max(0)).unwrap_or(0);
+                    // `bytes(-5)` raises ValueError; the old `.max(0)` silently
+                    // produced an empty bytes.
+                    let count = usize::try_from(*n).map_err(|_| {
+                        EvalError::from(InterpreterError::ValueError("negative count".into()))
+                    })?;
                     Ok(Some(Value::Bytes(vec![0u8; count])))
                 }
                 Value::Bytes(b) => Ok(Some(Value::Bytes(b.clone()))),
@@ -996,58 +1000,13 @@ pub(super) async fn try_builtin(
                         }
                     }
                 }
-                Value::List(items) => {
-                    // Snapshot under the lock so error-path returns
-                    // don't smear the guard's scope.
-                    let snapshot = items.lock().clone();
-                    let mut out = Vec::with_capacity(snapshot.len());
-                    for item in &snapshot {
-                        let n = match item {
-                            Value::Int(i) => *i,
-                            Value::Bool(b) => i64::from(*b),
-                            _ => {
-                                return Err(InterpreterError::TypeError(
-                                    "bytes() argument items must be ints".into(),
-                                )
-                                .into());
-                            }
-                        };
-                        let byte = u8::try_from(n & 0xFF).map_err(|_| {
-                            EvalError::from(InterpreterError::ValueError(
-                                "bytes must be in range(0, 256)".into(),
-                            ))
-                        })?;
-                        out.push(byte);
-                    }
-                    Ok(Some(Value::Bytes(out)))
+                // Any iterable of ints (list, tuple, range, set, generator, ...).
+                // `op::iter` materialises it, raising TypeError for a
+                // non-iterable — which is the right error for `bytes(3.5)` too.
+                other => {
+                    let items = crate::eval::op::iter(state, other, tools).await?;
+                    Ok(Some(Value::Bytes(bytes_from_int_items(&items)?)))
                 }
-                Value::Tuple(items) => {
-                    let mut out = Vec::with_capacity(items.len());
-                    for item in items {
-                        let n = match item {
-                            Value::Int(i) => *i,
-                            Value::Bool(b) => i64::from(*b),
-                            _ => {
-                                return Err(InterpreterError::TypeError(
-                                    "bytes() argument items must be ints".into(),
-                                )
-                                .into());
-                            }
-                        };
-                        let byte = u8::try_from(n & 0xFF).map_err(|_| {
-                            EvalError::from(InterpreterError::ValueError(
-                                "bytes must be in range(0, 256)".into(),
-                            ))
-                        })?;
-                        out.push(byte);
-                    }
-                    Ok(Some(Value::Bytes(out)))
-                }
-                other => Err(InterpreterError::TypeError(format!(
-                    "cannot convert '{}' object to bytes",
-                    other.type_name()
-                ))
-                .into()),
             }
         }
         "next" => {
