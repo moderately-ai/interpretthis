@@ -1,0 +1,7 @@
+print((2**100).bit_length())
+print((2**100).__index__() == 2**100)
+print((-(2**100)).__abs__() == 2**100)
+print((2**100).numerator == 2**100)
+print((2**100).bit_count())
+print((2**64).to_bytes(9, "big"))
+print((2**100).conjugate() == 2**100)

@@ -1,0 +1,6 @@
+print((255).bit_length())
+print((1024).to_bytes(2, "big"))
+print(int.from_bytes(b"\x04\x00", "big"))
+print((10).__index__())
+print(bin(10), oct(10), hex(255))
+print((-5).__abs__())

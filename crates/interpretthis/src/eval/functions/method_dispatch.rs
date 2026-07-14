@@ -307,10 +307,11 @@ fn int_methods(
             Ok(n) => {
                 methods::int::dispatch_int_method(n, method, args, kwargs).map(MethodOutcome::pure)
             }
-            Err(_) => Err(EvalError::Exception(crate::value::ExceptionValue::new(
-                "OverflowError",
-                "Python int too large to convert to C long",
-            ))),
+            // Beyond i64: stay in arbitrary precision so
+            // `bit_length`/`__index__`/`__abs__`/... don't raise a
+            // spurious OverflowError from narrowing.
+            Err(_) => methods::int::dispatch_bigint_method(i, method, args, kwargs)
+                .map(MethodOutcome::pure),
         },
         _ => Err(type_mismatch("int")),
     }
