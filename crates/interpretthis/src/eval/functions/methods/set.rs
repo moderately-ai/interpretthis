@@ -91,6 +91,13 @@ pub(crate) fn dispatch_set_method(
         }
         "add" => {
             let arg = arg1(method, args)?;
+            // A genuinely-unhashable element (list/dict/set) raises. Instances
+            // are hashable by identity in CPython, so they are allowed (their
+            // structural dedup here is best-effort — sets are stored as a Vec
+            // and these methods are sync, so async `__eq__` cannot run).
+            if !matches!(arg, Value::Instance(_)) {
+                value_to_key(arg)?;
+            }
             if contains(items, arg) {
                 Ok(MethodOutcome::pure(Value::None))
             } else {
