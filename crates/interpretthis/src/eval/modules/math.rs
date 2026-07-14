@@ -127,9 +127,20 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         "isfinite" => Ok(Value::Bool(arg_f64(func, args, 0)?.is_finite())),
         "factorial" => factorial(need_arg(func, args, 0)?),
         "gcd" => {
-            let a = arg_i64(func, args, 0)?;
-            let b = arg_i64(func, args, 1)?;
-            Ok(Value::Int(gcd(a.unsigned_abs(), b.unsigned_abs())))
+            // Variadic and arbitrary-precision: gcd() == 0, and gcd folds
+            // pairwise over every argument (num_integer::Integer::gcd yields the
+            // non-negative gcd, so signs and one-arg abs fall out for free).
+            let mut acc = num_bigint::BigInt::from(0);
+            for arg in args {
+                let Some(n) = crate::value::value_as_bigint(arg) else {
+                    return Err(type_error(format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        arg.type_name()
+                    )));
+                };
+                acc = num_integer::Integer::gcd(&acc, &n);
+            }
+            Ok(crate::value::int_from_bigint(acc))
         }
         "isqrt" => {
             let arg = need_arg(func, args, 0)?;
@@ -158,22 +169,6 @@ fn domain_pos(func: &str, args: &[Value]) -> Result<f64, EvalError> {
         return Err(value_error("math domain error"));
     }
     Ok(x)
-}
-
-fn arg_i64(func: &str, args: &[Value], index: usize) -> Result<i64, EvalError> {
-    let _ = func;
-    let _ = index;
-    match need_arg(func, args, index)? {
-        Value::Int(i) => Ok(*i),
-        Value::Bool(b) => Ok(i64::from(*b)),
-        // CPython 3.12 says `'<type>' object cannot be interpreted as
-        // an integer` — same wording for every callsite that expects
-        // an integral argument (isqrt, gcd, factorial(float)).
-        other => Err(type_error(format!(
-            "'{}' object cannot be interpreted as an integer",
-            other.type_name()
-        ))),
-    }
 }
 
 /// Convert a `math.floor`/`ceil`/`trunc` result to `i64` (Python returns int).
@@ -220,21 +215,6 @@ fn factorial(arg: &Value) -> EvalResult {
             result.checked_mul(k).ok_or_else(|| value_error("factorial() result overflows"))?;
     }
     Ok(Value::Int(result))
-}
-
-const fn gcd(mut a: u64, mut b: u64) -> i64 {
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    // gcd of two i64 magnitudes fits in i64 (≤ the larger magnitude).
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "result is the gcd of two i64 magnitudes, always ≤ i64::MAX"
-    )]
-    let result = a as i64;
-    result
 }
 
 /// `math` module registration.
