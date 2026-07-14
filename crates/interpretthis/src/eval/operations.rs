@@ -815,10 +815,20 @@ pub async fn eval_unaryop(
 ) -> EvalResult {
     let operand = eval_expr(state, &node.operand, tools).await?;
     let operand = resolve_proxy(&operand).await?;
+    apply_unaryop(state, node.op, &operand, tools).await
+}
 
-    match node.op {
+/// Apply a unary operator to an already-evaluated operand. Shared by the eval
+/// spine and the `operator` module (`operator.neg`/`pos`/`invert`/`not_`).
+pub async fn apply_unaryop(
+    state: &mut InterpreterState,
+    op: ast::UnaryOp,
+    operand: &Value,
+    tools: &Tools,
+) -> EvalResult {
+    match op {
         // Unary `+` is identity on every numeric type (`bool` promotes to int).
-        ast::UnaryOp::UAdd => match &operand {
+        ast::UnaryOp::UAdd => match operand {
             Value::Int(_)
             | Value::BigInt(_)
             | Value::Float(_)
@@ -832,7 +842,7 @@ pub async fn eval_unaryop(
             ))
             .into()),
         },
-        ast::UnaryOp::USub => match &operand {
+        ast::UnaryOp::USub => match operand {
             // `checked_neg` handles i64::MIN, whose negation overflows i64:
             // promote to BigInt instead of wrapping (release) / panicking (debug).
             Value::Int(i) => Ok(i.checked_neg().map_or_else(
@@ -852,19 +862,19 @@ pub async fn eval_unaryop(
             .into()),
         },
         ast::UnaryOp::Not => {
-            let cond = match crate::eval::op::try_truthy_sync(&operand) {
+            let cond = match crate::eval::op::try_truthy_sync(operand) {
                 Some(b) => b,
-                None => crate::eval::op::truthy(state, &operand, tools).await?,
+                None => crate::eval::op::truthy(state, operand, tools).await?,
             };
             Ok(Value::Bool(!cond))
         }
         // `~x == -x - 1`. Keep the i64 fast path; fall to BigInt for anything
         // outside it so `~(2**70)` works instead of raising OverflowError.
-        ast::UnaryOp::Invert => match &operand {
+        ast::UnaryOp::Invert => match operand {
             Value::Int(i) => Ok(Value::Int(!*i)),
             Value::Bool(b) => Ok(Value::Int(!i64::from(*b))),
             Value::BigInt(_) => {
-                let n = to_bigint(&operand)?;
+                let n = to_bigint(operand)?;
                 Ok(crate::value::int_from_bigint(-n - 1))
             }
             _ => Err(InterpreterError::TypeError(format!(

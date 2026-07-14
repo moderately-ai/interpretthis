@@ -28,6 +28,7 @@ pub mod hashlib;
 pub mod itertools;
 pub mod json;
 pub mod math;
+pub mod operator;
 pub mod re;
 pub mod statistics;
 pub mod string;
@@ -96,8 +97,9 @@ pub trait Module: Sync + Send {
 /// plus one `pub struct XModule;` + `impl Module for XModule` in its
 /// own file. Lookup is O(1) hashed by module name.
 static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock::new(|| {
-    let modules: [&'static dyn Module; 19] = [
+    let modules: [&'static dyn Module; 20] = [
         &math::MathModule,
+        &operator::OperatorModule,
         &json::JsonModule,
         &re::ReModule,
         &datetime::DatetimeModule,
