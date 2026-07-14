@@ -638,7 +638,7 @@ static BOOL_TYPE: TypeObject = TypeObject {
     del_item_slot: None,
     missing_slot: None,
     len_slot: None,
-    get_attr_slot: Some(noattr_get_attr),
+    get_attr_slot: Some(bool_get_attr),
     set_attr_slot: None,
     has_methods_table: false,
 };
@@ -655,7 +655,7 @@ static INT_TYPE: TypeObject = TypeObject {
     del_item_slot: None,
     missing_slot: None,
     len_slot: None,
-    get_attr_slot: Some(noattr_get_attr),
+    get_attr_slot: Some(int_get_attr),
     set_attr_slot: None,
     has_methods_table: true,
 };
@@ -672,9 +672,9 @@ static FLOAT_TYPE: TypeObject = TypeObject {
     del_item_slot: None,
     missing_slot: None,
     len_slot: None,
-    get_attr_slot: Some(noattr_get_attr),
+    get_attr_slot: Some(float_get_attr),
     set_attr_slot: None,
-    has_methods_table: false,
+    has_methods_table: true,
 };
 static COMPLEX_TYPE: TypeObject = TypeObject {
     name: "complex",
@@ -2272,6 +2272,39 @@ fn attribute_error(type_name: &str, attr_name: &str) -> EvalError {
 /// int, float, bytes, range). Always raises `AttributeError`.
 fn noattr_get_attr(value: &Value, name: &str) -> EvalResult {
     Err(attribute_error(value.type_name(), name))
+}
+
+/// `int.real`/`.numerator` (the int itself), `.imag` (`0`), `.denominator` (`1`)
+/// — the numeric-tower attributes CPython exposes on `int`.
+fn int_get_attr(value: &Value, name: &str) -> EvalResult {
+    match name {
+        "real" | "numerator" => Ok(value.clone()),
+        "imag" => Ok(Value::Int(0)),
+        "denominator" => Ok(Value::Int(1)),
+        _ => Err(attribute_error("int", name)),
+    }
+}
+
+/// `bool` shares int's numeric-tower attributes, but yields plain ints
+/// (`True.real == 1`, not `True`).
+fn bool_get_attr(value: &Value, name: &str) -> EvalResult {
+    let Value::Bool(b) = value else { unreachable!("bool_get_attr sees only Bool") };
+    let n = i64::from(*b);
+    match name {
+        "real" | "numerator" => Ok(Value::Int(n)),
+        "imag" => Ok(Value::Int(0)),
+        "denominator" => Ok(Value::Int(1)),
+        _ => Err(attribute_error("bool", name)),
+    }
+}
+
+/// `float.real` (itself) / `.imag` (`0.0`).
+fn float_get_attr(value: &Value, name: &str) -> EvalResult {
+    match name {
+        "real" => Ok(value.clone()),
+        "imag" => Ok(Value::Float(0.0)),
+        _ => Err(attribute_error("float", name)),
+    }
 }
 
 /// `complex.real` / `complex.imag` attribute access (both `float`). `.conjugate`

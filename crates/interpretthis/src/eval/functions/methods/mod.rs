@@ -20,6 +20,7 @@ pub(crate) mod bytes;
 pub(crate) mod counter;
 pub(crate) mod deque;
 pub(crate) mod dict;
+pub(crate) mod float;
 pub(crate) mod int;
 pub(crate) mod list;
 pub(crate) mod set;

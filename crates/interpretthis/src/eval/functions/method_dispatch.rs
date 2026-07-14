@@ -293,6 +293,16 @@ fn int_methods(
     }
 }
 
+fn float_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Float(f) = obj else { return Err(type_mismatch("float")) };
+    methods::float::dispatch_float_method(*f, method, args, kwargs).map(MethodOutcome::pure)
+}
+
 /// `complex` methods: `conjugate()` (and `real`/`imag` for parity with `int`,
 /// though those are normally read as attributes). All are argument-less.
 fn complex_methods(
@@ -429,6 +439,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Set(_) => Some(set_methods),
         Value::Tuple(_) => Some(tuple_methods),
         Value::Int(_) | Value::BigInt(_) => Some(int_methods),
+        Value::Float(_) => Some(float_methods),
         Value::Complex(_) => Some(complex_methods),
         Value::Bytes(_) => Some(bytes_methods),
         Value::Date(_) => Some(date_methods),
