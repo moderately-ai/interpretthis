@@ -12,17 +12,34 @@ use crate::{
     value::Value,
 };
 
+/// Extract the optional `ndigits` argument of `int.__round__` /
+/// `float.__round__`. CPython accepts an int (or `None`) and rejects
+/// anything else with TypeError.
+fn round_ndigits(args: &[Value]) -> Result<Option<i64>, crate::error::EvalError> {
+    match args.first() {
+        None | Some(Value::None) => Ok(None),
+        Some(Value::Int(n)) => Ok(Some(*n)),
+        Some(Value::Bool(b)) => Ok(Some(i64::from(*b))),
+        Some(other) => Err(InterpreterError::TypeError(format!(
+            "'{}' object cannot be interpreted as an integer",
+            other.type_name()
+        ))
+        .into()),
+    }
+}
+
 /// Dispatch a method call on an `int` receiver. CPython exposes
 /// `bit_length`, `bit_count`, `to_bytes`, `from_bytes`, `as_integer_ratio`,
 /// `conjugate`, `real`, `imag` — wire the commonly-used ones.
 pub(crate) fn dispatch_int_method(
     i: i64,
     method: &str,
-    _args: &[Value],
+    args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
     crate::eval::functions::reject_kwargs(method, kwargs)?;
     match method {
+        "__round__" => Ok(crate::eval::functions::round_int(i, round_ndigits(args)?)),
         "bit_length" => {
             // CPython: 0.bit_length() == 0; -42.bit_length() == 6
             // (sign ignored). Implemented as `abs(i).leading_zeros`
@@ -78,13 +95,14 @@ pub(crate) fn dispatch_int_method(
 pub(crate) fn dispatch_bigint_method(
     b: &num_bigint::BigInt,
     method: &str,
-    _args: &[Value],
+    args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
     use num_traits::ToPrimitive;
     crate::eval::functions::reject_kwargs(method, kwargs)?;
     let big = |n: num_bigint::BigInt| Ok(crate::value::int_from_bigint(n));
     match method {
+        "__round__" => big(crate::eval::functions::round_bigint(b, round_ndigits(args)?)),
         // `BigInt::bits()` counts magnitude bits — exactly CPython's
         // sign-agnostic `bit_length`.
         "bit_length" => Ok(Value::Int(i64::try_from(b.bits()).unwrap_or(i64::MAX))),

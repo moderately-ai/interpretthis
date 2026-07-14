@@ -1,0 +1,7 @@
+print((1234).__round__(-2))
+print((10).__round__())
+print((3.14159).__round__(2))
+print((2.5).__round__())
+print((12345).__round__(-3))
+print((2**70).__round__(-5) == round(2**70, -5))
+print(round(2**70, -5))

@@ -123,6 +123,114 @@ pub(crate) fn float_to_int_exact(f: f64) -> Result<Value, EvalError> {
     Ok(crate::value::int_from_bigint(big))
 }
 
+/// `round(int, ndigits)` — CPython's banker's rounding to the nearest
+/// multiple of `10**(-ndigits)`. `None` / non-negative `ndigits` is a
+/// no-op; negative rounds off low-order decimal digits. Shared by the
+/// `round` builtin and `int.__round__`.
+pub(crate) fn round_int(i: i64, ndigits: Option<i64>) -> Value {
+    let Some(n) = ndigits else { return Value::Int(i) };
+    if n >= 0 {
+        return Value::Int(i);
+    }
+    let abs_exp = u32::try_from(-n).unwrap_or(u32::MAX);
+    // |n| beyond ~19 wipes any i64 out to zero; CPython returns 0 too.
+    if abs_exp > 18 {
+        return Value::Int(0);
+    }
+    let factor = 10_i64.pow(abs_exp);
+    // Banker's round: truncated divide, then on an exact half pick the
+    // even quotient. Rust's `/` truncates toward zero, so negatives step
+    // away from zero on a round-up.
+    let q = i / factor;
+    let r = i - q * factor;
+    let twice_r = r.abs() * 2;
+    let rounded = match twice_r.cmp(&factor) {
+        std::cmp::Ordering::Equal => {
+            if q % 2 == 0 {
+                q
+            } else if i.is_negative() {
+                q - 1
+            } else {
+                q + 1
+            }
+        }
+        std::cmp::Ordering::Greater => {
+            if i.is_negative() {
+                q - 1
+            } else {
+                q + 1
+            }
+        }
+        std::cmp::Ordering::Less => q,
+    };
+    Value::Int(rounded * factor)
+}
+
+/// Banker's-rounding of a `BigInt` to the nearest `10**(-ndigits)`.
+/// `None` / non-negative `ndigits` is a no-op. Shared by the `round`
+/// builtin and `int.__round__` on out-of-i64 receivers.
+pub(crate) fn round_bigint(b: &num_bigint::BigInt, ndigits: Option<i64>) -> num_bigint::BigInt {
+    let Some(n) = ndigits else { return b.clone() };
+    if n >= 0 {
+        return b.clone();
+    }
+    let abs_exp = u32::try_from(-n).unwrap_or(u32::MAX);
+    let factor = num_bigint::BigInt::from(10).pow(abs_exp);
+    // Truncating div/rem (toward zero), then resolve an exact half to
+    // the even quotient — mirrors the i64 path in `round_int`.
+    let q = b / &factor;
+    let r = b - &q * &factor;
+    let twice_r = r.magnitude() * 2u32;
+    let rounded = match twice_r.cmp(factor.magnitude()) {
+        std::cmp::Ordering::Equal => {
+            if num_traits::Zero::is_zero(&(&q % 2)) {
+                q
+            } else if b.sign() == num_bigint::Sign::Minus {
+                q - 1
+            } else {
+                q + 1
+            }
+        }
+        std::cmp::Ordering::Greater => {
+            if b.sign() == num_bigint::Sign::Minus {
+                q - 1
+            } else {
+                q + 1
+            }
+        }
+        std::cmp::Ordering::Less => q,
+    };
+    rounded * factor
+}
+
+/// `round(float, ndigits)` — CPython's IEEE-754 round-half-to-even.
+/// `ndigits is None` returns an int; otherwise a float rounded to that
+/// many decimal places (negative places round to the nearest 10^|n|).
+/// Shared by the `round` builtin and `float.__round__`.
+pub(crate) fn round_float(f: f64, ndigits: Option<i64>) -> Result<Value, EvalError> {
+    let Some(n) = ndigits else {
+        // `round(x)` with no ndigits yields an int.
+        return float_to_int_exact(f.round_ties_even());
+    };
+    // CPython's `round(x, n>=0)` uses correctly-rounded decimal
+    // formatting (dtoa), not multiply-round-divide, so 2.675 → 2.67.
+    // Rust's `{:.n$}` formatter shares that algorithm.
+    if n >= 0 {
+        let places = usize::try_from(n).unwrap_or(usize::MAX);
+        let s = format!("{f:.places$}");
+        let parsed = s.parse::<f64>().unwrap_or(f);
+        return Ok(Value::Float(parsed));
+    }
+    // Negative ndigits: round to the nearest 10^|n|. Divide (rather than
+    // multiply by 10^n) so the scaled value stays finite.
+    let abs_exp = i32::try_from(-n).unwrap_or(i32::MAX);
+    let pow10 = 10f64.powi(abs_exp);
+    if !pow10.is_finite() {
+        return Ok(Value::Float(0.0_f64.copysign(f)));
+    }
+    Ok(Value::Float((f / pow10).round_ties_even() * pow10))
+}
+
 // ---------------------------------------------------------------------------
 // Proxy resolution
 // ---------------------------------------------------------------------------

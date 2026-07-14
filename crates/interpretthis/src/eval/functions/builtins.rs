@@ -14,7 +14,7 @@ use super::{
         parse_complex_str, parse_int_str, pow_three_arg, type_arg_name,
     },
     method_dispatch::CallArgs,
-    resolve_proxy, to_len_i64, value_to_i64,
+    resolve_proxy, round_bigint, round_float, round_int, to_len_i64, value_to_i64,
 };
 use crate::{
     error::{EvalError, InterpreterError},
@@ -681,96 +681,16 @@ pub(super) async fn try_builtin(
                 // CPython's `round(int, n)` returns an int rounded to the
                 // nearest multiple of 10**(-n) for n<0; rounding is
                 // banker's. `round(int)` and `round(int, n>=0)` are no-ops.
-                Value::Int(i) => match ndigits {
-                    None => Ok(Some(Value::Int(*i))),
-                    Some(n) if n >= 0 => Ok(Some(Value::Int(*i))),
-                    Some(n) => {
-                        let abs_exp = u32::try_from(-n).unwrap_or(u32::MAX);
-                        // |n| beyond ~19 wipes any i64 out to zero; clamp
-                        // at 18 (max safe i64 exponent) and short-circuit
-                        // larger to zero — CPython returns 0 too.
-                        if abs_exp > 18 {
-                            return Ok(Some(Value::Int(0)));
-                        }
-                        let factor = 10_i64.pow(abs_exp);
-                        // Banker's round: truncated divide, then if the
-                        // remainder is exactly half the divisor pick the
-                        // even quotient. Handle negatives symmetrically
-                        // (Rust's `/` truncates toward zero, so for negative
-                        // `i` we step the quotient further away from zero
-                        // on a round-up instead of toward).
-                        let q = i / factor;
-                        let r = i - q * factor;
-                        let twice_r = r.abs() * 2;
-                        let rounded = match twice_r.cmp(&factor) {
-                            std::cmp::Ordering::Equal => {
-                                if q % 2 == 0 {
-                                    q
-                                } else if i.is_negative() {
-                                    q - 1
-                                } else {
-                                    q + 1
-                                }
-                            }
-                            std::cmp::Ordering::Greater => {
-                                if i.is_negative() {
-                                    q - 1
-                                } else {
-                                    q + 1
-                                }
-                            }
-                            std::cmp::Ordering::Less => q,
-                        };
-                        Ok(Some(Value::Int(rounded * factor)))
-                    }
-                },
+                Value::Int(i) => Ok(Some(round_int(*i, ndigits))),
+                Value::BigInt(b) => {
+                    Ok(Some(crate::value::int_from_bigint(round_bigint(b, ndigits))))
+                }
                 // CPython's `round()` uses IEEE-754 round-half-to-even
                 // (banker's rounding): `round(0.5) == 0`, `round(2.5) == 2`,
                 // `round(-0.5) == 0`. Rust's `f64::round()` is
                 // round-half-away-from-zero — wrong for parity. Use
                 // `round_ties_even()` which implements the IEEE rule.
-                Value::Float(f) => ndigits.map_or_else(
-                    || Ok(Some(float_to_int_exact(f.round_ties_even())?)),
-                    |n| {
-                        // CPython's `round(x, n)` uses correctly-rounded
-                        // decimal formatting (via dtoa), not naive
-                        // multiply-round-divide. The multiply-divide
-                        // approach breaks because some decimals like
-                        // 2.675 multiply to exactly 267.5 in IEEE-754,
-                        // which then rounds up to 268 → 2.68; CPython
-                        // gets 2.67 because dtoa sees the underlying
-                        // 2.6749999... and emits "2.67". Rust's `{:.n$}`
-                        // formatter uses the same correctly-rounded
-                        // decimal algorithm (Ryu/Grisu3) and parses back
-                        // to give the same answer.
-                        //
-                        // CPython also honors negative ndigits (round to
-                        // the nearest 10^|n|), which the format-and-parse
-                        // path can't express. Fall back to the
-                        // multiply/divide form when n < 0 — banker's
-                        // rounding via `round_ties_even` on the scaled
-                        // value matches CPython for the common cases
-                        // (`round(125.0, -1) == 120.0`).
-                        if n >= 0 {
-                            let places = usize::try_from(n).unwrap_or(usize::MAX);
-                            let s = format!("{f:.places$}");
-                            let parsed = s.parse::<f64>().unwrap_or(*f);
-                            return Ok(Some(Value::Float(parsed)));
-                        }
-                        // Round to the nearest 10^|n|. Dividing by the power
-                        // (rather than multiplying by 10^n) keeps the scaled
-                        // value finite; the reverse form underflowed 10^n to
-                        // 0.0 for large |n|, yielding (x*0)/0 == NaN.
-                        let abs_exp = i32::try_from(-n).unwrap_or(i32::MAX);
-                        let pow10 = 10f64.powi(abs_exp);
-                        if !pow10.is_finite() {
-                            // 10^|n| exceeds the f64 range: every finite value
-                            // rounds to a signed zero at this scale.
-                            return Ok(Some(Value::Float(0.0_f64.copysign(*f))));
-                        }
-                        Ok(Some(Value::Float((f / pow10).round_ties_even() * pow10)))
-                    },
-                ),
+                Value::Float(f) => Ok(Some(round_float(*f, ndigits)?)),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
                 _ => Err(InterpreterError::TypeError(format!(
                     "type '{}' doesn't define __round__",

@@ -227,6 +227,71 @@ pub(super) fn int_to_bytes(
     Ok(Value::Bytes(out))
 }
 
+/// `float.fromhex(s)` — parse the C99 hexadecimal-float form
+/// (`0x1.8p+0`, sign/`inf`/`nan` accepted). The mantissa digits are
+/// always hexadecimal; the optional `p` exponent is a decimal power of
+/// two.
+pub(super) fn float_fromhex(args: &[Value]) -> EvalResult {
+    let s = match args {
+        [Value::String(s)] => s.as_str(),
+        [other] => {
+            return Err(InterpreterError::TypeError(format!(
+                "float.fromhex() argument must be str, not {}",
+                other.type_name()
+            ))
+            .into());
+        }
+        _ => {
+            return Err(
+                InterpreterError::TypeError("fromhex() takes exactly one argument".into()).into()
+            );
+        }
+    };
+    parse_hex_float(s.trim()).map(Value::Float).ok_or_else(|| {
+        EvalError::from(InterpreterError::ValueError(
+            "invalid hexadecimal floating-point string".into(),
+        ))
+    })
+}
+
+/// Parse a C99 hex-float / special-value string into an `f64`.
+fn parse_hex_float(input: &str) -> Option<f64> {
+    let lower = input.to_ascii_lowercase();
+    let (sign, body) = match lower.strip_prefix('-') {
+        Some(rest) => (-1.0_f64, rest),
+        None => (1.0_f64, lower.strip_prefix('+').unwrap_or(&lower)),
+    };
+    match body {
+        "inf" | "infinity" => return Some(sign * f64::INFINITY),
+        "nan" => return Some(f64::NAN),
+        "" => return None,
+        _ => {}
+    }
+    let body = body.strip_prefix("0x").unwrap_or(body);
+    // Split off the binary exponent (`p<decimal>`), if any.
+    let (mantissa, exp) = match body.split_once('p') {
+        Some((m, e)) => (m, e.parse::<i32>().ok()?),
+        None => (body, 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (mantissa, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let mut value = 0.0_f64;
+    for c in int_part.chars() {
+        value = value * 16.0 + f64::from(c.to_digit(16)?);
+    }
+    let mut scale = 1.0_f64 / 16.0;
+    for c in frac_part.chars() {
+        value += f64::from(c.to_digit(16)?) * scale;
+        scale /= 16.0;
+    }
+    Some(sign * value * 2.0_f64.powi(exp))
+}
+
 /// `str.maketrans(...)` — build a translation table (a dict keyed by code
 /// point) for `str.translate`. Three forms: a single dict (keys may be 1-char
 /// strings or ints), two equal-length strings (positional char mapping), or a
