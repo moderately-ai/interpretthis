@@ -120,7 +120,15 @@ pub async fn eval_generator_exp(
     checkpoint.restore(state);
     outcome?;
 
-    Ok(Value::List(shared_list(results)))
+    // A generator expression is a one-shot lazy iterator, not a list: `next(g)`
+    // advances it and a later `list(g)` yields only the remainder. We eagerly
+    // materialise the items (the sandbox caps iteration and forbids unbounded
+    // streams) but wrap them in the `Lazy` cursor type so the iterator protocol
+    // (`next`, single-pass `for`/`list`/`sum`) behaves as CPython's does.
+    let cursor_id = state.next_cursor_id;
+    state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
+    state.lazy_cursors.insert(cursor_id, 0);
+    Ok(Value::Lazy { items: results, cursor_id })
 }
 
 /// Evaluate a dict comprehension {key: val for x in iterable if cond}.

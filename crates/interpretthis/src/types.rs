@@ -329,6 +329,15 @@ pub fn dispatch_len(value: &Value) -> Result<usize, EvalError> {
 /// `TypeError("'<name>' object is not iterable")` when the type's
 /// `iter_slot` is `None`.
 pub fn dispatch_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
+    // A `Lazy` (generator expression / materialised generator) is consumable by
+    // the sync iteration path too. This returns all buffered items regardless
+    // of the one-shot cursor — the cursor is only advanced by the async
+    // `op::iter` / `next` paths — which is exact for a fresh generator (the
+    // common case: `"".join(x for x in ...)`); a partially-consumed one
+    // re-yields from the start here, a rare, documented divergence.
+    if let Value::Lazy { items, .. } = value {
+        return Ok(items.clone());
+    }
     let type_obj = type_of(value);
     type_obj.iter_slot.map_or_else(
         || {
