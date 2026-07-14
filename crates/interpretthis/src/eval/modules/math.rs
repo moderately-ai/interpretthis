@@ -70,9 +70,11 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
             }
             Ok(Value::Float(x.sqrt()))
         }
-        "floor" => Ok(Value::Int(float_to_int(arg_f64(func, args, 0)?.floor())?)),
-        "ceil" => Ok(Value::Int(float_to_int(arg_f64(func, args, 0)?.ceil())?)),
-        "trunc" => Ok(Value::Int(float_to_int(arg_f64(func, args, 0)?.trunc())?)),
+        // Return the exact integer, promoting past i64 to BigInt (CPython
+        // `math.floor(1e30)`); inf -> OverflowError, nan -> ValueError.
+        "floor" => crate::eval::functions::float_to_int_exact(arg_f64(func, args, 0)?.floor()),
+        "ceil" => crate::eval::functions::float_to_int_exact(arg_f64(func, args, 0)?.ceil()),
+        "trunc" => crate::eval::functions::float_to_int_exact(arg_f64(func, args, 0)?.trunc()),
         "fabs" => Ok(Value::Float(arg_f64(func, args, 0)?.abs())),
         "exp" => {
             let x = arg_f64(func, args, 0)?;
@@ -206,25 +208,6 @@ fn domain_pos(func: &str, args: &[Value]) -> Result<f64, EvalError> {
         return Err(value_error("math domain error"));
     }
     Ok(x)
-}
-
-/// Convert a `math.floor`/`ceil`/`trunc` result to `i64` (Python returns int).
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "floor/ceil/trunc already produced an integral f64; out-of-i64-range \
-              values saturate, matching the lossy boundary of a fixed-width int"
-)]
-fn float_to_int(f: f64) -> Result<i64, EvalError> {
-    // CPython: infinity → OverflowError, NaN → ValueError. Two
-    // different exception types because the failure modes are
-    // semantically distinct (overflow vs invalid value).
-    if f.is_infinite() {
-        return Err(overflow_error("cannot convert float infinity to integer"));
-    }
-    if f.is_nan() {
-        return Err(value_error("cannot convert float NaN to integer"));
-    }
-    Ok(f as i64)
 }
 
 fn factorial(arg: &Value) -> EvalResult {
