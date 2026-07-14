@@ -2196,7 +2196,7 @@ fn range_length(start: i64, stop: i64, step: i64) -> usize {
 /// attribute lookup returns a method-marker sentinel rather than an
 /// `AttributeError` for valid method names.
 const DICT_METHODS: &[&str] =
-    &["keys", "values", "items", "get", "pop", "update", "setdefault", "copy", "clear"];
+    &["keys", "values", "items", "get", "pop", "popitem", "update", "setdefault", "copy", "clear"];
 
 const STR_METHODS: &[&str] = &[
     "upper",
@@ -2236,6 +2236,14 @@ const STR_METHODS: &[&str] = &[
     "rjust",
     "zfill",
     "encode",
+    "splitlines",
+    "isidentifier",
+    "istitle",
+    "isprintable",
+    "isascii",
+    "isdecimal",
+    "isnumeric",
+    "translate",
 ];
 
 const LIST_METHODS: &[&str] = &[

@@ -435,11 +435,15 @@ pub fn eval_expr<'a>(
         Expr::Starred(node) => eval_expr(state, &node.value, tools),
         Expr::Slice(node) => Box::pin(names::eval_slice(state, node, tools)),
         Expr::Yield(node) => Box::pin(async move {
-            // Resume: deliver send(value) as the result of this yield expr.
+            // Resume: deliver send(value) — or raise a thrown exception — as the
+            // result of this yield expr.
             if let Some(&id) = state.active_generator_stack.last() {
                 if let Some(frame) = state.generators.get_mut(&id) {
                     if frame.resume_at_yield {
                         frame.resume_at_yield = false;
+                        if let Some(exc) = frame.pending_throw.take() {
+                            return Err(EvalError::Exception(*exc));
+                        }
                         return Ok(std::mem::replace(&mut frame.send_value, Value::None));
                     }
                 }
@@ -475,6 +479,9 @@ pub fn eval_expr<'a>(
                 if let Some(frame) = state.generators.get_mut(&id) {
                     if frame.resume_at_yield {
                         frame.resume_at_yield = false;
+                        if let Some(exc) = frame.pending_throw.take() {
+                            return Err(EvalError::Exception(*exc));
+                        }
                         return Ok(std::mem::replace(&mut frame.send_value, Value::None));
                     }
                     if items.is_empty() {

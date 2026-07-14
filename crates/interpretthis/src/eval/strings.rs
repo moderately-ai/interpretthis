@@ -657,17 +657,24 @@ fn resolve_format_arg(
 /// `{name.attr}` — attribute access in a format field. Only dict-keyed access
 /// is meaningful for the interpreter's value model.
 fn format_get_attr(value: &Value, attr: &str) -> EvalResult {
-    match value {
-        Value::Dict(map) => map
+    // A dict field selector reads a string key (the interpreter's value model
+    // exposes `{d.key}` as key access rather than CPython's getattr).
+    if let Value::Dict(map) = value {
+        return map
             .get(&ValueKey::String(attr.into()))
             .cloned()
-            .ok_or_else(|| EvalError_value_error(format!("dict has no key '{attr}'"))),
-        other => Err(InterpreterError::AttributeError(format!(
-            "'{}' object has no attribute '{attr}'",
-            other.type_name()
-        ))
-        .into()),
+            .ok_or_else(|| EvalError_value_error(format!("dict has no key '{attr}'")));
     }
+    // Type-slot attributes — `{x.real}`, `{x.imag}`, `{x.numerator}`, etc. —
+    // resolve through the shared state-free getattr dispatch.
+    if let Some(resolved) = crate::types::dispatch_getattr_opt(value, attr)? {
+        return Ok(resolved);
+    }
+    Err(InterpreterError::AttributeError(format!(
+        "'{}' object has no attribute '{attr}'",
+        value.type_name()
+    ))
+    .into())
 }
 
 /// `{name[key]}` — item access in a format field. A bare integer indexes a

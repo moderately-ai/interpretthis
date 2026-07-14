@@ -34,6 +34,7 @@ pub fn has_function(name: &str) -> bool {
             | "dropwhile"
             | "compress"
             | "accumulate"
+            | "groupby"
     )
 }
 
@@ -327,6 +328,54 @@ fn compress_impl(args: &[Value]) -> EvalResult {
 
 /// `takewhile(predicate, iterable)`: yield items until predicate returns
 /// falsy. Re-enters the evaluator for each predicate call.
+/// `groupby(iterable, key=None)`: group consecutive elements sharing a key.
+/// Yields `(key, group)` pairs; in our eager model the group materialises as a
+/// list. `key=None` groups by the elements themselves. Only *consecutive* runs
+/// group, matching CPython (callers `sorted()` first for a full grouping).
+async fn groupby_impl(
+    state: &mut crate::state::InterpreterState,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let items = iterate_value(need_arg("groupby", args, 0)?)?;
+    let key_fn =
+        args.get(1).or_else(|| kwargs.get("key")).filter(|v| !matches!(v, Value::None)).cloned();
+    let empty = indexmap::IndexMap::new();
+    let mut out: Vec<Value> = Vec::new();
+    let mut current: Option<(Value, Vec<Value>)> = None;
+    for item in items {
+        let key = match &key_fn {
+            Some(f) => {
+                crate::eval::modules::call_callable(
+                    state,
+                    f,
+                    std::slice::from_ref(&item),
+                    &empty,
+                    tools,
+                )
+                .await?
+            }
+            None => item.clone(),
+        };
+        match &mut current {
+            Some((ck, group)) if crate::eval::operations::values_equal_pub(ck, &key) => {
+                group.push(item);
+            }
+            _ => {
+                if let Some((ck, group)) = current.take() {
+                    out.push(Value::Tuple(vec![ck, Value::List(shared_list(group))]));
+                }
+                current = Some((key, vec![item]));
+            }
+        }
+    }
+    if let Some((ck, group)) = current {
+        out.push(Value::Tuple(vec![ck, Value::List(shared_list(group))]));
+    }
+    Ok(Value::List(shared_list(out)))
+}
+
 async fn takewhile_impl(
     state: &mut crate::state::InterpreterState,
     args: &[Value],
@@ -466,6 +515,7 @@ impl crate::eval::modules::Module for ItertoolsModule {
             "dropwhile" => dropwhile_impl(state, args, tools).await,
             "accumulate" => accumulate_impl(state, args, kwargs, tools).await,
             "compress" => compress_impl(args),
+            "groupby" => groupby_impl(state, args, kwargs, tools).await,
             _ => call(func, args, kwargs),
         }
     }

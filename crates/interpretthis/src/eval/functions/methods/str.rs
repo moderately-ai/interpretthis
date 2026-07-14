@@ -562,11 +562,160 @@ pub(crate) fn dispatch_string_method(
                 Ok(Value::String(result.into()))
             }
         }
+        "splitlines" => {
+            // `keepends` (default False): keep the line-break characters when true.
+            let keepends = match args.first() {
+                None | Some(Value::None) => false,
+                Some(v) => v.is_truthy(),
+            };
+            Ok(Value::List(shared_list(split_lines(s, keepends))))
+        }
+        "isidentifier" => Ok(Value::Bool(is_identifier(s))),
+        "istitle" => Ok(Value::Bool(is_title(s))),
+        "isprintable" => {
+            // CPython: printable = not "other" or "separator" category, except
+            // ASCII space. Empty string is printable.
+            Ok(Value::Bool(s.chars().all(|c| c == ' ' || (!c.is_control() && !c.is_whitespace()))))
+        }
+        "isascii" => Ok(Value::Bool(s.is_ascii())),
+        "isdecimal" | "isnumeric" => {
+            // Approximate CPython's Unicode decimal/numeric categories with the
+            // ASCII-digit test plus Unicode numeric detection; adequate for the
+            // common ASCII cases the sandbox sees.
+            Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_numeric())))
+        }
+        "translate" => {
+            let Some(table) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "translate() takes exactly one argument (0 given)".into(),
+                )
+                .into());
+            };
+            translate(s, table)
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "'str' object has no attribute '{method}'"
         ))
         .into()),
     }
+}
+
+/// Split `s` into lines on Python's universal line boundaries. When `keepends`
+/// is true the terminator is retained on each line.
+fn split_lines(s: &str, keepends: bool) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        // CPython line boundaries: \n \r \r\n \v \f \x1c \x1d \x1e \x85    .
+        let is_break = matches!(
+            c,
+            '\n' | '\r'
+                | '\u{0b}'
+                | '\u{0c}'
+                | '\u{1c}'
+                | '\u{1d}'
+                | '\u{1e}'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        );
+        if is_break {
+            if keepends {
+                line.push(c);
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    line.push(chars.next().unwrap_or('\n'));
+                }
+            } else if c == '\r' && chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push(Value::String(std::mem::take(&mut line).into()));
+        } else {
+            line.push(c);
+        }
+    }
+    if !line.is_empty() {
+        out.push(Value::String(line.into()));
+    }
+    out
+}
+
+/// Whether `s` is a valid Python identifier: a non-digit XID_Start (or `_`)
+/// followed by XID_Continue characters. Approximated with Rust's
+/// alphabetic/alphanumeric classes plus `_`.
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_alphanumeric())
+}
+
+/// Whether `s` is title-cased: every run of cased characters starts with an
+/// uppercase letter and the rest are lowercase, and there is at least one
+/// cased character.
+fn is_title(s: &str) -> bool {
+    let mut seen_cased = false;
+    let mut prev_cased = false;
+    for c in s.chars() {
+        if c.is_uppercase() {
+            if prev_cased {
+                return false;
+            }
+            seen_cased = true;
+            prev_cased = true;
+        } else if c.is_lowercase() {
+            if !prev_cased {
+                return false;
+            }
+            seen_cased = true;
+            prev_cased = true;
+        } else {
+            prev_cased = false;
+        }
+    }
+    seen_cased
+}
+
+/// `str.translate(table)` — map each character through `table`, a dict keyed by
+/// Unicode code point. A mapped value of `None` deletes the character; an int
+/// value is a target code point; a str value is substituted directly.
+fn translate(s: &str, table: &Value) -> EvalResult {
+    let Value::Dict(map) = table else {
+        return Err(InterpreterError::TypeError(format!(
+            "'{}' object is not subscriptable",
+            table.type_name()
+        ))
+        .into());
+    };
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let key = crate::value::ValueKey::Int(i64::from(u32::from(c)));
+        match map.get(&key) {
+            None => out.push(c),
+            Some(Value::None) => {}
+            Some(Value::Int(n)) => {
+                let code = u32::try_from(*n).ok().and_then(char::from_u32).ok_or_else(|| {
+                    EvalError::from(InterpreterError::ValueError(
+                        "character mapping must be in range(0x110000)".into(),
+                    ))
+                })?;
+                out.push(code);
+            }
+            Some(Value::String(rep)) => out.push_str(rep),
+            Some(other) => {
+                return Err(InterpreterError::TypeError(format!(
+                    "character mapping must return integer, None or str, not {}",
+                    other.type_name()
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(Value::String(out.into()))
 }
 
 /// Optional strip character set: absent or `None` → strip whitespace; a `str`

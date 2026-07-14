@@ -85,6 +85,7 @@ pub(crate) fn create_generator(
             closed: false,
             send_value: Value::None,
             resume_at_yield: false,
+            pending_throw: None,
             stmt_index: 0,
             for_stack: Vec::new(),
         },
@@ -146,34 +147,7 @@ async fn dispatch_suspended(
             }
             step_generator(state, id, value, tools).await
         }
-        "throw" => {
-            // Mark finished and raise the requested exception into the caller.
-            if let Some(frame) = state.generators.get_mut(&id) {
-                frame.finished = true;
-                frame.closed = true;
-            }
-            let (type_name, message) = match args.first() {
-                Some(Value::Exception(e)) => (e.type_name.clone(), e.message.clone()),
-                Some(Value::ExceptionType(n)) => {
-                    let msg = args.get(1).map(|v| format!("{v}")).unwrap_or_default();
-                    (n.clone(), msg)
-                }
-                Some(other) => (
-                    "TypeError".into(),
-                    format!(
-                        "exceptions must derive from BaseException, not '{}'",
-                        other.type_name()
-                    ),
-                ),
-                None => {
-                    return Err(InterpreterError::TypeError(
-                        "throw() takes at least 1 argument".into(),
-                    )
-                    .into());
-                }
-            };
-            Err(EvalError::Exception(ExceptionValue::new(type_name, message)))
-        }
+        "throw" => throw_into_generator(state, id, args, tools).await,
         "close" => {
             if let Some(frame) = state.generators.get_mut(&id) {
                 frame.finished = true;
@@ -187,6 +161,54 @@ async fn dispatch_suspended(
         ))
         .into()),
     }
+}
+
+/// `generator.throw(exc)` — inject `exc` at the generator's suspended `yield`
+/// and resume, so the generator's own `try/except` can catch it (and possibly
+/// yield again, which becomes throw's return value). A not-yet-started or
+/// already-finished generator has no live suspension point, so the exception
+/// propagates straight to the caller.
+async fn throw_into_generator(
+    state: &mut InterpreterState,
+    id: u64,
+    args: &[Value],
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let exc = match args.first() {
+        Some(Value::Exception(e)) => (**e).clone(),
+        Some(Value::ExceptionType(n)) => {
+            let msg = args.get(1).map(|v| format!("{v}")).unwrap_or_default();
+            ExceptionValue::new(n.clone(), msg)
+        }
+        Some(other) => {
+            return Err(InterpreterError::TypeError(format!(
+                "exceptions must derive from BaseException, not '{}'",
+                other.type_name()
+            ))
+            .into());
+        }
+        None => {
+            return Err(
+                InterpreterError::TypeError("throw() takes at least 1 argument".into()).into()
+            );
+        }
+    };
+    let live = state
+        .generators
+        .get(&id)
+        .is_some_and(|f| f.started && !f.finished && !f.closed && f.resume_at_yield);
+    if !live {
+        // No suspended yield to catch it: finish the generator and raise out.
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.finished = true;
+            frame.closed = true;
+        }
+        return Err(EvalError::Exception(exc));
+    }
+    if let Some(frame) = state.generators.get_mut(&id) {
+        frame.pending_throw = Some(Box::new(exc));
+    }
+    step_generator(state, id, Value::None, tools).await
 }
 
 async fn step_generator(

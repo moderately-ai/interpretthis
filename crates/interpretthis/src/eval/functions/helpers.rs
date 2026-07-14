@@ -227,6 +227,75 @@ pub(super) fn int_to_bytes(
     Ok(Value::Bytes(out))
 }
 
+/// `str.maketrans(...)` — build a translation table (a dict keyed by code
+/// point) for `str.translate`. Three forms: a single dict (keys may be 1-char
+/// strings or ints), two equal-length strings (positional char mapping), or a
+/// third string whose characters map to `None` (deletion).
+pub(super) fn str_maketrans(args: &[Value]) -> EvalResult {
+    use crate::value::ValueKey;
+    let cp = |c: char| ValueKey::Int(i64::from(u32::from(c)));
+    let single_char_key = |s: &str| -> Result<ValueKey, EvalError> {
+        let mut it = s.chars();
+        match (it.next(), it.next()) {
+            (Some(c), None) => Ok(cp(c)),
+            _ => Err(InterpreterError::ValueError(
+                "string keys in translate table must be of length 1".into(),
+            )
+            .into()),
+        }
+    };
+    let mut map: IndexMap<ValueKey, Value> = IndexMap::new();
+    match args {
+        [Value::Dict(d)] => {
+            for (k, v) in d {
+                let key = match k {
+                    ValueKey::Int(_) => k.clone(),
+                    ValueKey::String(s) => single_char_key(s)?,
+                    _ => {
+                        return Err(InterpreterError::TypeError(
+                            "keys in translate table must be strings or integers".into(),
+                        )
+                        .into());
+                    }
+                };
+                map.insert(key, v.clone());
+            }
+        }
+        [Value::String(x), Value::String(y), rest @ ..] => {
+            if x.chars().count() != y.chars().count() {
+                return Err(InterpreterError::ValueError(
+                    "the first two maketrans arguments must have equal length".into(),
+                )
+                .into());
+            }
+            for (cx, cy) in x.chars().zip(y.chars()) {
+                map.insert(cp(cx), Value::Int(i64::from(u32::from(cy))));
+            }
+            match rest {
+                [] => {}
+                [Value::String(z)] => {
+                    for cz in z.chars() {
+                        map.insert(cp(cz), Value::None);
+                    }
+                }
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "maketrans third argument must be a str".into(),
+                    )
+                    .into());
+                }
+            }
+        }
+        _ => {
+            return Err(InterpreterError::TypeError(
+                "maketrans expects a dict, or two/three str arguments".into(),
+            )
+            .into());
+        }
+    }
+    Ok(Value::Dict(map))
+}
+
 fn hex_digit(b: u8) -> Result<u8, EvalError> {
     match b {
         b'0'..=b'9' => Ok(b - b'0'),

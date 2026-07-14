@@ -135,6 +135,25 @@ pub(crate) fn dispatch_dict_method(
             }
             Ok(MethodOutcome::pure(Value::None))
         }
+        "popitem" => {
+            // CPython 3.7+: remove and return the LAST inserted (key, value)
+            // pair (LIFO); empty dict raises KeyError.
+            reject_kwargs(method, kwargs)?;
+            if !args.is_empty() {
+                return Err(
+                    InterpreterError::TypeError("popitem() takes no arguments".into()).into()
+                );
+            }
+            let Some((key, val)) = map.pop() else {
+                return Err(EvalError::Exception(ExceptionValue::new(
+                    "KeyError",
+                    "'popitem(): dictionary is empty'",
+                )));
+            };
+            let freed = estimate_key_size(&key) + estimate_value_size(&val);
+            let pair = Value::Tuple(vec![key.to_value(), val]);
+            Ok(MethodOutcome::shrank(pair, freed))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "'dict' object has no attribute '{method}'"
         ))

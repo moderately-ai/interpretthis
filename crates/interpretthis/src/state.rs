@@ -32,6 +32,10 @@ pub struct GeneratorFrame {
     pub send_value: crate::value::Value,
     /// When true, the next `yield` expression returns `send_value` instead of suspending.
     pub resume_at_yield: bool,
+    /// Exception injected by `generator.throw(...)`: raised at the suspended
+    /// `yield` on resume (so the generator's own `try/except` can catch it)
+    /// instead of the yield returning `send_value`.
+    pub pending_throw: Option<Box<crate::value::ExceptionValue>>,
     /// Next top-level statement index in `body`.
     pub stmt_index: usize,
     /// Nested for-loop / yield-from resume states (innermost last).

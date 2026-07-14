@@ -529,6 +529,9 @@ pub(crate) async fn call_value_as_function(
             if type_name == "int" && method == "from_bytes" {
                 return crate::eval::functions::helpers::int_from_bytes(args, kwargs);
             }
+            if type_name == "str" && method == "maketrans" {
+                return crate::eval::functions::helpers::str_maketrans(args);
+            }
             let Some((recv_arg, rest)) = args.split_first() else {
                 return Err(InterpreterError::TypeError(format!(
                     "unbound method {type_name}.{method}() needs a {type_name} as first argument"
