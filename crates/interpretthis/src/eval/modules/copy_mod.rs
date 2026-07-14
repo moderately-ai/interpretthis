@@ -53,11 +53,24 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
     }
 }
 
-/// Shallow clone: outer container is new; nested shared storage is shared.
+/// Shallow clone: the outer container gets a *fresh* backing store while
+/// its elements stay shared (nested Arc-backed values keep their Arc).
+/// The Arc-backed variants (List, Instance fields, ByteArray) must
+/// allocate a new store — `Arc::clone` would alias the original and make
+/// `copy.copy(x)` mutations visible through `x`.
 fn shallow_clone(value: &Value) -> Value {
     match value {
-        Value::List(items) => Value::List(items.clone()),
-        Value::Instance(inst) => Value::Instance(inst.clone()),
+        Value::List(items) => Value::List(shared_list(items.lock().clone())),
+        Value::Instance(inst) => Value::Instance(crate::value::InstanceValue {
+            class_name: inst.class_name.clone(),
+            fields: shared_fields(inst.fields.lock().clone()),
+        }),
+        Value::ByteArray(bytes) => {
+            Value::ByteArray(crate::value::shared_bytes(bytes.lock().clone()))
+        }
+        // Dict / Set / Frozenset / Tuple / Counter / DefaultDict / Deque
+        // store their contents by value, so a plain clone is already an
+        // independent outer container with shared elements.
         Value::Dict(map) => Value::Dict(map.clone()),
         Value::Set(items) => Value::Set(items.clone()),
         Value::Frozenset(items) => Value::Frozenset(items.clone()),
@@ -127,6 +140,10 @@ fn deep_clone_memo(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             items: items.iter().map(|v| deep_clone_memo(v, memo)).collect(),
             maxlen: *maxlen,
         },
+        // Fresh mutable-bytes store (bytes are scalars, no recursion).
+        Value::ByteArray(bytes) => {
+            Value::ByteArray(crate::value::shared_bytes(bytes.lock().clone()))
+        }
         other => other.clone(),
     }
 }

@@ -135,11 +135,21 @@ pub(super) async fn resolve_method_args(args: &[Value]) -> Result<Vec<Value>, Ev
                 // may suspend on a tool call, so hold the guard only
                 // long enough to clone the inner Vec.
                 let snapshot = items.lock().clone();
-                let mut resolved_items = Vec::with_capacity(snapshot.len());
-                for item in &snapshot {
-                    resolved_items.push(resolve_proxy(item).await?);
+                // Preserve the original shared handle when nothing needs
+                // resolving, so functions that mutate a list argument in
+                // place (`heapq.heapify`, `list.sort` via a callable, …)
+                // affect the caller's list — CPython reference semantics.
+                // Only rebuild into a fresh Arc when an inner proxy must
+                // be resolved.
+                if snapshot.iter().any(|v| matches!(v, Value::LazyProxy(_))) {
+                    let mut resolved_items = Vec::with_capacity(snapshot.len());
+                    for item in &snapshot {
+                        resolved_items.push(resolve_proxy(item).await?);
+                    }
+                    resolved_args.push(Value::List(shared_list(resolved_items)));
+                } else {
+                    resolved_args.push(Value::List(items));
                 }
-                resolved_args.push(Value::List(shared_list(resolved_items)));
             }
             Value::Tuple(items) => {
                 let mut resolved_items = Vec::with_capacity(items.len());

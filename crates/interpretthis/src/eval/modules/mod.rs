@@ -13,6 +13,7 @@
 //! sandbox-safe.
 
 pub mod base64;
+pub mod bisect;
 pub mod collections;
 pub mod contextlib_mod;
 pub mod copy_mod;
@@ -25,6 +26,7 @@ pub mod enum_mod;
 pub mod fractions;
 pub mod functools;
 pub mod hashlib;
+pub mod heapq;
 pub mod itertools;
 pub mod json;
 pub mod math;
@@ -97,8 +99,9 @@ pub trait Module: Sync + Send {
 /// plus one `pub struct XModule;` + `impl Module for XModule` in its
 /// own file. Lookup is O(1) hashed by module name.
 static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock::new(|| {
-    let modules: [&'static dyn Module; 20] = [
+    let modules: [&'static dyn Module; 22] = [
         &math::MathModule,
+        &bisect::BisectModule,
         &operator::OperatorModule,
         &json::JsonModule,
         &re::ReModule,
@@ -109,6 +112,7 @@ static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock:
         &textwrap::TextwrapModule,
         &base64::Base64Module,
         &hashlib::HashlibModule,
+        &heapq::HeapqModule,
         &itertools::ItertoolsModule,
         &functools::FunctoolsModule,
         &typing::TypingModule,
