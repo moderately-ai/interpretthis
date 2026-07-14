@@ -8,7 +8,7 @@ use rustpython_parser::ast;
 use super::{
     check_arg_count,
     dispatch::call_value_as_function,
-    float_to_int,
+    float_to_int_exact,
     helpers::{
         SortRequest, apply_key_fn, check_isinstance, dsu_sort, pow_three_arg, type_arg_name,
     },
@@ -132,7 +132,7 @@ pub(super) async fn try_builtin(
             let base = if args.len() >= 2 { to_u32(value_to_i64(&args[1])?)? } else { 10 };
             match &args[0] {
                 Value::Int(i) => Ok(Some(Value::Int(*i))),
-                Value::Float(f) => Ok(Some(Value::Int(float_to_int(*f)))),
+                Value::Float(f) => Ok(Some(float_to_int_exact(*f)?)),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
                 Value::String(s) => {
                     let trimmed = s.trim();
@@ -583,7 +583,7 @@ pub(super) async fn try_builtin(
                 // round-half-away-from-zero — wrong for parity. Use
                 // `round_ties_even()` which implements the IEEE rule.
                 Value::Float(f) => ndigits.map_or_else(
-                    || Ok(Some(Value::Int(float_to_int(f.round_ties_even())))),
+                    || Ok(Some(float_to_int_exact(f.round_ties_even())?)),
                     |n| {
                         // CPython's `round(x, n)` uses correctly-rounded
                         // decimal formatting (via dtoa), not naive

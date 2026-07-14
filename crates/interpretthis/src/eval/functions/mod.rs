@@ -72,24 +72,32 @@ pub(crate) fn to_u32(n: i64) -> Result<u32, EvalError> {
     })
 }
 
-/// Python's `int(float)` truncates toward zero and saturates at `i64`
-/// bounds. NaN maps to 0 (Python raises `ValueError`; this is more lenient,
-/// matching the current interpreter's behavior).
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "truncation toward zero IS Python's int(float) semantic; the \
-              saturation branches above handle out-of-range inputs"
-)]
-pub(crate) fn float_to_int(f: f64) -> i64 {
+/// Python's `int(float)`: truncate toward zero to the *exact* integer.
+///
+/// - `NaN` raises `ValueError` (CPython: "cannot convert float NaN to integer").
+/// - `±inf` raises `OverflowError` ("cannot convert float infinity to integer").
+/// - A finite value converts exactly, promoting past `i64` to `BigInt` rather
+///   than saturating — `int(1e30)` is `1000000000000000019884624838656`, the
+///   exact integer the float represents, not `i64::MAX`.
+pub(crate) fn float_to_int_exact(f: f64) -> Result<Value, EvalError> {
+    use num_traits::FromPrimitive as _;
     if f.is_nan() {
-        0
-    } else if f >= i64::MAX as f64 {
-        i64::MAX
-    } else if f <= i64::MIN as f64 {
-        i64::MIN
-    } else {
-        f.trunc() as i64
+        return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+            "ValueError",
+            "cannot convert float NaN to integer",
+        )));
     }
+    if f.is_infinite() {
+        return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+            "OverflowError",
+            "cannot convert float infinity to integer",
+        )));
+    }
+    let truncated = f.trunc();
+    let big = num_bigint::BigInt::from_f64(truncated).ok_or_else(|| {
+        EvalError::from(InterpreterError::ValueError("cannot convert float to integer".into()))
+    })?;
+    Ok(crate::value::int_from_bigint(big))
 }
 
 // ---------------------------------------------------------------------------
