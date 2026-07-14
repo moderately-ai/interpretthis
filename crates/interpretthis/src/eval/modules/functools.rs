@@ -347,9 +347,14 @@ pub(crate) async fn try_cmp_key_lt(
     // mycmp(a, b) -> negative / zero / positive
     Some(
         async {
-            let result =
-                crate::eval::functions::call_value_as_function(state, &cmp, &[oa, ob], tools)
-                    .await?;
+            let result = crate::eval::functions::call_value_as_function(
+                state,
+                &cmp,
+                &[oa, ob],
+                &indexmap::IndexMap::new(),
+                tools,
+            )
+            .await?;
             let n = match result {
                 Value::Int(i) => i,
                 Value::Bool(b) => i64::from(b),

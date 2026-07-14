@@ -404,15 +404,12 @@ pub(crate) async fn call_value_as_function(
     state: &mut InterpreterState,
     func: &Value,
     args: &[Value],
+    kwargs: &IndexMap<String, Value>,
     tools: &Tools,
 ) -> EvalResult {
     match func {
-        Value::Function(func_def) => {
-            call_user_function(state, func_def, args, &IndexMap::new(), tools).await
-        }
-        Value::Lambda(lambda_def) => {
-            call_lambda(state, lambda_def, args, &IndexMap::new(), tools).await
-        }
+        Value::Function(func_def) => call_user_function(state, func_def, args, kwargs, tools).await,
+        Value::Lambda(lambda_def) => call_lambda(state, lambda_def, args, kwargs, tools).await,
         // A bound builtin method (`d.get`, `s.upper`, ...) passed as
         // a first-class callable. Two receiver shapes:
         //
@@ -427,22 +424,16 @@ pub(crate) async fn call_value_as_function(
         Value::BoundMethod { receiver, method } => {
             match receiver {
                 crate::value::BoundMethodReceiver::Snapshot(value) => {
-                    let empty_kwargs = IndexMap::new();
                     if matches!(**value, Value::Lazy { .. } | Value::Generator { .. })
                         && super::generators::is_generator_method(method)
                     {
                         return super::generators::dispatch_generator_method(
-                            state,
-                            value,
-                            method,
-                            args,
-                            &empty_kwargs,
-                            tools,
+                            state, value, method, args, kwargs, tools,
                         )
                         .await;
                     }
                     let mut recv = (**value).clone();
-                    Ok(dispatch_method(&mut recv, method, args, &empty_kwargs)?.value)
+                    Ok(dispatch_method(&mut recv, method, args, kwargs)?.value)
                 }
                 crate::value::BoundMethodReceiver::Place { root, steps } => {
                     use crate::{
@@ -458,7 +449,6 @@ pub(crate) async fn call_value_as_function(
                         })
                         .collect();
 
-                    let empty_kwargs = IndexMap::new();
                     // Generator methods need `&mut state` for the cursor map —
                     // classify under the place borrow, then dispatch after.
                     let gen_recv = {
@@ -477,12 +467,7 @@ pub(crate) async fn call_value_as_function(
                     };
                     if let Some(recv) = gen_recv {
                         return super::generators::dispatch_generator_method(
-                            state,
-                            &recv,
-                            method,
-                            args,
-                            &empty_kwargs,
-                            tools,
+                            state, &recv, method, args, kwargs, tools,
                         )
                         .await;
                     }
@@ -491,7 +476,7 @@ pub(crate) async fn call_value_as_function(
                             EvalError::from(InterpreterError::name_not_defined(root))
                         })?;
                         with_navigate_mut(root_slot, &pl_steps, |target| {
-                            dispatch_method(target, method, args, &empty_kwargs)
+                            dispatch_method(target, method, args, kwargs)
                         })??
                     };
                     apply_mem_delta(state, outcome.mem_delta)?;
@@ -522,16 +507,14 @@ pub(crate) async fn call_value_as_function(
                 .into());
             };
             let mut recv = recv_arg.clone();
-            let empty_kwargs = IndexMap::new();
-            Ok(dispatch_method(&mut recv, method, rest, &empty_kwargs)?.value)
+            Ok(dispatch_method(&mut recv, method, rest, kwargs)?.value)
         }
         // `from json import dumps` stored as a variable, then passed
         // through map/filter/key=. The eval_call name-lookup branch
         // already calls module dispatch directly for the direct-call
         // form; this arm covers the indirection form.
         Value::ModuleFunction { module, name } => {
-            crate::eval::modules::call_function(state, module, name, args, &IndexMap::new(), tools)
-                .await
+            crate::eval::modules::call_function(state, module, name, args, kwargs, tools).await
         }
         // Bare builtin function name passed as a value — `try_builtin`
         // is the canonical dispatch; route there with empty kwargs.
@@ -539,8 +522,7 @@ pub(crate) async fn call_value_as_function(
             // Box::pin breaks the async recursion: try_builtin → min/max →
             // apply_key_fn → call_value_as_function → try_builtin. The
             // future graph is otherwise infinitely-sized at compile time.
-            let kwargs = IndexMap::new();
-            Box::pin(try_builtin(state, builtin_name, args, &kwargs, tools)).await?.ok_or_else(
+            Box::pin(try_builtin(state, builtin_name, args, kwargs, tools)).await?.ok_or_else(
                 || InterpreterError::TypeError(format!("'{builtin_name}' is not callable")).into(),
             )
         }
@@ -548,11 +530,7 @@ pub(crate) async fn call_value_as_function(
         // is the canonical entry; we use the same ToolCallDescriptor.
         Value::ToolName(tool_name) => crate::tools::resolver::resolve_and_dispatch(
             state,
-            crate::tools::resolver::ToolCallDescriptor {
-                name: tool_name,
-                args,
-                kwargs: &IndexMap::new(),
-            },
+            crate::tools::resolver::ToolCallDescriptor { name: tool_name, args, kwargs },
             tools,
         )
         .await?
@@ -569,8 +547,7 @@ pub(crate) async fn call_value_as_function(
                 ))
                 .into());
             };
-            let kwargs = IndexMap::new();
-            let call = CallArgs { positional: args, keyword: &kwargs };
+            let call = CallArgs { positional: args, keyword: kwargs };
             let (returned, _self) = crate::eval::classes::call_method(
                 state,
                 &def,
@@ -608,7 +585,7 @@ pub(crate) async fn call_value_as_function(
             let mut combined: Vec<Value> = Vec::with_capacity(bound_args.len() + args.len());
             combined.extend(bound_args.iter().cloned());
             combined.extend_from_slice(args);
-            return Box::pin(call_value_as_function(state, target, &combined, tools)).await;
+            return Box::pin(call_value_as_function(state, target, &combined, kwargs, tools)).await;
         }
         Value::LruCache(data) => {
             // Memoize by positional ValueKeys only; keyword keying is tracked by
@@ -628,7 +605,8 @@ pub(crate) async fn call_value_as_function(
                     return Ok(hit);
                 }
             }
-            let result = Box::pin(call_value_as_function(state, &data.func, args, tools)).await?;
+            let result =
+                Box::pin(call_value_as_function(state, &data.func, args, kwargs, tools)).await?;
             let mut cache = data.cache.lock();
             if let Some(max) = data.maxsize {
                 while cache.len() >= max && max > 0 {
@@ -649,8 +627,7 @@ pub(crate) async fn call_value_as_function(
             if let Some((_, method)) =
                 crate::eval::classes::lookup_method_in_mro(state, &class_name, "__call__")
             {
-                let kwargs = IndexMap::new();
-                let call = CallArgs { positional: args, keyword: &kwargs };
+                let call = CallArgs { positional: args, keyword: kwargs };
                 let (returned, _self) =
                     crate::eval::classes::call_method(state, &method, func.clone(), call, tools)
                         .await?;

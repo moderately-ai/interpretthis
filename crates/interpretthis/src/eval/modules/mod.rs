@@ -360,6 +360,5 @@ pub(crate) async fn call_callable(
     kwargs: &IndexMap<String, Value>,
     tools: &crate::tools::Tools,
 ) -> EvalResult {
-    let _ = kwargs;
-    crate::eval::functions::call_value_as_function(state, callable, args, tools).await
+    crate::eval::functions::call_value_as_function(state, callable, args, kwargs, tools).await
 }

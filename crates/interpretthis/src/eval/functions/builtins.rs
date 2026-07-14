@@ -922,7 +922,9 @@ pub(super) async fn try_builtin(
                 // can lock the interpreter indefinitely.
                 const ITER_CALLABLE_LIMIT: usize = 1_000_000;
                 for _ in 0..ITER_CALLABLE_LIMIT {
-                    let next = call_value_as_function(state, &callable, &[], tools).await?;
+                    let next =
+                        call_value_as_function(state, &callable, &[], &IndexMap::new(), tools)
+                            .await?;
                     if next == sentinel {
                         return Ok(Some(Value::List(shared_list(out))));
                     }
@@ -1127,9 +1129,14 @@ pub(super) async fn try_builtin(
                 let keep = if matches!(func, Value::None) {
                     item.is_truthy()
                 } else {
-                    let val =
-                        call_value_as_function(state, func, std::slice::from_ref(&item), tools)
-                            .await?;
+                    let val = call_value_as_function(
+                        state,
+                        func,
+                        std::slice::from_ref(&item),
+                        &IndexMap::new(),
+                        tools,
+                    )
+                    .await?;
                     val.is_truthy()
                 };
                 if keep {
@@ -1150,7 +1157,8 @@ pub(super) async fn try_builtin(
                 let iterable = crate::eval::op::iter(state, &args[1], tools).await?;
                 let mut result = Vec::new();
                 for item in iterable {
-                    let val = call_value_as_function(state, func, &[item], tools).await?;
+                    let val = call_value_as_function(state, func, &[item], &IndexMap::new(), tools)
+                        .await?;
                     result.push(val);
                 }
                 Ok(Some(Value::List(shared_list(result))))
@@ -1164,7 +1172,9 @@ pub(super) async fn try_builtin(
                 let mut result = Vec::new();
                 for i in 0..min_len {
                     let call_args: Vec<Value> = iterables.iter().map(|it| it[i].clone()).collect();
-                    let val = call_value_as_function(state, func, &call_args, tools).await?;
+                    let val =
+                        call_value_as_function(state, func, &call_args, &IndexMap::new(), tools)
+                            .await?;
                     result.push(val);
                 }
                 Ok(Some(Value::List(shared_list(result))))

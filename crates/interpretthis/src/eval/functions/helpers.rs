@@ -85,8 +85,14 @@ pub(super) async fn apply_key_fn(
 ) -> EvalResult {
     match key_fn {
         Some(func) => {
-            super::dispatch::call_value_as_function(state, func, std::slice::from_ref(item), tools)
-                .await
+            super::dispatch::call_value_as_function(
+                state,
+                func,
+                std::slice::from_ref(item),
+                &indexmap::IndexMap::new(),
+                tools,
+            )
+            .await
         }
         None => Ok(item.clone()),
     }

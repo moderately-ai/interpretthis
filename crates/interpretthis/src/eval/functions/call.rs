@@ -502,7 +502,8 @@ pub async fn eval_call(
                     type_name: type_name.clone(),
                     method: method_name.to_string(),
                 };
-                return call_value_as_function(state, &unbound, &resolved_args, tools).await;
+                return call_value_as_function(state, &unbound, &resolved_args, &kwargs, tools)
+                    .await;
             }
             if let Value::Exception(exc) = &temp {
                 return crate::eval::exceptions::call_exception_method(
@@ -574,7 +575,7 @@ pub async fn eval_call(
             // `fn = d.get; fn('A')` and `f = int; f("42")` broken
             // even after BoundMethod landed.
             ref other => {
-                return call_value_as_function(state, other, &args, tools).await;
+                return call_value_as_function(state, other, &args, &kwargs, tools).await;
             }
         }
     }

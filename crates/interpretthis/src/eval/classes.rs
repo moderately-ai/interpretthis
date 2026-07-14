@@ -533,8 +533,14 @@ pub(crate) async fn apply_decorator(
             // General: decorator = partial; result = partial(target)
             let mut combined = data.args.clone();
             combined.push(target);
-            crate::eval::functions::call_value_as_function(state, &data.func, &combined, tools)
-                .await
+            crate::eval::functions::call_value_as_function(
+                state,
+                &data.func,
+                &combined,
+                &indexmap::IndexMap::new(),
+                tools,
+            )
+            .await
         }
         other => Err(InterpreterError::TypeError(format!(
             "decorator is not callable (got '{}')",
