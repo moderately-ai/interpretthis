@@ -133,13 +133,22 @@ pub(crate) fn check_arg_count(
     Ok(())
 }
 
+/// Read an integer-valued argument for a builtin that expects an `int`.
+///
+/// A `float` is deliberately NOT accepted: an integer parameter (a `range`
+/// bound, a `chr` code point, a list index, a field width) rejects a float in
+/// CPython with `TypeError: 'float' object cannot be interpreted as an integer`.
+/// Only `int(float)` truncates — that is the `int()` builtin's own path, which
+/// does not go through here. Accepting floats here silently turned `range(2.9)`
+/// into `range(2)`.
 pub(crate) fn value_to_i64(val: &Value) -> Result<i64, EvalError> {
     match val {
         Value::Int(i) => Ok(*i),
-        // Python's int(float) truncates toward 0 and saturates at i64
-        // bounds (see float_to_int for the semantic).
-        Value::Float(f) => Ok(float_to_int(*f)),
         Value::Bool(b) => Ok(i64::from(*b)),
+        Value::Float(_) => Err(InterpreterError::TypeError(
+            "'float' object cannot be interpreted as an integer".into(),
+        )
+        .into()),
         _ => {
             Err(InterpreterError::TypeError(format!("expected integer, got '{}'", val.type_name()))
                 .into())
