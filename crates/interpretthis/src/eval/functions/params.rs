@@ -112,12 +112,34 @@ pub(crate) async fn bind_params(
     let num_defaults = params.defaults.len();
     let first_default = num_params.saturating_sub(num_defaults);
 
+    // Reject too many positional arguments when there is no `*args` to absorb
+    // them. Without this, `def f(a): ...; f(1, 2, 3)` silently bound `a = 1` and
+    // discarded the rest.
+    if params.vararg.is_none() && args.len() > num_params {
+        return Err(InterpreterError::TypeError(format!(
+            "takes {num_params} positional argument{} but {} {} given",
+            if num_params == 1 { "" } else { "s" },
+            args.len(),
+            if args.len() == 1 { "was" } else { "were" },
+        ))
+        .into());
+    }
+
     // Bind positional arguments. Defaults prefer the def-time
     // evaluated values; the source-string re-eval path is the
     // legacy fallback for state imported before def-time evaluation
     // landed (`default_values` will be empty in that case).
     for (i, param) in params.args.iter().enumerate() {
         if i < args.len() {
+            // The same parameter cannot be filled positionally and by keyword.
+            // Previously the keyword was silently dropped.
+            if kwargs.contains_key(&param.name) {
+                return Err(InterpreterError::TypeError(format!(
+                    "got multiple values for argument '{}'",
+                    param.name
+                ))
+                .into());
+            }
             scope.insert(param.name.clone(), args[i].clone());
         } else if let Some(val) = kwargs.get(&param.name) {
             scope.insert(param.name.clone(), val.clone());
@@ -175,7 +197,9 @@ pub(crate) async fn bind_params(
         }
     }
 
-    // Bind **kwargs
+    // Bind **kwargs — or, with no **kwargs, reject any keyword that no
+    // parameter claimed. Previously an unknown keyword (`def f(a): ...;
+    // f(1, b=99)`) was silently dropped.
     if let Some(ref kwarg_name) = params.kwarg {
         let mut extra_kwargs = IndexMap::new();
         let param_names: Vec<&str> =
@@ -186,6 +210,17 @@ pub(crate) async fn bind_params(
             }
         }
         scope.insert(kwarg_name.clone(), Value::Dict(extra_kwargs));
+    } else {
+        for k in kwargs.keys() {
+            let claimed = params.args.iter().any(|p| &p.name == k)
+                || params.kwonlyargs.iter().any(|p| &p.name == k);
+            if !claimed {
+                return Err(InterpreterError::TypeError(format!(
+                    "got an unexpected keyword argument '{k}'"
+                ))
+                .into());
+            }
+        }
     }
 
     Ok(scope)
