@@ -145,6 +145,10 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
         // JavaScript has no distinct mutable-bytes type; a bytearray projects
         // to a Buffer, like bytes (the mutability is lost across the boundary).
         Value::ByteArray(b) => Buffer::from(b.lock().clone()).into_unknown(env),
+        // A memoryview projects to a Buffer of its current bytes.
+        Value::MemoryView(_) => {
+            Buffer::from(interpretthis::memoryview_bytes(value)).into_unknown(env)
+        }
 
         Value::List(items) => {
             // The lock is released before any JS object is built, so a tool

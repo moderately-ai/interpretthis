@@ -578,6 +578,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::String(_) => &STR_TYPE,
         Value::Bytes(_) => &BYTES_TYPE,
         Value::ByteArray(_) => &BYTEARRAY_TYPE,
+        Value::MemoryView(_) => &MEMORYVIEW_TYPE,
         Value::List(_) => &LIST_TYPE,
         Value::Tuple(_) => &TUPLE_TYPE,
         Value::Dict(_) => &DICT_TYPE,
@@ -758,6 +759,25 @@ static BYTEARRAY_TYPE: TypeObject = TypeObject {
     missing_slot: None,
     len_slot: Some(bytes_len),
     get_attr_slot: Some(bytearray_get_attr),
+    set_attr_slot: None,
+    has_methods_table: true,
+};
+/// `memoryview` — a read view; shares the bytes read slots via `bytes_view`,
+/// which unwraps the source. No writes, no arithmetic.
+static MEMORYVIEW_TYPE: TypeObject = TypeObject {
+    name: "memoryview",
+    eq_slot: bytes_eq,
+    hash_slot: Some(fallback_hash_slot),
+    lt_slot: bytes_lt,
+    contains_slot: None,
+    arith_slot: noimpl_arith,
+    iter_slot: Some(bytes_iter),
+    get_item_slot: Some(bytes_get_item),
+    set_item_slot: None,
+    del_item_slot: None,
+    missing_slot: None,
+    len_slot: Some(bytes_len),
+    get_attr_slot: Some(memoryview_get_attr),
     set_attr_slot: None,
     has_methods_table: true,
 };
@@ -1219,10 +1239,18 @@ fn str_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 
 /// The byte contents of a `bytes` or `bytearray` value (a copy for the shared
 /// bytearray), or `None` for anything else. Lets the bytes slots serve both.
+/// The current bytes behind a `bytes`/`bytearray`/`memoryview` value (empty for
+/// anything else). Public so the memoryview method dispatch can read the buffer.
+#[must_use]
+pub fn memoryview_bytes(value: &Value) -> Vec<u8> {
+    bytes_view(value).unwrap_or_default()
+}
+
 fn bytes_view(value: &Value) -> Option<Vec<u8>> {
     match value {
         Value::Bytes(b) => Some(b.clone()),
         Value::ByteArray(b) => Some(b.lock().clone()),
+        Value::MemoryView(inner) => bytes_view(inner),
         _ => None,
     }
 }
@@ -2240,6 +2268,15 @@ fn bytearray_get_attr(value: &Value, name: &str) -> EvalResult {
         return Ok(bound_method(value, name));
     }
     Err(attribute_error("bytearray", name))
+}
+
+const MEMORYVIEW_METHODS: &[&str] = &["tobytes", "tolist", "hex"];
+
+fn memoryview_get_attr(value: &Value, name: &str) -> EvalResult {
+    if MEMORYVIEW_METHODS.contains(&name) {
+        return Ok(bound_method(value, name));
+    }
+    Err(attribute_error("memoryview", name))
 }
 
 #[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]

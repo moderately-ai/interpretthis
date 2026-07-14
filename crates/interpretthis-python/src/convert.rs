@@ -84,6 +84,11 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
         Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
         Value::Bytes(b) => PyBytes::new(py, b).into_any(),
         Value::ByteArray(b) => PyByteArray::new(py, &b.lock()).into_any(),
+        // A memoryview projects to bytes across the boundary (its buffer view
+        // isn't representable host-side).
+        Value::MemoryView(_) => {
+            PyBytes::new(py, &interpretthis::memoryview_bytes(value)).into_any()
+        }
 
         Value::List(items) => {
             // Lock scope ends before the list is built, so a tool callback that

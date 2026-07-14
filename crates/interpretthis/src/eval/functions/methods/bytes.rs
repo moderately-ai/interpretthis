@@ -150,6 +150,29 @@ pub(crate) fn dispatch_bytearray_method(
     }
 }
 
+/// Dispatch a method on a `memoryview` — `tobytes`, `tolist`, `hex`. `raw` is
+/// the underlying buffer's current bytes.
+pub(crate) fn dispatch_memoryview_method(raw: &[u8], method: &str) -> EvalResult {
+    match method {
+        "tobytes" => Ok(Value::Bytes(raw.to_vec())),
+        "tolist" => {
+            Ok(Value::List(shared_list(raw.iter().map(|&n| Value::Int(i64::from(n))).collect())))
+        }
+        "hex" => {
+            use std::fmt::Write as _;
+            let mut out = String::with_capacity(raw.len() * 2);
+            for byte in raw {
+                let _ = write!(out, "{byte:02x}");
+            }
+            Ok(Value::String(out.into()))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'memoryview' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 /// Convert a `bytes`-returning result of a shared bytes method into the
 /// `bytearray` a `bytearray` method returns (recursively for `split`'s list).
 fn rewrap_bytes_as_bytearray(value: Value) -> Value {

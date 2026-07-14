@@ -374,6 +374,20 @@ fn bytearray_methods(
     methods::bytes::dispatch_bytearray_method(b, method, args, kwargs)
 }
 
+fn memoryview_methods(
+    obj: &mut Value,
+    method: &str,
+    _args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::MemoryView(_) = obj else {
+        return Err(type_mismatch("memoryview"));
+    };
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    let raw = crate::types::memoryview_bytes(obj);
+    methods::bytes::dispatch_memoryview_method(&raw, method).map(MethodOutcome::pure)
+}
+
 fn date_methods(
     obj: &mut Value,
     method: &str,
@@ -505,6 +519,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Complex(_) => Some(complex_methods),
         Value::Bytes(_) => Some(bytes_methods),
         Value::ByteArray(_) => Some(bytearray_methods),
+        Value::MemoryView(_) => Some(memoryview_methods),
         Value::Date(_) => Some(date_methods),
         Value::DateTime { .. } => Some(datetime_methods),
         Value::Time(_) => Some(time_methods),

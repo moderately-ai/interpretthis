@@ -246,6 +246,11 @@ pub enum Value {
         #[serde(deserialize_with = "deserialize_shared_bytes")]
         SharedByteArray,
     ),
+    /// Python `memoryview` — a read view over a `bytes`/`bytearray` buffer. The
+    /// inner value is the source (a `ByteArray` shares its storage, so the view
+    /// reflects mutations; a `Bytes` source is a fixed snapshot). Boxed to keep
+    /// the enum slot narrow.
+    MemoryView(Box<Value>),
     /// Python `list`. Backed by `Arc<Mutex<Vec<Value>>>` so chained
     /// assignment (`a = b = []`), mutable default args, and closure
     /// captures of lists share the same identity — mutations via any
@@ -1378,6 +1383,7 @@ impl Value {
             Self::String(s) => !s.is_empty(),
             Self::Bytes(b) => !b.is_empty(),
             Self::ByteArray(b) => !b.lock().is_empty(),
+            Self::MemoryView(inner) => inner.is_truthy(),
             Self::List(l) => !l.lock().is_empty(),
             Self::Tuple(t) => !t.is_empty(),
             Self::Dict(d) => !d.is_empty(),
@@ -1459,6 +1465,7 @@ impl Value {
             Self::String(_) => "str",
             Self::Bytes(_) => "bytes",
             Self::ByteArray(_) => "bytearray",
+            Self::MemoryView(_) => "memoryview",
             Self::List(_) => "list",
             Self::Tuple(_) => "tuple",
             Self::Dict(_) => "dict",
@@ -1922,6 +1929,9 @@ impl fmt::Display for Value {
             Self::RePattern(p) => write!(f, "re.compile({})", python_str_repr(p)),
             // CPython: `repr(slice(1, 5, 2))` == "slice(1, 5, 2)".
             Self::Slice(s) => write!(f, "slice({}, {}, {})", s.start, s.stop, s.step),
+            // CPython renders `<memory at 0x...>` with a real address; we omit
+            // the (unstable) pointer.
+            Self::MemoryView(_) => write!(f, "<memory>"),
         }
     }
 }

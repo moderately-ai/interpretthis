@@ -292,6 +292,20 @@ pub(super) async fn try_builtin(
             };
             Ok(Some(type_obj))
         }
+        "memoryview" => {
+            check_arg_count(name, args, 1, 1)?;
+            match &args[0] {
+                Value::Bytes(_) | Value::ByteArray(_) => {
+                    Ok(Some(Value::MemoryView(Box::new(args[0].clone()))))
+                }
+                Value::MemoryView(_) => Ok(Some(args[0].clone())),
+                other => Err(InterpreterError::TypeError(format!(
+                    "memoryview: a bytes-like object is required, not '{}'",
+                    other.type_name()
+                ))
+                .into()),
+            }
+        }
         "slice" => {
             // slice(stop) or slice(start, stop[, step]). Each bound is an int
             // or None; bool folds to int (bool is an int subclass).
@@ -1137,6 +1151,7 @@ pub(super) async fn try_builtin(
                     }
                     Value::Bytes(b) => b.clone(),
                     Value::ByteArray(b) => b.lock().clone(),
+                    Value::MemoryView(_) => crate::types::memoryview_bytes(&args[0]),
                     Value::String(s) => {
                         let encoding = match args.get(1) {
                             Some(Value::String(e)) => e.as_str(),
