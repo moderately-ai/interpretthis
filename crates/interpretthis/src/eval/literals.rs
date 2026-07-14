@@ -107,36 +107,36 @@ pub async fn eval_dict(
     Ok(Value::Dict(map))
 }
 
-/// Evaluate a set literal `{a, b, c}`.
-pub async fn eval_set(
+/// Build a `Value::Set` from already-evaluated candidates, deduplicating and
+/// rejecting unhashable elements.
+///
+/// The single source of set construction — shared by the set literal, the
+/// `set()` builtin, and set comprehensions, so all three agree on two things
+/// they previously got wrong when they open-coded a `value_to_key(x).ok()`
+/// dedup:
+/// - an unhashable element (list, dict, set) raises `TypeError: unhashable
+///   type`, rather than being silently included;
+/// - instances dedup by their `__eq__` (structural / custom), rather than all
+///   collapsing to one because `value_to_key` returns `None` for every instance.
+pub(crate) async fn build_set(
     state: &mut InterpreterState,
-    node: &ast::ExprSet,
+    candidates: Vec<Value>,
     tools: &Tools,
 ) -> EvalResult {
-    let mut items: Vec<Value> = Vec::with_capacity(node.elts.len());
-    // Side-table keyed dedup index for hashable values. Instance values
-    // can't reduce to a ValueKey (their dedup is structural via __eq__
-    // and stays O(N) per insert), but every builtin shape can — the
-    // FxHashSet replaces the prior O(N²) double-iteration that
-    // round-tripped each candidate against `value_to_key` of every
-    // already-inserted item.
-    // ValueKey is "mutable_key_type" only through Arc<Mutex<...>>
-    // chains in LazyProxy / Function variants — those reject from
-    // `value_to_key` (TypeError "unhashable"), so they never reach
-    // this set in practice. The deep transitive interior-mutability
-    // path is a clippy false positive against the safe-by-construction
-    // shape here.
+    let mut items: Vec<Value> = Vec::with_capacity(candidates.len());
+    // Keyed dedup index for hashable values. ValueKey only carries hashable
+    // variants (unhashable Values are rejected below by value_to_key), so the
+    // interior-mutability clippy lint is a false positive here.
     #[expect(
         clippy::mutable_key_type,
-        reason = "ValueKey only carries hashable variants in practice; \
-                  unhashable Value variants are rejected upstream by value_to_key"
+        reason = "ValueKey only carries hashable variants; unhashable Values are rejected by \
+                  value_to_key before reaching the set"
     )]
     let mut seen: rustc_hash::FxHashSet<crate::value::ValueKey> = rustc_hash::FxHashSet::default();
-    for elt in &node.elts {
-        let candidate = eval_expr(state, elt, tools).await?;
+    for candidate in candidates {
         let exists = if let Value::Instance(_) = &candidate {
-            // Instance dedup via async `__eq__` (structural scan misses
-            // custom equality such as case-insensitive wrappers).
+            // Instance dedup via async `__eq__` (structural scan misses custom
+            // equality such as case-insensitive wrappers).
             let mut found = false;
             for v in &items {
                 if crate::eval::op::eq(state, v, &candidate, tools).await? {
@@ -147,8 +147,7 @@ pub async fn eval_set(
             found
         } else {
             // A non-instance candidate that is not hashable (list, dict, set)
-            // raises `TypeError: unhashable type` — propagate rather than
-            // swallowing the error and pushing the element into the set.
+            // raises `TypeError: unhashable type`.
             let ck = value_to_key(&candidate)?;
             !seen.insert(ck)
         };
@@ -157,6 +156,19 @@ pub async fn eval_set(
         }
     }
     Ok(Value::Set(items))
+}
+
+/// Evaluate a set literal `{a, b, c}`.
+pub async fn eval_set(
+    state: &mut InterpreterState,
+    node: &ast::ExprSet,
+    tools: &Tools,
+) -> EvalResult {
+    let mut candidates = Vec::with_capacity(node.elts.len());
+    for elt in &node.elts {
+        candidates.push(eval_expr(state, elt, tools).await?);
+    }
+    build_set(state, candidates, tools).await
 }
 
 /// Convert a Value to a hashable dict key.

@@ -900,16 +900,11 @@ pub(super) async fn try_builtin(
                 return Ok(Some(Value::Set(Vec::new())));
             }
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
-            // Deduplicate
-            let mut result = Vec::new();
-            for item in items {
-                let key = value_to_key(&item).ok();
-                let already = result.iter().any(|r: &Value| value_to_key(r).ok() == key);
-                if !already {
-                    result.push(item);
-                }
-            }
-            Ok(Some(Value::Set(result)))
+            // Shared set construction: raises on an unhashable element and
+            // dedups instances by __eq__ (both of which the old open-coded
+            // `value_to_key(x).ok()` dedup got wrong — it silently included
+            // unhashables and collapsed every instance to one).
+            Ok(Some(crate::eval::literals::build_set(state, items, tools).await?))
         }
         "iter" => {
             check_arg_count(name, args, 1, 2)?;
