@@ -2036,7 +2036,11 @@ impl Value {
             // prefix is the bare class name — CPython's exception repr never
             // qualifies with the module, even for `statistics.StatisticsError`.
             Self::Exception(e) => {
-                format!("{}('{}')", Self::short_type_name(&e.type_name), e.message)
+                // CPython's `BaseException.__repr__`:
+                // `Type(repr(a1), repr(a2), ...)` over `self.args`.
+                let name = Self::short_type_name(&e.type_name);
+                let inner = e.args.iter().map(Self::repr).collect::<Vec<_>>().join(", ");
+                format!("{name}({inner})")
             }
             other => format!("{other}"),
         }

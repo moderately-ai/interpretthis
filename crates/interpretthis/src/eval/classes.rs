@@ -894,8 +894,9 @@ pub async fn instantiate(
             // `except E as e: e.code` and `str(e)` both work. When no
             // user `__init__` exists, the args ARE the exception args
             // directly (CPython's `BaseException.__init__`).
-            let has_user_init = lookup_method_in_mro(state, class_name, "__init__").is_some();
-            if !has_user_init {
+            let Some((_defining_class, init_def)) =
+                lookup_method_in_mro(state, class_name, "__init__")
+            else {
                 return Ok(Value::Exception(Box::new(
                     crate::value::ExceptionValue::new(
                         class_name.to_string(),
@@ -903,15 +904,18 @@ pub async fn instantiate(
                     )
                     .with_args(args.to_vec()),
                 )));
-            }
+            };
+            // CPython's `BaseException.__new__(cls, *args)` seeds
+            // `self.args` from the constructor args before `__init__`
+            // runs, so an `__init__` that never calls `super().__init__`
+            // still reports the original args (and `str(self)`). A
+            // `super().__init__(*other)` overwrites this seed.
+            let mut seed = BTreeMap::new();
+            seed.insert("args".to_string(), Value::Tuple(args.to_vec()));
             let instance = Value::Instance(InstanceValue {
                 class_name: class_name.to_string(),
-                fields: crate::value::shared_fields(BTreeMap::new()),
+                fields: crate::value::shared_fields(seed),
             });
-            let init = lookup_method_in_mro(state, class_name, "__init__");
-            let Some((_defining_class, init_def)) = init else {
-                unreachable!("has_user_init just confirmed an __init__ in the MRO");
-            };
             let call = CallArgs { positional: args, keyword: kwargs };
             let (_returned, configured_self) =
                 call_method(state, &init_def, instance, call, tools).await?;
