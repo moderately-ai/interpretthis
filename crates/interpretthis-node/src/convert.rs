@@ -142,6 +142,9 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
         Value::Float(f) => f.into_unknown(env),
         Value::String(s) => s.as_str().into_unknown(env),
         Value::Bytes(b) => Buffer::from(b.clone()).into_unknown(env),
+        // JavaScript has no distinct mutable-bytes type; a bytearray projects
+        // to a Buffer, like bytes (the mutability is lost across the boundary).
+        Value::ByteArray(b) => Buffer::from(b.lock().clone()).into_unknown(env),
 
         Value::List(items) => {
             // The lock is released before any JS object is built, so a tool

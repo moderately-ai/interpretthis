@@ -577,6 +577,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::Complex(_) => &COMPLEX_TYPE,
         Value::String(_) => &STR_TYPE,
         Value::Bytes(_) => &BYTES_TYPE,
+        Value::ByteArray(_) => &BYTEARRAY_TYPE,
         Value::List(_) => &LIST_TYPE,
         Value::Tuple(_) => &TUPLE_TYPE,
         Value::Dict(_) => &DICT_TYPE,
@@ -738,6 +739,25 @@ static BYTES_TYPE: TypeObject = TypeObject {
     missing_slot: None,
     len_slot: Some(bytes_len),
     get_attr_slot: Some(noattr_get_attr),
+    set_attr_slot: None,
+    has_methods_table: true,
+};
+/// `bytearray` — mutable sibling of `bytes`. Shares the read slots (which
+/// accept either via `bytes_view`) and adds item-write / item-delete slots.
+static BYTEARRAY_TYPE: TypeObject = TypeObject {
+    name: "bytearray",
+    eq_slot: bytes_eq,
+    hash_slot: None,
+    lt_slot: bytes_lt,
+    contains_slot: None,
+    arith_slot: bytes_arith,
+    iter_slot: Some(bytes_iter),
+    get_item_slot: Some(bytes_get_item),
+    set_item_slot: Some(bytearray_set_item),
+    del_item_slot: Some(bytearray_del_item),
+    missing_slot: None,
+    len_slot: Some(bytes_len),
+    get_attr_slot: Some(bytearray_get_attr),
     set_attr_slot: None,
     has_methods_table: true,
 };
@@ -1197,10 +1217,18 @@ fn str_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     Some(a == b)
 }
 
+/// The byte contents of a `bytes` or `bytearray` value (a copy for the shared
+/// bytearray), or `None` for anything else. Lets the bytes slots serve both.
+fn bytes_view(value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::Bytes(b) => Some(b.clone()),
+        Value::ByteArray(b) => Some(b.lock().clone()),
+        _ => None,
+    }
+}
+
 fn bytes_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
-    let Value::Bytes(a) = lhs else { return None };
-    let Value::Bytes(b) = rhs else { return None };
-    Some(a == b)
+    Some(bytes_view(lhs)? == bytes_view(rhs)?)
 }
 
 fn list_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
@@ -1424,8 +1452,7 @@ fn complex_hash_slot(value: &Value) -> Result<i64, EvalError> {
 }
 
 fn bytes_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
-    let Value::Bytes(a) = lhs else { return None };
-    let Value::Bytes(b) = rhs else { return None };
+    let (a, b) = (bytes_view(lhs)?, bytes_view(rhs)?);
     Some(Ok(a < b))
 }
 
@@ -1608,9 +1635,9 @@ fn bytes_arith(
     rhs: &Value,
     _decimal_prec: i64,
 ) -> Option<Result<Value, EvalError>> {
-    let Value::Bytes(_) = lhs else { return None };
+    let (Value::Bytes(_) | Value::ByteArray(_)) = lhs else { return None };
     match op {
-        BinOp::Add if matches!(rhs, Value::Bytes(_)) => {
+        BinOp::Add if matches!(rhs, Value::Bytes(_) | Value::ByteArray(_)) => {
             Some(crate::eval::operations::apply_binop_builtin(op, lhs, rhs))
         }
         BinOp::Mul if matches!(rhs, Value::Int(_) | Value::Bool(_)) => {
@@ -1718,7 +1745,7 @@ fn str_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
 /// iteration (`for b in b"abc"` gives ints `[97, 98, 99]`).
 #[expect(clippy::unnecessary_wraps, reason = "IterSlot protocol; bytes iteration cannot fail")]
 fn bytes_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
-    let Value::Bytes(b) = value else { unreachable!("bytes_iter only on BYTES_TYPE") };
+    let b = bytes_view(value).unwrap_or_default();
     Ok(b.iter().map(|&byte| Value::Int(i64::from(byte))).collect())
 }
 
@@ -1999,7 +2026,7 @@ fn str_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
 /// `bytes[i]`: index yields the integer byte value, matching CPython
 /// (`b"abc"[0]` is `97`).
 fn bytes_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
-    let Value::Bytes(b) = container else { unreachable!("bytes_get_item only on BYTES_TYPE") };
+    let b = bytes_view(container).unwrap_or_default();
     let raw = int_index(index, "bytes")?;
     let idx = normalize_seq_index(raw, b.len(), "bytes")?;
     Ok(Value::Int(i64::from(b[idx])))
@@ -2163,9 +2190,61 @@ fn str_len(value: &Value) -> Result<usize, EvalError> {
     Ok(s.chars().count())
 }
 
+/// A single byte value from an assignment RHS: an int in `range(0, 256)`.
+fn byte_from_value(value: &Value) -> Result<u8, EvalError> {
+    match value {
+        Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
+        Value::Bool(b) => Ok(u8::from(*b)),
+        Value::Int(_) => {
+            Err(InterpreterError::ValueError("byte must be in range(0, 256)".into()).into())
+        }
+        other => Err(InterpreterError::TypeError(format!(
+            "'{}' object cannot be interpreted as an integer",
+            other.type_name()
+        ))
+        .into()),
+    }
+}
+
+/// `bytearray[i] = int` — assign a single byte in place.
+fn bytearray_set_item(
+    container: &mut Value,
+    index: &Value,
+    value: Value,
+) -> Result<isize, EvalError> {
+    let Value::ByteArray(ba) = container else {
+        unreachable!("bytearray_set_item only on BYTEARRAY_TYPE")
+    };
+    let byte = byte_from_value(&value)?;
+    let mut b = ba.lock();
+    let raw = int_index(index, "bytearray")?;
+    let idx = normalize_seq_index(raw, b.len(), "bytearray")?;
+    b[idx] = byte;
+    Ok(0)
+}
+
+/// `del bytearray[i]` — remove a single byte in place.
+fn bytearray_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalError> {
+    let Value::ByteArray(ba) = container else {
+        unreachable!("bytearray_del_item only on BYTEARRAY_TYPE")
+    };
+    let mut b = ba.lock();
+    let raw = int_index(index, "bytearray")?;
+    let idx = normalize_seq_index(raw, b.len(), "bytearray")?;
+    b.remove(idx);
+    Ok(-1)
+}
+
+fn bytearray_get_attr(value: &Value, name: &str) -> EvalResult {
+    if BYTEARRAY_METHODS.contains(&name) {
+        return Ok(bound_method(value, name));
+    }
+    Err(attribute_error("bytearray", name))
+}
+
 #[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]
 fn bytes_len(value: &Value) -> Result<usize, EvalError> {
-    let Value::Bytes(b) = value else { unreachable!("bytes_len only on BYTES_TYPE") };
+    let b = bytes_view(value).unwrap_or_default();
     Ok(b.len())
 }
 
@@ -2261,6 +2340,47 @@ const LIST_METHODS: &[&str] = &[
 ];
 
 const TUPLE_METHODS: &[&str] = &["count", "index"];
+
+const BYTEARRAY_METHODS: &[&str] = &[
+    // Mutating.
+    "append",
+    "extend",
+    "insert",
+    "remove",
+    "pop",
+    "clear",
+    "reverse",
+    // Non-mutating (shared surface with bytes).
+    "copy",
+    "decode",
+    "hex",
+    "upper",
+    "lower",
+    "swapcase",
+    "capitalize",
+    "title",
+    "isdigit",
+    "isalpha",
+    "isalnum",
+    "isspace",
+    "isupper",
+    "islower",
+    "strip",
+    "lstrip",
+    "rstrip",
+    "split",
+    "replace",
+    "find",
+    "rfind",
+    "index",
+    "rindex",
+    "count",
+    "startswith",
+    "endswith",
+    "removeprefix",
+    "removesuffix",
+    "join",
+];
 
 const SET_METHODS: &[&str] = &[
     "add",

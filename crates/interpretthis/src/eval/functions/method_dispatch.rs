@@ -362,6 +362,18 @@ fn bytes_methods(
     methods::bytes::dispatch_bytes_method(b, method, args, kwargs).map(MethodOutcome::pure)
 }
 
+fn bytearray_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::ByteArray(b) = obj else {
+        return Err(type_mismatch("bytearray"));
+    };
+    methods::bytes::dispatch_bytearray_method(b, method, args, kwargs)
+}
+
 fn date_methods(
     obj: &mut Value,
     method: &str,
@@ -492,6 +504,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Float(_) => Some(float_methods),
         Value::Complex(_) => Some(complex_methods),
         Value::Bytes(_) => Some(bytes_methods),
+        Value::ByteArray(_) => Some(bytearray_methods),
         Value::Date(_) => Some(date_methods),
         Value::DateTime { .. } => Some(datetime_methods),
         Value::Time(_) => Some(time_methods),

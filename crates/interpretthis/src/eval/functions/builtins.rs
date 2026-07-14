@@ -1121,57 +1121,59 @@ pub(super) async fn try_builtin(
         "bytes" | "bytearray" => {
             // CPython: bytes() -> b''; bytes(int) -> b'\x00' * n;
             // bytes(iterable_of_ints) -> bytes from each int;
-            // bytes(str, encoding) -> str.encode(encoding).
-            // We don't distinguish bytes vs bytearray (no mutable
-            // variant); both return Value::Bytes.
-            if args.is_empty() {
-                return Ok(Some(Value::Bytes(Vec::new())));
-            }
-            match &args[0] {
-                Value::Int(n) => {
-                    // `bytes(-5)` raises ValueError; the old `.max(0)` silently
-                    // produced an empty bytes.
-                    let count = usize::try_from(*n).map_err(|_| {
-                        EvalError::from(InterpreterError::ValueError("negative count".into()))
-                    })?;
-                    Ok(Some(Value::Bytes(vec![0u8; count])))
-                }
-                Value::Bytes(b) => Ok(Some(Value::Bytes(b.clone()))),
-                Value::String(s) => {
-                    // CPython: bytes(str) without encoding raises
-                    // TypeError. With encoding, encodes.
-                    let encoding = match args.get(1) {
-                        Some(Value::String(e)) => e.as_str(),
-                        Some(_) => {
-                            return Err(InterpreterError::TypeError(
-                                "encoding must be a str".into(),
-                            )
-                            .into());
-                        }
-                        None => {
-                            return Err(InterpreterError::TypeError(
-                                "string argument without an encoding".into(),
-                            )
-                            .into());
-                        }
-                    };
-                    match encoding {
-                        "utf-8" | "utf_8" | "ascii" => {
-                            Ok(Some(Value::Bytes(s.as_bytes().to_vec())))
-                        }
-                        other => {
-                            Err(InterpreterError::ValueError(format!("unknown encoding: {other}"))
-                                .into())
+            // bytes(str, encoding) -> str.encode(encoding). `bytearray` yields a
+            // mutable Value::ByteArray; `bytes` an immutable Value::Bytes.
+            let raw: Vec<u8> = if args.is_empty() {
+                Vec::new()
+            } else {
+                match &args[0] {
+                    Value::Int(n) => {
+                        // `bytes(-5)` raises ValueError; the old `.max(0)`
+                        // silently produced an empty bytes.
+                        let count = usize::try_from(*n).map_err(|_| {
+                            EvalError::from(InterpreterError::ValueError("negative count".into()))
+                        })?;
+                        vec![0u8; count]
+                    }
+                    Value::Bytes(b) => b.clone(),
+                    Value::ByteArray(b) => b.lock().clone(),
+                    Value::String(s) => {
+                        let encoding = match args.get(1) {
+                            Some(Value::String(e)) => e.as_str(),
+                            Some(_) => {
+                                return Err(InterpreterError::TypeError(
+                                    "encoding must be a str".into(),
+                                )
+                                .into());
+                            }
+                            None => {
+                                return Err(InterpreterError::TypeError(
+                                    "string argument without an encoding".into(),
+                                )
+                                .into());
+                            }
+                        };
+                        match encoding {
+                            "utf-8" | "utf_8" | "ascii" => s.as_bytes().to_vec(),
+                            other => {
+                                return Err(InterpreterError::ValueError(format!(
+                                    "unknown encoding: {other}"
+                                ))
+                                .into());
+                            }
                         }
                     }
+                    // Any iterable of ints (list, tuple, range, set, generator).
+                    other => {
+                        let items = crate::eval::op::iter(state, other, tools).await?;
+                        bytes_from_int_items(&items)?
+                    }
                 }
-                // Any iterable of ints (list, tuple, range, set, generator, ...).
-                // `op::iter` materialises it, raising TypeError for a
-                // non-iterable — which is the right error for `bytes(3.5)` too.
-                other => {
-                    let items = crate::eval::op::iter(state, other, tools).await?;
-                    Ok(Some(Value::Bytes(bytes_from_int_items(&items)?)))
-                }
+            };
+            if name == "bytearray" {
+                Ok(Some(Value::ByteArray(crate::value::shared_bytes(raw))))
+            } else {
+                Ok(Some(Value::Bytes(raw)))
             }
         }
         "next" => {

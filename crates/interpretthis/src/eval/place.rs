@@ -331,6 +331,10 @@ pub(crate) fn set_slice(
     spec: &SliceSpec,
     value: Value,
 ) -> Result<isize, EvalError> {
+    // `bytearray[i:j] = bytes-like` — replace the slice with new bytes.
+    if let Value::ByteArray(ba) = container {
+        return set_bytearray_slice(ba, spec, &value);
+    }
     let Value::List(items) = container else {
         return Err(InterpreterError::TypeError(format!(
             "'{}' object does not support slice assignment",
@@ -376,6 +380,56 @@ pub(crate) fn set_slice(
     }
     drop(guard);
     Ok(delta)
+}
+
+/// `bytearray[i:j:k] = bytes-like` — splice new bytes into the shared storage.
+fn set_bytearray_slice(
+    ba: &crate::value::SharedByteArray,
+    spec: &SliceSpec,
+    value: &Value,
+) -> Result<isize, EvalError> {
+    // The RHS is any bytes-like / iterable of ints.
+    let new_bytes: Vec<u8> = match value {
+        Value::Bytes(b) => b.clone(),
+        Value::ByteArray(b) => b.lock().clone(),
+        other => iterate_value(other)?
+            .iter()
+            .map(|v| match v {
+                Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
+                Value::Bool(b) => Ok(u8::from(*b)),
+                _ => Err(EvalError::from(InterpreterError::ValueError(
+                    "bytes must be in range(0, 256)".into(),
+                ))),
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    let stride = resolve_step(spec.step.as_ref())?;
+    let mut b = ba.lock();
+    let len = i64::try_from(b.len()).map_err(|_| {
+        EvalError::from(InterpreterError::Runtime("sequence length overflows i64".into()))
+    })?;
+    if stride == 1 {
+        let start = clamp_index(resolve_bound(spec.lower.as_ref(), 0)?, len);
+        let stop = clamp_index(resolve_bound(spec.upper.as_ref(), len)?, len).max(start);
+        let lo = to_index(start)?;
+        let hi = to_index(stop)?;
+        let removed = hi - lo;
+        b.splice(lo..hi, new_bytes.iter().copied());
+        return Ok(size_delta(removed, new_bytes.len()));
+    }
+    let indices = extended_indices(len, spec, stride)?;
+    if indices.len() != new_bytes.len() {
+        return Err(InterpreterError::ValueError(format!(
+            "attempt to assign bytes of size {} to extended slice of size {}",
+            new_bytes.len(),
+            indices.len()
+        ))
+        .into());
+    }
+    for (idx, byte) in indices.into_iter().zip(new_bytes) {
+        b[idx] = byte;
+    }
+    Ok(0)
 }
 
 /// Collect the concrete indices selected by an extended (step != 1) slice.

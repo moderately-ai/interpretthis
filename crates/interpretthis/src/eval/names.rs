@@ -816,12 +816,16 @@ pub(crate) fn apply_value_slice(
                 .collect();
             Ok(Value::String(result.into()))
         }
-        Value::Bytes(b) => {
-            // Bytes slice — same shape as a string slice but emitting
-            // bytes. Each byte becomes a Value::Int for the shared
-            // slice_sequence helper, then the result collapses back
-            // into Value::Bytes.
-            let elems: Vec<Value> = b.iter().map(|&n| Value::Int(i64::from(n))).collect();
+        Value::Bytes(_) | Value::ByteArray(_) => {
+            // Bytes/bytearray slice — each byte becomes a Value::Int for the
+            // shared slice_sequence helper, then the result collapses back.
+            // A bytearray slice yields a new bytearray (CPython).
+            let raw = match obj {
+                Value::Bytes(b) => b.clone(),
+                Value::ByteArray(b) => b.lock().clone(),
+                _ => unreachable!(),
+            };
+            let elems: Vec<Value> = raw.iter().map(|&n| Value::Int(i64::from(n))).collect();
             let sliced = slice_sequence(&elems, lower, upper, stride)?;
             let bytes: Vec<u8> = sliced
                 .into_iter()
@@ -830,7 +834,11 @@ pub(crate) fn apply_value_slice(
                     _ => None,
                 })
                 .collect();
-            Ok(Value::Bytes(bytes))
+            if matches!(obj, Value::ByteArray(_)) {
+                Ok(Value::ByteArray(crate::value::shared_bytes(bytes)))
+            } else {
+                Ok(Value::Bytes(bytes))
+            }
         }
         _ => Err(InterpreterError::TypeError(format!(
             "'{}' object is not subscriptable",

@@ -522,3 +522,17 @@ def test_ellipsis_round_trips() -> None:
     assert interp.get_variable("out") is ...
     interp.execute("made = ...").check()
     assert interp.get_variable("made") is ...
+
+
+def test_bytearray_round_trips_mutable() -> None:
+    interp = Interpreter()
+    interp.execute("out = value", {"value": bytearray(b"abc")}).check()
+    out = interp.get_variable("out")
+    assert out == bytearray(b"abc")
+    assert isinstance(out, bytearray)
+
+
+def test_bytearray_built_and_mutated_in_sandbox() -> None:
+    interp = Interpreter()
+    interp.execute("b = bytearray(b'abc')\nb[0] = 88\nb.append(100)\nout = bytes(b)").check()
+    assert interp.get_variable("out") == b"Xbcd"

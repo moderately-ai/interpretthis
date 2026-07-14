@@ -8,9 +8,167 @@
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
-    eval::functions::{opt_index_arg, to_index, to_len_i64},
-    value::{ExceptionValue, Value, shared_list},
+    eval::functions::{MethodOutcome, opt_index_arg, to_index, to_len_i64},
+    value::{ExceptionValue, SharedByteArray, Value, shared_bytes, shared_list},
 };
+
+/// Dispatch a method call on a `bytearray` receiver. Mutating methods act on
+/// the shared storage in place; the read methods reuse `dispatch_bytes_method`
+/// on a snapshot, converting any `bytes` result back to a `bytearray` (CPython's
+/// bytearray methods return bytearray, and `split` returns a list of bytearray).
+pub(crate) fn dispatch_bytearray_method(
+    ba: &SharedByteArray,
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let byte_arg = |v: &Value| -> Result<u8, EvalError> {
+        match v {
+            Value::Int(n) if (0..=255).contains(n) => Ok(*n as u8),
+            Value::Bool(b) => Ok(u8::from(*b)),
+            Value::Int(_) => {
+                Err(InterpreterError::ValueError("byte must be in range(0, 256)".into()).into())
+            }
+            other => Err(InterpreterError::TypeError(format!(
+                "'{}' object cannot be interpreted as an integer",
+                other.type_name()
+            ))
+            .into()),
+        }
+    };
+    let bytes_of = |v: &Value| -> Result<Vec<u8>, EvalError> {
+        match v {
+            Value::Bytes(b) => Ok(b.clone()),
+            Value::ByteArray(b) => Ok(b.lock().clone()),
+            other => Err(InterpreterError::TypeError(format!(
+                "can't extend/concat bytearray with '{}'",
+                other.type_name()
+            ))
+            .into()),
+        }
+    };
+    match method {
+        "append" => {
+            let byte = byte_arg(args.first().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError("append() takes one argument".into()))
+            })?)?;
+            ba.lock().push(byte);
+            Ok(MethodOutcome::grew(Value::None, 1))
+        }
+        "extend" => {
+            let extra = bytes_of(args.first().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError("extend() takes one argument".into()))
+            })?)?;
+            let n = extra.len();
+            ba.lock().extend_from_slice(&extra);
+            Ok(MethodOutcome::grew(Value::None, n))
+        }
+        "insert" => {
+            let [idx_v, byte_v] = args else {
+                return Err(InterpreterError::TypeError(
+                    "insert() takes exactly two arguments".into(),
+                )
+                .into());
+            };
+            let byte = byte_arg(byte_v)?;
+            let mut b = ba.lock();
+            let len = b.len() as i64;
+            let raw = match idx_v {
+                Value::Int(n) => *n,
+                Value::Bool(bo) => i64::from(*bo),
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "an integer is required for the index".into(),
+                    )
+                    .into());
+                }
+            };
+            // CPython clamps insert index into [0, len].
+            let idx = if raw < 0 { (len + raw).max(0) } else { raw.min(len) };
+            b.insert(usize::try_from(idx).unwrap_or(0), byte);
+            Ok(MethodOutcome::grew(Value::None, 1))
+        }
+        "remove" => {
+            let byte = byte_arg(args.first().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError("remove() takes one argument".into()))
+            })?)?;
+            let mut b = ba.lock();
+            match b.iter().position(|&x| x == byte) {
+                Some(pos) => {
+                    b.remove(pos);
+                    Ok(MethodOutcome::shrank(Value::None, 1))
+                }
+                None => {
+                    Err(EvalError::Exception(ExceptionValue::new("ValueError", "value not found")))
+                }
+            }
+        }
+        "pop" => {
+            let mut b = ba.lock();
+            if b.is_empty() {
+                return Err(EvalError::Exception(ExceptionValue::new(
+                    "IndexError",
+                    "pop from empty bytearray",
+                )));
+            }
+            let len = b.len() as i64;
+            let raw = match args.first() {
+                None => len - 1,
+                Some(Value::Int(n)) => *n,
+                Some(Value::Bool(bo)) => i64::from(*bo),
+                Some(_) => {
+                    return Err(InterpreterError::TypeError("an integer is required".into()).into());
+                }
+            };
+            let idx = if raw < 0 { len + raw } else { raw };
+            if idx < 0 || idx >= len {
+                return Err(EvalError::Exception(ExceptionValue::new(
+                    "IndexError",
+                    "bytearray index out of range",
+                )));
+            }
+            let removed = b.remove(usize::try_from(idx).unwrap_or(0));
+            Ok(MethodOutcome::shrank(Value::Int(i64::from(removed)), 1))
+        }
+        "clear" => {
+            let freed = ba.lock().len();
+            ba.lock().clear();
+            Ok(MethodOutcome::shrank(Value::None, freed))
+        }
+        "reverse" => {
+            ba.lock().reverse();
+            Ok(MethodOutcome::pure(Value::None))
+        }
+        "copy" => Ok(MethodOutcome::pure(Value::ByteArray(shared_bytes(ba.lock().clone())))),
+        // Non-mutating: delegate to the bytes implementation on a snapshot,
+        // then re-wrap any bytes result as a bytearray.
+        _ => {
+            let snapshot = ba.lock().clone();
+            let result = dispatch_bytes_method(&snapshot, method, args, kwargs)?;
+            Ok(MethodOutcome::pure(rewrap_bytes_as_bytearray(result)))
+        }
+    }
+}
+
+/// Convert a `bytes`-returning result of a shared bytes method into the
+/// `bytearray` a `bytearray` method returns (recursively for `split`'s list).
+fn rewrap_bytes_as_bytearray(value: Value) -> Value {
+    match value {
+        Value::Bytes(b) => Value::ByteArray(shared_bytes(b)),
+        Value::List(items) => {
+            let mapped: Vec<Value> = items
+                .lock()
+                .iter()
+                .map(|v| match v {
+                    Value::Bytes(b) => Value::ByteArray(shared_bytes(b.clone())),
+                    other => other.clone(),
+                })
+                .collect();
+            Value::List(shared_list(mapped))
+        }
+        other => other,
+    }
+}
 
 /// Dispatch a method call on a `bytes` receiver. CPython's full bytes
 /// API is large; we wire the common ones used by agent-emitted code

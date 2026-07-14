@@ -37,6 +37,18 @@ pub fn shared_list(items: Vec<Value>) -> SharedList {
     Arc::new(Mutex::new(items))
 }
 
+/// Mutable, shared backing store for [`Value::ByteArray`]. Same identity model
+/// as [`SharedList`]: a `bytearray` clone shares storage, so in-place mutation
+/// (`b[0] = ...`, `.append(...)`) is visible through every alias.
+pub type SharedByteArray = Arc<Mutex<Vec<u8>>>;
+
+/// Construct a fresh `SharedByteArray` from a `Vec<u8>`.
+#[inline]
+#[must_use]
+pub fn shared_bytes(bytes: Vec<u8>) -> SharedByteArray {
+    Arc::new(Mutex::new(bytes))
+}
+
 /// Construct a fresh [`SharedFields`] map.
 #[inline]
 #[must_use]
@@ -130,6 +142,20 @@ fn deserialize_shared_list<'de, D: serde::Deserializer<'de>>(
     Ok(shared_list(items))
 }
 
+fn serialize_shared_bytes<S: serde::Serializer>(
+    bytes: &SharedByteArray,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_bytes(&bytes.lock())
+}
+
+fn deserialize_shared_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SharedByteArray, D::Error> {
+    let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+    Ok(shared_bytes(bytes))
+}
+
 /// Serialize instance fields as a plain map (lock, then emit).
 fn serialize_shared_fields<S: serde::Serializer>(
     fields: &SharedFields,
@@ -212,6 +238,14 @@ pub enum Value {
     String(CompactString),
     /// Python `bytes`.
     Bytes(Vec<u8>),
+    /// Python `bytearray` — a mutable sequence of bytes with shared identity
+    /// (see [`SharedByteArray`]). Distinct from the immutable `Bytes` so item /
+    /// slice assignment, `.append`, `del`, etc. mutate in place.
+    ByteArray(
+        #[serde(serialize_with = "serialize_shared_bytes")]
+        #[serde(deserialize_with = "deserialize_shared_bytes")]
+        SharedByteArray,
+    ),
     /// Python `list`. Backed by `Arc<Mutex<Vec<Value>>>` so chained
     /// assignment (`a = b = []`), mutable default args, and closure
     /// captures of lists share the same identity — mutations via any
@@ -789,6 +823,11 @@ impl PartialEq for Value {
             | (Self::Class(a), Self::Class(b))
             | (Self::Module(a), Self::Module(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
+            // bytearray compares equal to bytes with the same contents.
+            (Self::ByteArray(a), Self::ByteArray(b)) => *a.lock() == *b.lock(),
+            (Self::ByteArray(a), Self::Bytes(b)) | (Self::Bytes(b), Self::ByteArray(a)) => {
+                *a.lock() == *b
+            }
             // List is shared via Arc<Mutex<Vec>> — `Arc::ptr_eq` short-
             // circuits the lock acquisition when two aliases hold the
             // same backing storage (the common `a = b = []` case).
@@ -1338,6 +1377,7 @@ impl Value {
             Self::Float(f) => *f != 0.0,
             Self::String(s) => !s.is_empty(),
             Self::Bytes(b) => !b.is_empty(),
+            Self::ByteArray(b) => !b.lock().is_empty(),
             Self::List(l) => !l.lock().is_empty(),
             Self::Tuple(t) => !t.is_empty(),
             Self::Dict(d) => !d.is_empty(),
@@ -1418,6 +1458,7 @@ impl Value {
             Self::Complex(_) => "complex",
             Self::String(_) => "str",
             Self::Bytes(_) => "bytes",
+            Self::ByteArray(_) => "bytearray",
             Self::List(_) => "list",
             Self::Tuple(_) => "tuple",
             Self::Dict(_) => "dict",
@@ -1629,23 +1670,12 @@ impl fmt::Display for Value {
             // backslash, and the chosen quote get escaped per the
             // CPython rules: `\\`, `\n`, `\r`, `\t`, and `\xNN` for
             // anything else outside the printable ASCII range.
-            Self::Bytes(b) => {
-                let has_single = b.contains(&b'\'');
-                let has_double = b.contains(&b'"');
-                let quote = if has_single && !has_double { b'"' } else { b'\'' };
-                write!(f, "b{}", quote as char)?;
-                for &byte in b {
-                    match byte {
-                        b'\\' => write!(f, "\\\\")?,
-                        b'\n' => write!(f, "\\n")?,
-                        b'\r' => write!(f, "\\r")?,
-                        b'\t' => write!(f, "\\t")?,
-                        b if b == quote => write!(f, "\\{}", b as char)?,
-                        0x20..=0x7E => write!(f, "{}", byte as char)?,
-                        _ => write!(f, "\\x{byte:02x}")?,
-                    }
-                }
-                write!(f, "{}", quote as char)
+            Self::Bytes(b) => write_bytes_literal(f, b),
+            // CPython: `bytearray(b'abc')`.
+            Self::ByteArray(b) => {
+                write!(f, "bytearray(")?;
+                write_bytes_literal(f, &b.lock())?;
+                write!(f, ")")
             }
             Self::List(items) => {
                 let snapshot = items.lock().clone();
@@ -1904,6 +1934,27 @@ impl fmt::Display for Value {
 /// extreme magnitudes are tracked by `gap-decimal-scientific-formatting`.
 fn format_decimal_str(f: &mut fmt::Formatter<'_>, d: &bigdecimal::BigDecimal) -> fmt::Result {
     write!(f, "{}", d.to_plain_string())
+}
+
+/// Write a Python bytes literal (`b'...'`) with CPython's quote selection and
+/// escaping. Shared by `bytes` and `bytearray` rendering.
+fn write_bytes_literal(f: &mut fmt::Formatter<'_>, b: &[u8]) -> fmt::Result {
+    let has_single = b.contains(&b'\'');
+    let has_double = b.contains(&b'"');
+    let quote = if has_single && !has_double { b'"' } else { b'\'' };
+    write!(f, "b{}", quote as char)?;
+    for &byte in b {
+        match byte {
+            b'\\' => write!(f, "\\\\")?,
+            b'\n' => write!(f, "\\n")?,
+            b'\r' => write!(f, "\\r")?,
+            b'\t' => write!(f, "\\t")?,
+            b if b == quote => write!(f, "\\{}", b as char)?,
+            0x20..=0x7E => write!(f, "{}", byte as char)?,
+            _ => write!(f, "\\x{byte:02x}")?,
+        }
+    }
+    write!(f, "{}", quote as char)
 }
 
 /// Python `repr()` of a string: CPython's quote selection plus escaping.

@@ -29,14 +29,15 @@
 use bigdecimal::BigDecimal;
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta};
 use indexmap::IndexMap;
-use interpretthis::{Value, ValueKey, shared_list};
+use interpretthis::{Value, ValueKey, shared_bytes, shared_list};
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use pyo3::{
     exceptions::PyTypeError,
     prelude::*,
     types::{
-        PyBool, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString, PyTuple,
+        PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString,
+        PyTuple,
     },
 };
 
@@ -82,6 +83,7 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
         Value::Float(f) => f.into_pyobject(py)?.into_any(),
         Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
         Value::Bytes(b) => PyBytes::new(py, b).into_any(),
+        Value::ByteArray(b) => PyByteArray::new(py, &b.lock()).into_any(),
 
         Value::List(items) => {
             // Lock scope ends before the list is built, so a tool callback that
@@ -197,6 +199,9 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
     if ob.is_instance_of::<PyString>() {
         return Ok(Value::String(ob.extract::<String>()?.into()));
+    }
+    if ob.is_instance_of::<PyByteArray>() {
+        return Ok(Value::ByteArray(shared_bytes(ob.extract::<Vec<u8>>()?)));
     }
     if ob.is_instance_of::<PyBytes>() {
         return Ok(Value::Bytes(ob.extract::<Vec<u8>>()?));

@@ -424,6 +424,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::BigInt(b) => 16 + (b.bits() as usize / 8).saturating_add(8),
         Value::String(s) => STRING_HEADER_BYTES + s.len(),
         Value::Bytes(b) => STRING_HEADER_BYTES + b.len(),
+        Value::ByteArray(b) => STRING_HEADER_BYTES + b.lock().len(),
         // List is shared via Arc<Mutex<Vec>>; lock to walk under the
         // guard. Tuple/Set wrap plain Vec<Value> and walk directly.
         Value::List(items) => {

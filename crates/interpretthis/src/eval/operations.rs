@@ -294,6 +294,23 @@ fn add_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
             result.extend_from_slice(b);
             Ok(Value::Bytes(result))
         }
+        // bytearray concatenation — `bytearray + (bytes|bytearray)` yields a
+        // new bytearray (CPython). `bytes + bytearray` yields bytes.
+        (Value::ByteArray(a), Value::Bytes(b)) => {
+            let mut result = a.lock().clone();
+            result.extend_from_slice(b);
+            Ok(Value::ByteArray(crate::value::shared_bytes(result)))
+        }
+        (Value::ByteArray(a), Value::ByteArray(b)) => {
+            let mut result = a.lock().clone();
+            result.extend_from_slice(&b.lock());
+            Ok(Value::ByteArray(crate::value::shared_bytes(result)))
+        }
+        (Value::Bytes(a), Value::ByteArray(b)) => {
+            let mut result = a.clone();
+            result.extend_from_slice(&b.lock());
+            Ok(Value::Bytes(result))
+        }
         // List concatenation. Lists are shared via Arc<Mutex<Vec>>;
         // snapshot both under their locks and emit a fresh shared list.
         (Value::List(a), Value::List(b)) => {
@@ -410,6 +427,22 @@ fn mult_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
                 .into());
             }
             Ok(Value::Bytes(b.repeat(repeat_count(n))))
+        }
+        // bytearray * int (repeat) -> a new bytearray.
+        (Value::ByteArray(b), _) if matches!(right, Value::Int(_) | Value::Bool(_)) => {
+            let n = to_int(right)?;
+            let src = b.lock();
+            if n <= 0 {
+                return Ok(Value::ByteArray(crate::value::shared_bytes(Vec::new())));
+            }
+            let result_size = src.len().saturating_mul(repeat_count(n));
+            if result_size > MAX_STRING_SIZE {
+                return Err(InterpreterError::LimitExceeded(format!(
+                    "bytes repetition would create {result_size} bytes (limit: {MAX_STRING_SIZE})"
+                ))
+                .into());
+            }
+            Ok(Value::ByteArray(crate::value::shared_bytes(src.repeat(repeat_count(n)))))
         }
         (Value::Int(_) | Value::Bool(_), Value::Bytes(b)) => {
             let n = to_int(left)?;
@@ -1040,6 +1073,10 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Bytes(a), Value::Bytes(b)) => a == b,
+        (Value::ByteArray(a), Value::ByteArray(b)) => *a.lock() == *b.lock(),
+        (Value::ByteArray(a), Value::Bytes(b)) | (Value::Bytes(b), Value::ByteArray(a)) => {
+            *a.lock() == *b
+        }
         // Cross-type numeric equality (Python: True == 1, 1 == 1.0)
         (Value::Bool(b), Value::Int(i)) | (Value::Int(i), Value::Bool(b)) => *i == i64::from(*b),
         (Value::Bool(b), Value::Float(f)) | (Value::Float(f), Value::Bool(b)) => {
