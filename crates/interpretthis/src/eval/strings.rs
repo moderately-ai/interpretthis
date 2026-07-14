@@ -350,24 +350,26 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
         _ => formatted,
     };
 
-    // Apply width and alignment.
+    // Apply width and alignment. Width is measured in characters (code points),
+    // not UTF-8 bytes — a multi-byte subject counts once per character.
     let width = spec_usize(width.unwrap_or(0), 0);
-    if with_sign.len() >= width {
+    let display_width = with_sign.chars().count();
+    if display_width >= width {
         return Ok(Value::String(with_sign.into()));
     }
 
     let fill_char = fill.unwrap_or(if zero_pad { '0' } else { ' ' });
     let padded = match align.unwrap_or(if zero_pad { '=' } else { '<' }) {
         '<' => {
-            let padding = width - with_sign.len();
+            let padding = width - display_width;
             format!("{with_sign}{}", fill_char.to_string().repeat(padding))
         }
         '>' => {
-            let padding = width - with_sign.len();
+            let padding = width - display_width;
             format!("{}{with_sign}", fill_char.to_string().repeat(padding))
         }
         '^' => {
-            let padding = width - with_sign.len();
+            let padding = width - display_width;
             let left = padding / 2;
             let right = padding - left;
             format!(
@@ -378,7 +380,7 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
         }
         '=' => {
             // Padding between sign and digits
-            let padding = width - with_sign.len();
+            let padding = width - display_width;
             if with_sign.starts_with('-')
                 || with_sign.starts_with('+')
                 || with_sign.starts_with(' ')
