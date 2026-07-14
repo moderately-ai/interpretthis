@@ -403,13 +403,15 @@ fn extended_indices(len: i64, spec: &SliceSpec, stride: i64) -> Result<Vec<usize
 
 /// Resolve a slice step value to a non-zero i64 stride (default 1).
 fn resolve_step(step: Option<&Value>) -> Result<i64, EvalError> {
+    // `bool` is an `int` subclass: `True` is a stride of 1, but `False` is a
+    // stride of 0 — a ValueError, not a silent 1.
+    let zero = || EvalError::from(InterpreterError::ValueError("slice step cannot be zero".into()));
     match step {
-        Some(Value::Int(s)) if *s != 0 => Ok(*s),
-        Some(Value::Int(_)) => {
-            Err(InterpreterError::ValueError("slice step cannot be zero".into()).into())
-        }
-        // Absent, `None`, or a bool step all mean stride 1.
-        None | Some(Value::None | Value::Bool(_)) => Ok(1),
+        None | Some(Value::None) => Ok(1),
+        Some(Value::Int(0)) => Err(zero()),
+        Some(Value::Int(s)) => Ok(*s),
+        Some(Value::Bool(false)) => Err(zero()),
+        Some(Value::Bool(true)) => Ok(1),
         Some(other) => Err(InterpreterError::TypeError(format!(
             "slice indices must be integers or None, not '{}'",
             other.type_name()

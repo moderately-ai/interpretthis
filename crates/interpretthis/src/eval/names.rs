@@ -697,11 +697,18 @@ async fn eval_subscript_slice(
     };
 
     let stride = match &step_expr {
-        Some(Value::Int(s)) => {
-            if *s == 0 {
+        // `bool` is an `int` subclass, so `a[::False]` is a step of 0 (a
+        // ValueError), not a type error.
+        Some(Value::Int(_) | Value::Bool(_)) => {
+            let s = match &step_expr {
+                Some(Value::Int(s)) => *s,
+                Some(Value::Bool(b)) => i64::from(*b),
+                _ => unreachable!(),
+            };
+            if s == 0 {
                 return Err(InterpreterError::ValueError("slice step cannot be zero".into()).into());
             }
-            *s
+            s
         }
         Some(Value::None) | None => 1,
         Some(other) => {
