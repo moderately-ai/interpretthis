@@ -1338,17 +1338,13 @@ fn sequence_contains(container: &Value, item: &Value) -> Result<bool, EvalError>
 }
 
 /// `key in dict`: hash-based lookup against the dict's keys.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "ContainsSlot protocol fixes the Result signature; see sequence_contains rationale"
-)]
 fn dict_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
     let Value::Dict(map) = container else {
         unreachable!("dict_contains only attached to DICT_TYPE")
     };
-    let Ok(key) = crate::eval::literals::value_to_key(item) else {
-        return Ok(false);
-    };
+    // An unhashable probe raises `TypeError: unhashable type`, it does not answer
+    // False — propagate the value_to_key error instead of swallowing it.
+    let key = crate::eval::literals::value_to_key(item)?;
     Ok(map.contains_key(&key))
 }
 
@@ -2222,14 +2218,12 @@ fn counter_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 /// reports membership based on stored entries, not non-zero values
 /// — `c["missing"] == 0` but `"missing" in c` is False (matching
 /// CPython).
-#[expect(clippy::unnecessary_wraps, reason = "ContainsSlot protocol")]
 fn counter_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
     let Value::Counter(map) = container else {
         unreachable!("counter_contains only on COUNTER_TYPE")
     };
-    let Ok(key) = crate::eval::literals::value_to_key(item) else {
-        return Ok(false);
-    };
+    // Unhashable probe raises, does not answer False.
+    let key = crate::eval::literals::value_to_key(item)?;
     Ok(map.contains_key(&key))
 }
 
@@ -2458,14 +2452,12 @@ fn deque_get_attr(value: &Value, name: &str) -> EvalResult {
 }
 
 /// `key in defaultdict` — same as dict.
-#[expect(clippy::unnecessary_wraps, reason = "ContainsSlot protocol")]
 fn defaultdict_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
     let Value::DefaultDict(data) = container else {
         unreachable!("defaultdict_contains only on DEFAULTDICT_TYPE")
     };
-    let Ok(key) = crate::eval::literals::value_to_key(item) else {
-        return Ok(false);
-    };
+    // Unhashable probe raises, does not answer False.
+    let key = crate::eval::literals::value_to_key(item)?;
     Ok(data.items.contains_key(&key))
 }
 
