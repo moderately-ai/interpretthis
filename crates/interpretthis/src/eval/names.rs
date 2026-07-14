@@ -825,13 +825,13 @@ fn slice_sequence(
 }
 
 /// Clamp a slice index for positive step.
-fn clamp_slice_index(idx: i64, len: i64) -> i64 {
+pub(crate) fn clamp_slice_index(idx: i64, len: i64) -> i64 {
     let adjusted = if idx < 0 { idx + len } else { idx };
     adjusted.max(0).min(len)
 }
 
 /// Clamp a slice index for negative step.
-fn clamp_slice_index_neg(idx: i64, len: i64) -> i64 {
+pub(crate) fn clamp_slice_index_neg(idx: i64, len: i64) -> i64 {
     let adjusted = if idx < 0 { idx + len } else { idx };
     adjusted.max(-1).min(len - 1)
 }

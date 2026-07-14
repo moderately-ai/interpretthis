@@ -305,6 +305,27 @@ async fn delete_slice(
     } else {
         None
     };
+    let step = if let Some(ref expr) = slice_node.step {
+        Some(eval_expr(state, expr, tools).await?)
+    } else {
+        None
+    };
+    // Resolve the step: absent/None -> 1; must be a non-zero integer.
+    let step = match step {
+        None | Some(Value::None) => 1,
+        Some(Value::Int(n)) => n,
+        Some(Value::Bool(b)) => i64::from(b),
+        Some(other) => {
+            return Err(InterpreterError::TypeError(format!(
+                "slice indices must be integers or None, not '{}'",
+                other.type_name()
+            ))
+            .into());
+        }
+    };
+    if step == 0 {
+        return Err(InterpreterError::ValueError("slice step cannot be zero".into()).into());
+    }
 
     let released: Result<usize, EvalError> = {
         let obj = state
@@ -338,17 +359,33 @@ async fn delete_slice(
                     _ => Ok(default),
                 }
             };
-            let s = clamp(&start, 0)?;
-            let e = clamp(&stop, items_len)?;
 
-            let result = if s < e && s < items_len {
-                let end = e.min(items_len);
-                let drained_size: usize =
-                    guard[s..end].iter().map(crate::state::estimate_value_size).sum();
-                guard.drain(s..end);
-                Ok(drained_size)
+            let result = if step == 1 {
+                // Contiguous case: one drain.
+                let s = clamp(&start, 0)?;
+                let e = clamp(&stop, items_len)?;
+                if s < e && s < items_len {
+                    let end = e.min(items_len);
+                    let drained_size: usize =
+                        guard[s..end].iter().map(crate::state::estimate_value_size).sum();
+                    guard.drain(s..end);
+                    Ok(drained_size)
+                } else {
+                    Ok(0)
+                }
             } else {
-                Ok(0)
+                // Extended slice: delete the strided positions (`del a[::2]`).
+                // Reuse the read-path index generation, then remove each index
+                // in descending order so earlier removals don't shift the rest.
+                let indices = strided_indices(start.as_ref(), stop.as_ref(), step, len);
+                let mut freed = 0usize;
+                for &i in &indices {
+                    if i < guard.len() {
+                        freed += crate::state::estimate_value_size(&guard[i]);
+                        guard.remove(i);
+                    }
+                }
+                Ok(freed)
             };
             drop(guard);
             result
@@ -364,4 +401,47 @@ async fn delete_slice(
         state.release_allocation(size);
     }
     Ok(())
+}
+
+/// The list positions selected by an extended slice `start:stop:step` (step != 1),
+/// returned in descending order so a caller can `remove` each without shifting
+/// the rest. Reuses the read-path clamp semantics so `del a[::2]` deletes the
+/// same elements that `a[::2]` would read.
+fn strided_indices(
+    lower: Option<&Value>,
+    upper: Option<&Value>,
+    step: i64,
+    len: i64,
+) -> Vec<usize> {
+    use crate::eval::names::{clamp_slice_index, clamp_slice_index_neg};
+    let resolve = |v: Option<&Value>, default: i64| -> i64 {
+        match v {
+            Some(Value::Int(i)) => *i,
+            Some(Value::Bool(b)) => i64::from(*b),
+            _ => default,
+        }
+    };
+    let mut out = Vec::new();
+    if step > 0 {
+        let mut i = clamp_slice_index(resolve(lower, 0), len);
+        let end = clamp_slice_index(resolve(upper, len), len);
+        while i < end {
+            if let Ok(u) = usize::try_from(i) {
+                out.push(u);
+            }
+            i += step;
+        }
+    } else {
+        let mut i = clamp_slice_index_neg(resolve(lower, len - 1), len);
+        let end = clamp_slice_index_neg(resolve(upper, -(len + 1)), len);
+        while i > end {
+            if let Ok(u) = usize::try_from(i) {
+                out.push(u);
+            }
+            i += step;
+        }
+    }
+    out.sort_unstable_by(|a, b| b.cmp(a));
+    out.dedup();
+    out
 }
