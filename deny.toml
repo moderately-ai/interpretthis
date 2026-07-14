@@ -41,13 +41,14 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "CC0-1.0",
-    # malachite (via rustpython-parser / malachite-bigint) is LGPL-3.0-only, and
-    # is statically linked into every binary we build. Harmless while crates.io
-    # ships source; it carries LGPL-3.0 §4 obligations onto any *binary* we
-    # distribute (PyPI wheels, npm .node addons) — see NOTICE. The tracked exit
-    # is migrating to `ruff_python_parser` (MIT).
-    "LGPL-3.0-only",
 ]
+# No copyleft entry. `malachite` (LGPL-3.0-only) used to arrive via
+# rustpython-parser's default `malachite-bigint` feature and was statically
+# linked into every binary; the parser is now built with its `num-bigint`
+# feature instead (see the workspace manifest), so the whole malachite subtree —
+# and its LGPL obligation on distributed wheels/addons — is gone. If this list
+# ever needs a copyleft licence again, that is a deliberate review, not a
+# default.
 
 [licenses.private]
 ignore = true

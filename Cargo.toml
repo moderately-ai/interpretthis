@@ -29,7 +29,18 @@ homepage = "https://github.com/moderately-ai/interpretthis"
 # keeps it publishable as-is.
 interpretthis = { path = "crates/interpretthis", version = "0.4.0" }
 
-rustpython-parser = "=0.4.0"
+# `default-features = false` to drop the default `malachite-bigint` feature, which
+# is the ONLY thing that pulled `malachite` (LGPL-3.0-only) into the tree — and it
+# is statically linked into every binary we ship. RustPython offers `num-bigint` as
+# a first-class alternative for exactly this reason, and `num-bigint` (MIT/Apache)
+# is a crate we already depend on directly for `Value::BigInt`, so the AST's
+# integer literals now arrive as the same type the interpreter already uses.
+#
+# `location` is the other default and IS needed (line/column spans on AST nodes).
+rustpython-parser = { version = "=0.4.0", default-features = false, features = [
+    "location",
+    "num-bigint",
+] }
 tokio = { version = "=1.50.0", features = [
     "rt",
     "rt-multi-thread",

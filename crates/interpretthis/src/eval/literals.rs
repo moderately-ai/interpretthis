@@ -22,17 +22,14 @@ pub fn eval_constant(constant: &Constant) -> Value {
         Constant::None | Constant::Ellipsis => Value::None,
         Constant::Bool(b) => Value::Bool(*b),
         Constant::Int(i) => {
-            // rustpython's BigInt is malachite-backed; convert via decimal
-            // string so we stay on num_bigint for the runtime Value.
-            if let Ok(n) = i64::try_from(i) {
-                Value::Int(n)
-            } else {
-                use std::str::FromStr as _;
-                let s = i.to_string();
-                let big = num_bigint::BigInt::from_str(&s)
-                    .unwrap_or_else(|_| num_bigint::BigInt::from(0));
-                crate::value::int_from_bigint(big)
-            }
+            // The parser is built with its `num-bigint` feature, so the AST's
+            // integer literals are already `num_bigint::BigInt` — the same type
+            // `Value::BigInt` holds. This used to round-trip through a decimal
+            // string because the AST was malachite-backed (see the note on
+            // `rustpython-parser` in the workspace manifest); it is now a move.
+            //
+            // `int_from_bigint` keeps anything that fits on the compact i64 path.
+            crate::value::int_from_bigint(i.clone())
         }
         Constant::Float(f) => Value::Float(*f),
         Constant::Str(s) => Value::String(s.as_str().into()),
