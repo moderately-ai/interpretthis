@@ -74,22 +74,59 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         "ceil" => Ok(Value::Int(float_to_int(arg_f64(func, args, 0)?.ceil())?)),
         "trunc" => Ok(Value::Int(float_to_int(arg_f64(func, args, 0)?.trunc())?)),
         "fabs" => Ok(Value::Float(arg_f64(func, args, 0)?.abs())),
-        "exp" => Ok(Value::Float(arg_f64(func, args, 0)?.exp())),
+        "exp" => {
+            let x = arg_f64(func, args, 0)?;
+            let r = x.exp();
+            // A finite argument overflowing to infinity is a range error.
+            if r.is_infinite() && x.is_finite() {
+                return Err(overflow_error("math range error"));
+            }
+            Ok(Value::Float(r))
+        }
         "log" => {
             let x = arg_f64(func, args, 0)?;
             if x <= 0.0 {
                 return Err(value_error("math domain error"));
             }
-            // Two-arg form is log base `b`.
+            // Two-arg form is log base `b`: the base must be positive and not 1.
             if args.len() >= 2 {
-                Ok(Value::Float(x.log(arg_f64(func, args, 1)?)))
+                let base = arg_f64(func, args, 1)?;
+                if base <= 0.0 {
+                    return Err(value_error("math domain error"));
+                }
+                if base == 1.0 {
+                    return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                        "ZeroDivisionError",
+                        "float division by zero",
+                    )));
+                }
+                Ok(Value::Float(x.log(base)))
             } else {
                 Ok(Value::Float(x.ln()))
             }
         }
         "log2" => Ok(Value::Float(domain_pos(func, args)?.log2())),
         "log10" => Ok(Value::Float(domain_pos(func, args)?.log10())),
-        "pow" => Ok(Value::Float(arg_f64(func, args, 0)?.powf(arg_f64(func, args, 1)?))),
+        "pow" => {
+            let x = arg_f64(func, args, 0)?;
+            let y = arg_f64(func, args, 1)?;
+            // Zero to a negative power is undefined (checked before computing,
+            // where it would otherwise become +inf).
+            if x == 0.0 && y < 0.0 {
+                return Err(value_error("math domain error"));
+            }
+            let r = x.powf(y);
+            // A NaN from finite operands is an undefined/complex result (e.g. a
+            // negative base to a fractional exponent) -> ValueError.
+            if r.is_nan() && x.is_finite() && y.is_finite() {
+                return Err(value_error("math domain error"));
+            }
+            // Finite operands overflowing to infinity is a range error.
+            if r.is_infinite() && x.is_finite() && y.is_finite() {
+                return Err(overflow_error("math range error"));
+            }
+            Ok(Value::Float(r))
+        }
         "sin" => Ok(Value::Float(arg_f64(func, args, 0)?.sin())),
         "cos" => Ok(Value::Float(arg_f64(func, args, 0)?.cos())),
         "tan" => Ok(Value::Float(arg_f64(func, args, 0)?.tan())),
