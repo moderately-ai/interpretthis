@@ -57,12 +57,28 @@ pub fn has_function(name: &str) -> bool {
             | "isfinite"
             | "copysign"
             | "fmod"
+            | "comb"
+            | "perm"
+            | "prod"
+            | "dist"
+            | "lcm"
+            | "isclose"
+            | "expm1"
+            | "log1p"
     )
 }
 
 /// Invoke a `math` function.
-pub fn call(func: &str, args: &[Value]) -> EvalResult {
+pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
     match func {
+        "comb" => math_comb(args),
+        "perm" => math_perm(args),
+        "prod" => math_prod(args, kwargs),
+        "dist" => math_dist(args),
+        "lcm" => math_lcm(args),
+        "isclose" => math_isclose(func, args, kwargs),
+        "expm1" => Ok(Value::Float(arg_f64(func, args, 0)?.exp_m1())),
+        "log1p" => Ok(Value::Float(arg_f64(func, args, 0)?.ln_1p())),
         "sqrt" => {
             let x = arg_f64(func, args, 0)?;
             if x < 0.0 {
@@ -201,6 +217,134 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
     }
 }
 
+/// A non-negative integer argument (for `comb`/`perm`), promoting past i64.
+fn nonneg_int(func: &str, args: &[Value], index: usize) -> Result<num_bigint::BigInt, EvalError> {
+    let arg = need_arg(func, args, index)?;
+    let n = crate::value::value_as_bigint(arg).ok_or_else(|| {
+        type_error(format!("'{}' object cannot be interpreted as an integer", arg.type_name()))
+    })?;
+    if n.sign() == num_bigint::Sign::Minus {
+        return Err(value_error(format!("{func}() argument must be a non-negative integer")));
+    }
+    Ok(n)
+}
+
+/// `math.comb(n, k)` — binomial coefficient via the exact multiplicative
+/// formula (each partial result stays integral, so integer division is exact).
+fn math_comb(args: &[Value]) -> EvalResult {
+    use num_bigint::BigInt;
+    let n = nonneg_int("comb", args, 0)?;
+    let mut k = nonneg_int("comb", args, 1)?;
+    if k > n {
+        return Ok(Value::Int(0));
+    }
+    // Use the smaller of k and n-k for fewer iterations (symmetry).
+    let nk = &n - &k;
+    if nk < k {
+        k = nk;
+    }
+    let mut result = BigInt::from(1);
+    let mut i = BigInt::from(0);
+    while i < k {
+        result = result * (&n - &k + &i + 1u32) / (&i + 1u32);
+        i += 1u32;
+    }
+    Ok(crate::value::int_from_bigint(result))
+}
+
+/// `math.perm(n, k=None)` — falling factorial `n! / (n-k)!`; `k=None` gives `n!`.
+fn math_perm(args: &[Value]) -> EvalResult {
+    use num_bigint::BigInt;
+    let n = nonneg_int("perm", args, 0)?;
+    let k = match args.get(1) {
+        None | Some(Value::None) => n.clone(),
+        Some(_) => nonneg_int("perm", args, 1)?,
+    };
+    if k > n {
+        return Ok(Value::Int(0));
+    }
+    let mut result = BigInt::from(1);
+    let mut i = BigInt::from(0);
+    while i < k {
+        result *= &n - &i;
+        i += 1u32;
+    }
+    Ok(crate::value::int_from_bigint(result))
+}
+
+/// `math.prod(iterable, *, start=1)` — product of the elements, routed through
+/// the arithmetic kernel so int/float/BigInt promotion matches `*`.
+fn math_prod(args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
+    let items = crate::eval::control_flow::iterate_value(need_arg("prod", args, 0)?)?;
+    let mut acc = kwargs.get("start").cloned().unwrap_or(Value::Int(1));
+    for item in items {
+        acc = crate::eval::operations::apply_binop_builtin(crate::types::BinOp::Mul, &acc, &item)?;
+    }
+    Ok(acc)
+}
+
+/// `math.dist(p, q)` — Euclidean distance between two equal-length point
+/// sequences.
+fn math_dist(args: &[Value]) -> EvalResult {
+    let p = crate::eval::control_flow::iterate_value(need_arg("dist", args, 0)?)?;
+    let q = crate::eval::control_flow::iterate_value(need_arg("dist", args, 1)?)?;
+    if p.len() != q.len() {
+        return Err(value_error("both points must have the same number of dimensions"));
+    }
+    let mut sum = 0.0_f64;
+    for (a, b) in p.iter().zip(q.iter()) {
+        let (Some(a), Some(b)) = (a.as_float(), b.as_float()) else {
+            return Err(type_error("coordinates must be numbers"));
+        };
+        let d = a - b;
+        sum += d * d;
+    }
+    Ok(Value::Float(sum.sqrt()))
+}
+
+/// `math.lcm(*integers)` — least common multiple; `lcm() == 1`, any zero → 0.
+fn math_lcm(args: &[Value]) -> EvalResult {
+    use num_bigint::BigInt;
+    use num_traits::{Signed as _, Zero as _};
+    let mut acc = BigInt::from(1);
+    for arg in args {
+        let n = crate::value::value_as_bigint(arg).ok_or_else(|| {
+            type_error(format!("'{}' object cannot be interpreted as an integer", arg.type_name()))
+        })?;
+        if acc.is_zero() || n.is_zero() {
+            acc = BigInt::from(0);
+            continue;
+        }
+        let g = num_integer::Integer::gcd(&acc, &n);
+        acc = (&acc / &g * &n).abs();
+    }
+    Ok(crate::value::int_from_bigint(acc))
+}
+
+/// `math.isclose(a, b, *, rel_tol=1e-09, abs_tol=0.0)`.
+fn math_isclose(
+    func: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
+    let a = arg_f64(func, args, 0)?;
+    let b = arg_f64(func, args, 1)?;
+    let rel_tol = kwargs.get("rel_tol").and_then(Value::as_float).unwrap_or(1e-9);
+    let abs_tol = kwargs.get("abs_tol").and_then(Value::as_float).unwrap_or(0.0);
+    if rel_tol < 0.0 || abs_tol < 0.0 {
+        return Err(value_error("tolerances must be non-negative"));
+    }
+    let close = if a == b {
+        true
+    } else if a.is_infinite() || b.is_infinite() {
+        false
+    } else {
+        let diff = (a - b).abs();
+        diff <= (rel_tol * b.abs()).max(rel_tol * a.abs()) || diff <= abs_tol
+    };
+    Ok(Value::Bool(close))
+}
+
 /// Read a positive argument for the logarithm family, enforcing the domain.
 fn domain_pos(func: &str, args: &[Value]) -> Result<f64, EvalError> {
     let x = arg_f64(func, args, 0)?;
@@ -256,9 +400,9 @@ impl crate::eval::modules::Module for MathModule {
         _state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
-        _kwargs: &indexmap::IndexMap<String, Value>,
+        kwargs: &indexmap::IndexMap<String, Value>,
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
-        call(func, args)
+        call(func, args, kwargs)
     }
 }

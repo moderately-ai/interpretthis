@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use rustpython_parser::ast::{self, Constant};
+use rustpython_parser::ast::{self, Constant, Expr};
 
 use crate::{
-    error::EvalResult,
+    error::{EvalError, EvalResult},
     eval::eval_expr,
     state::InterpreterState,
     tools::Tools,
@@ -41,16 +41,32 @@ pub fn eval_constant(constant: &Constant) -> Value {
 }
 
 /// Evaluate a list literal `[a, b, c]`.
+/// Evaluate the elements of a list/tuple/set display, splatting any `*expr`
+/// element into its iterated items (`[*a, b, *c]`). A non-starred element
+/// contributes a single value.
+async fn eval_display_elements(
+    state: &mut InterpreterState,
+    elts: &[Expr],
+    tools: &Tools,
+) -> Result<Vec<Value>, EvalError> {
+    let mut items = Vec::with_capacity(elts.len());
+    for elt in elts {
+        if let Expr::Starred(star) = elt {
+            let value = eval_expr(state, &star.value, tools).await?;
+            items.extend(crate::eval::control_flow::iterate_value(&value)?);
+        } else {
+            items.push(eval_expr(state, elt, tools).await?);
+        }
+    }
+    Ok(items)
+}
+
 pub async fn eval_list(
     state: &mut InterpreterState,
     node: &ast::ExprList,
     tools: &Tools,
 ) -> EvalResult {
-    let mut items = Vec::with_capacity(node.elts.len());
-    for elt in &node.elts {
-        items.push(eval_expr(state, elt, tools).await?);
-    }
-    Ok(Value::List(shared_list(items)))
+    Ok(Value::List(shared_list(eval_display_elements(state, &node.elts, tools).await?)))
 }
 
 /// Evaluate a tuple literal `(a, b, c)`.
@@ -59,11 +75,7 @@ pub async fn eval_tuple(
     node: &ast::ExprTuple,
     tools: &Tools,
 ) -> EvalResult {
-    let mut items = Vec::with_capacity(node.elts.len());
-    for elt in &node.elts {
-        items.push(eval_expr(state, elt, tools).await?);
-    }
-    Ok(Value::Tuple(items))
+    Ok(Value::Tuple(eval_display_elements(state, &node.elts, tools).await?))
 }
 
 /// Evaluate a dict literal `{k: v, ...}`. Supports `**dict` unpacking (key=None).
@@ -162,10 +174,7 @@ pub async fn eval_set(
     node: &ast::ExprSet,
     tools: &Tools,
 ) -> EvalResult {
-    let mut candidates = Vec::with_capacity(node.elts.len());
-    for elt in &node.elts {
-        candidates.push(eval_expr(state, elt, tools).await?);
-    }
+    let candidates = eval_display_elements(state, &node.elts, tools).await?;
     build_set(state, candidates, tools).await
 }
 

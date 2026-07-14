@@ -948,6 +948,23 @@ pub(super) async fn try_builtin(
                 return Ok(Some(Value::Dict(IndexMap::new())));
             }
             let mut map = IndexMap::new();
+            // `dict(mapping)` copies key→value; only a non-mapping argument is
+            // read as an iterable of pairs. Iterating a mapping yields its keys,
+            // so the pairs path below would wrongly reject it.
+            let mapping_src = match args.first() {
+                Some(Value::Dict(src) | Value::Counter(src)) => Some(src),
+                Some(Value::DefaultDict(data)) => Some(&data.items),
+                _ => None,
+            };
+            if let Some(src) = mapping_src {
+                for (k, v) in src {
+                    map.insert(k.clone(), v.clone());
+                }
+                for (k, v) in kwargs {
+                    map.insert(ValueKey::String(k.clone().into()), v.clone());
+                }
+                return Ok(Some(Value::Dict(map)));
+            }
             if !args.is_empty() {
                 // dict from iterable of pairs
                 let items = crate::eval::op::iter(state, &args[0], tools).await?;
