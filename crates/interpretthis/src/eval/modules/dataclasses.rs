@@ -429,18 +429,15 @@ fn unpack_field_sentinel(value: &Value) -> Option<FieldSentinel> {
     let default = dict.get(&crate::value::ValueKey::String("default".into())).cloned();
     let default_factory =
         dict.get(&crate::value::ValueKey::String("default_factory".into())).cloned();
-    let init = dict
-        .get(&crate::value::ValueKey::String("init".into()))
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let repr = dict
-        .get(&crate::value::ValueKey::String("repr".into()))
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let compare = dict
-        .get(&crate::value::ValueKey::String("compare".into()))
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    // The flags use Python truthiness (`field(init=0)` -> False), not a strict
+    // bool: as_bool returns None for a non-bool, which then wrongly defaulted to
+    // true. Absent -> the CPython default of true.
+    let flag = |key: &str| {
+        dict.get(&crate::value::ValueKey::String(key.into())).is_none_or(Value::is_truthy)
+    };
+    let init = flag("init");
+    let repr = flag("repr");
+    let compare = flag("compare");
     Some(FieldSentinel { default, default_factory, init, repr, compare })
 }
 
