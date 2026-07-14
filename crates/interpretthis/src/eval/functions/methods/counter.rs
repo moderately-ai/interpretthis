@@ -60,7 +60,9 @@ pub(crate) fn dispatch_counter_method(
             // ties (CPython uses a stable sort on -count).
             entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
             let n = match args.first() {
-                Some(Value::Int(i)) => usize::try_from(*i).unwrap_or(entries.len()),
+                // A negative n is CPython's "empty result"; a huge positive n
+                // that overflows usize just means "all entries" (take clamps).
+                Some(Value::Int(i)) => usize::try_from((*i).max(0)).unwrap_or(entries.len()),
                 Some(Value::Bool(b)) => usize::from(*b),
                 None | Some(Value::None) => entries.len(),
                 Some(_) => {
