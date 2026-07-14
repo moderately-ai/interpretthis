@@ -62,6 +62,56 @@ pub(crate) fn body_has_while(stmts: &[Stmt]) -> bool {
     })
 }
 
+/// Whether a generator body can use the suspend path. True when it has no
+/// `while` loop, or when every `while` is a TOP-LEVEL statement of the body
+/// whose `yield`s are all *direct* statements of the while body — the only
+/// shape the top-level while-resume machinery handles exactly. A `while` nested
+/// inside another block, one with an `else`, or one whose yields sit inside a
+/// nested `if`/`for`/`try` (which `body_index` resumption would re-run) forces
+/// the eager Lazy buffer, preserving the pre-existing behaviour.
+#[must_use]
+pub(crate) fn generator_suspendable(stmts: &[Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::While(w) => {
+                if !w.orelse.is_empty()
+                    || body_has_while(&w.body)
+                    || !while_yields_are_direct(&w.body)
+                {
+                    return false;
+                }
+            }
+            // A `while` nested inside any other statement is not suspendable.
+            other if body_has_while(std::slice::from_ref(other)) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Whether every `yield` in a while body is a direct statement of that body
+/// (so a `body_index` cursor resumes exactly at it). A yield buried in a nested
+/// compound statement would be re-executed from the top on resume.
+fn while_yields_are_direct(body: &[Stmt]) -> bool {
+    body.iter().all(|stmt| {
+        match stmt {
+            // Compound statements that could hide a yield they can't resume at.
+            Stmt::If(_)
+            | Stmt::For(_)
+            | Stmt::While(_)
+            | Stmt::With(_)
+            | Stmt::Try(_)
+            | Stmt::TryStar(_)
+            | Stmt::Match(_) => {
+                !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
+            }
+            // Simple statements (including a bare `yield` expr statement, or an
+            // assignment whose RHS yields) resume cleanly.
+            _ => true,
+        }
+    })
+}
+
 /// Create a suspended generator from a just-bound function frame.
 pub(crate) fn create_generator(
     state: &mut InterpreterState,
@@ -88,6 +138,7 @@ pub(crate) fn create_generator(
             pending_throw: None,
             stmt_index: 0,
             for_stack: Vec::new(),
+            while_resume: None,
         },
     );
     Value::Generator { id }
@@ -342,6 +393,21 @@ async fn run_generator_body(
                 }
             }
         }
+        // Top-level while loop with a suspendable body (see
+        // `generator_suspendable`, which gates the whole generator onto the
+        // suspend path only when this holds).
+        if let Stmt::While(while_node) = stmt {
+            match run_while_suspendable(state, while_node, tools).await {
+                Ok(()) => {
+                    *stmt_index += 1;
+                    continue;
+                }
+                Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                    return Err(EvalError::Signal(ControlFlow::Yield(v)));
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
         match eval_stmt(state, stmt, tools).await {
             Ok(_) => {
@@ -496,6 +562,84 @@ async fn run_for_suspendable(
             frame.for_stack.retain(|fs| fs.target != target);
         }
     }
+    Ok(())
+}
+
+/// Run a top-level `while` loop inside a generator, suspending on `yield` and
+/// resuming exactly where it left off. Mirrors `run_for_suspendable` but keyed
+/// on a single `while_resume` body-index rather than a per-target stack — the
+/// `generator_suspendable` gate guarantees the while is top-level with
+/// direct-statement yields, so a single index is exact.
+async fn run_while_suspendable(
+    state: &mut InterpreterState,
+    node: &rustpython_parser::ast::StmtWhile,
+    tools: &crate::tools::Tools,
+) -> Result<(), EvalError> {
+    use crate::eval::eval_expr;
+
+    // `while_resume == Some(i)` means we suspended on a yield at body statement
+    // `i`; re-enter there and skip the condition check for that first pass.
+    let clear_resume = |state: &mut InterpreterState| {
+        if let Some(&id) = state.active_generator_stack.last() {
+            if let Some(frame) = state.generators.get_mut(&id) {
+                frame.while_resume = None;
+            }
+        }
+    };
+    let (mut body_index, mut resuming) = {
+        let saved = state
+            .active_generator_stack
+            .last()
+            .copied()
+            .and_then(|id| state.generators.get(&id))
+            .and_then(|frame| frame.while_resume);
+        match saved {
+            Some(i) => (i, true),
+            None => (0, false),
+        }
+    };
+
+    loop {
+        if !resuming {
+            let cond = eval_expr(state, &node.test, tools).await?;
+            if !crate::eval::op::truthy(state, &cond, tools).await? {
+                break;
+            }
+        }
+        resuming = false;
+        while body_index < node.body.len() {
+            let stmt = &node.body[body_index];
+            match eval_stmt(state, stmt, tools).await {
+                Ok(_) => {
+                    body_index += 1;
+                    if let Some(&id) = state.active_generator_stack.last() {
+                        if let Some(frame) = state.generators.get_mut(&id) {
+                            frame.resume_at_yield = false;
+                        }
+                    }
+                }
+                Err(EvalError::Signal(ControlFlow::Continue)) => {
+                    body_index = node.body.len(); // end this iteration, re-check
+                }
+                Err(EvalError::Signal(ControlFlow::Break)) => {
+                    clear_resume(state);
+                    return Ok(());
+                }
+                Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                    if let Some(&id) = state.active_generator_stack.last() {
+                        if let Some(frame) = state.generators.get_mut(&id) {
+                            frame.resume_at_yield = true;
+                            frame.while_resume = Some(body_index); // re-enter this stmt
+                        }
+                    }
+                    return Err(EvalError::Signal(ControlFlow::Yield(v)));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        body_index = 0; // iteration finished — re-evaluate the condition
+    }
+    clear_resume(state);
     Ok(())
 }
 

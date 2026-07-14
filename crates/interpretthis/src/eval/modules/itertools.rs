@@ -328,6 +328,80 @@ fn compress_impl(args: &[Value]) -> EvalResult {
 
 /// `takewhile(predicate, iterable)`: yield items until predicate returns
 /// falsy. Re-enters the evaluator for each predicate call.
+/// `islice(iterable, stop)` / `islice(iterable, start, stop[, step])` with lazy
+/// consumption for generator/lazy-iterator inputs — it pulls at most `stop`
+/// items via the generator's single-step primitive rather than materialising
+/// the whole (possibly infinite) input. Non-lazy inputs use the eager path.
+async fn islice_impl(
+    state: &mut crate::state::InterpreterState,
+    args: &[Value],
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let input = need_arg("islice", args, 0)?;
+    if !matches!(input, Value::Generator { .. } | Value::Lazy { .. }) {
+        return call("islice", args, &indexmap::IndexMap::new());
+    }
+    let bound = |v: Option<&Value>| -> Result<Option<usize>, EvalError> {
+        match v {
+            None | Some(Value::None) => Ok(None),
+            Some(Value::Int(n)) if *n >= 0 => Ok(Some(usize::try_from(*n).unwrap_or(usize::MAX))),
+            Some(Value::Bool(b)) => Ok(Some(usize::from(*b))),
+            _ => Err(value_error(
+                "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.",
+            )),
+        }
+    };
+    let (start, stop, step) = match args.len() {
+        2 => (0usize, bound(args.get(1))?, 1usize),
+        3 => (bound(args.get(1))?.unwrap_or(0), bound(args.get(2))?, 1usize),
+        4 => {
+            let step = match bound(args.get(3))? {
+                Some(0) => {
+                    return Err(value_error(
+                        "Step for islice() must be a positive integer or None.",
+                    ));
+                }
+                Some(s) => s,
+                None => 1,
+            };
+            (bound(args.get(1))?.unwrap_or(0), bound(args.get(2))?, step)
+        }
+        _ => {
+            return Err(
+                InterpreterError::TypeError("islice() requires 2-4 arguments".into()).into()
+            );
+        }
+    };
+    let input = input.clone();
+    let empty = indexmap::IndexMap::new();
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    loop {
+        if stop.is_some_and(|s| idx >= s) {
+            break;
+        }
+        let item = match crate::eval::functions::dispatch_generator_method(
+            state,
+            &input,
+            "__next__",
+            &[],
+            &empty,
+            tools,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
+            Err(e) => return Err(e),
+        };
+        if idx >= start && (idx - start) % step == 0 {
+            out.push(item);
+        }
+        idx += 1;
+    }
+    Ok(Value::List(shared_list(out)))
+}
+
 /// `groupby(iterable, key=None)`: group consecutive elements sharing a key.
 /// Yields `(key, group)` pairs; in our eager model the group materialises as a
 /// list. `key=None` groups by the elements themselves. Only *consecutive* runs
@@ -338,7 +412,7 @@ async fn groupby_impl(
     kwargs: &indexmap::IndexMap<String, Value>,
     tools: &crate::tools::Tools,
 ) -> EvalResult {
-    let items = iterate_value(need_arg("groupby", args, 0)?)?;
+    let items = crate::eval::op::iter(state, need_arg("groupby", args, 0)?, tools).await?;
     let key_fn =
         args.get(1).or_else(|| kwargs.get("key")).filter(|v| !matches!(v, Value::None)).cloned();
     let empty = indexmap::IndexMap::new();
@@ -382,11 +456,43 @@ async fn takewhile_impl(
     tools: &crate::tools::Tools,
 ) -> EvalResult {
     let pred = need_arg("takewhile", args, 0)?.clone();
-    let iter_val = need_arg("takewhile", args, 1)?;
-    let items = iterate_value(iter_val)?;
+    let iter_val = need_arg("takewhile", args, 1)?.clone();
     let kwargs = indexmap::IndexMap::new();
     let mut out = Vec::new();
-    for item in items {
+    // Lazy consumption for a generator input, so `takewhile(pred, infinite())`
+    // stops as soon as the predicate fails instead of draining forever.
+    if matches!(iter_val, Value::Generator { .. } | Value::Lazy { .. }) {
+        loop {
+            let item = match crate::eval::functions::dispatch_generator_method(
+                state,
+                &iter_val,
+                "__next__",
+                &[],
+                &kwargs,
+                tools,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
+                Err(e) => return Err(e),
+            };
+            let verdict = crate::eval::modules::call_callable(
+                state,
+                &pred,
+                std::slice::from_ref(&item),
+                &kwargs,
+                tools,
+            )
+            .await?;
+            if !verdict.is_truthy() {
+                break;
+            }
+            out.push(item);
+        }
+        return Ok(Value::List(shared_list(out)));
+    }
+    for item in iterate_value(&iter_val)? {
         let verdict = crate::eval::modules::call_callable(
             state,
             &pred,
@@ -412,8 +518,8 @@ async fn dropwhile_impl(
     tools: &crate::tools::Tools,
 ) -> EvalResult {
     let pred = need_arg("dropwhile", args, 0)?.clone();
-    let iter_val = need_arg("dropwhile", args, 1)?;
-    let items = iterate_value(iter_val)?;
+    let iter_val = need_arg("dropwhile", args, 1)?.clone();
+    let items = crate::eval::op::iter(state, &iter_val, tools).await?;
     let kwargs = indexmap::IndexMap::new();
     let mut out = Vec::new();
     let mut dropping = true;
@@ -516,6 +622,7 @@ impl crate::eval::modules::Module for ItertoolsModule {
             "accumulate" => accumulate_impl(state, args, kwargs, tools).await,
             "compress" => compress_impl(args),
             "groupby" => groupby_impl(state, args, kwargs, tools).await,
+            "islice" => islice_impl(state, args, tools).await,
             _ => call(func, args, kwargs),
         }
     }

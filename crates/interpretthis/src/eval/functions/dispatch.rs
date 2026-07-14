@@ -207,9 +207,10 @@ pub(crate) async fn call_user_function(
 
     let exec_result = if let Some(body_stmts) = body {
         if is_generator {
-            // Prefer true suspend frames; fall back to eager Lazy buffer when
-            // the body uses `while` (gap-generator-while-loop-suspend-state).
-            let use_suspend = !super::generators::body_has_while(body_stmts.as_slice());
+            // Prefer true suspend frames. A `while` loop is suspendable only in
+            // the top-level, direct-yield shape; other while shapes still fall
+            // back to the eager Lazy buffer (gap-generator-while-loop-suspend-state).
+            let use_suspend = super::generators::generator_suspendable(body_stmts.as_slice());
             if use_suspend {
                 let mut locals = rustc_hash::FxHashMap::default();
                 for name in &touched {

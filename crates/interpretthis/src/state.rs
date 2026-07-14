@@ -40,6 +40,12 @@ pub struct GeneratorFrame {
     pub stmt_index: usize,
     /// Nested for-loop / yield-from resume states (innermost last).
     pub for_stack: Vec<GeneratorForState>,
+    /// Resume index within a suspended top-level `while` loop's body. `Some(i)`
+    /// means "re-enter the while body at statement `i` without re-checking the
+    /// condition" (we suspended on a `yield` there); `None` means no while is
+    /// mid-suspension. Only top-level whiles with direct-statement yields take
+    /// this path (see `generator_suspendable`); anything else stays eager.
+    pub while_resume: Option<usize>,
 }
 
 /// Resume state for a `for` loop that suspended on `yield` in its body.
