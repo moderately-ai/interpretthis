@@ -81,6 +81,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "filter",
         "map",
         "repr",
+        "ascii",
         "hash",
         "id",
         "input",

@@ -236,7 +236,20 @@ fn render_dataclass(
 }
 
 fn ascii_escape(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii() { c.to_string() } else { format!("\\u{:04x}", c as u32) })
-        .collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let cp = c as u32;
+        if c.is_ascii() {
+            out.push(c);
+        } else if cp < 0x100 {
+            // CPython escapes non-ASCII code points below 256 as `\xHH`.
+            let _ = write!(out, "\\x{cp:02x}");
+        } else if cp < 0x10000 {
+            let _ = write!(out, "\\u{cp:04x}");
+        } else {
+            let _ = write!(out, "\\U{cp:08x}");
+        }
+    }
+    out
 }

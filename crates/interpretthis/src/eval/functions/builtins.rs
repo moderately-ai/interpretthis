@@ -1305,6 +1305,18 @@ pub(super) async fn try_builtin(
             .await?;
             Ok(Some(Value::String(rendered.into())))
         }
+        "ascii" => {
+            // Like repr(), but every non-ASCII code point is backslash-escaped.
+            check_arg_count(name, args, 1, 1)?;
+            let rendered = crate::eval::render::render(
+                state,
+                &args[0],
+                crate::eval::render::RenderMode::Ascii,
+                tools,
+            )
+            .await?;
+            Ok(Some(Value::String(rendered.into())))
+        }
         "hash" => {
             check_arg_count(name, args, 1, 1)?;
             // Route through `op::hash` so user-class `__hash__` runs; the
