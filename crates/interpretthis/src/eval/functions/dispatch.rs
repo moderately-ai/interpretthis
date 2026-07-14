@@ -62,6 +62,12 @@ pub(crate) async fn call_user_function(
         && func_def.assigned_names.is_empty()
         && func_def.global_names.is_empty()
         && !func_def.is_generator
+        // A nested def with a non-empty closure needs its closure overlay
+        // applied — the fast path runs the body against the parent scope, so
+        // an escaped closure (`def outer(): x=1; def inner(): return x`) would
+        // see no `x`. Module-level defs resolve free names to the live module
+        // globals via LEGB, so their closure needs no overlay.
+        && (func_def.closure.is_empty() || func_def.is_module_level)
     {
         let func_name = func_def.name.clone();
         let body = state.function_bodies.get(&func_name).cloned();
