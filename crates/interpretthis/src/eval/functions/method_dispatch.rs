@@ -410,6 +410,19 @@ fn re_match_methods(
         .map(MethodOutcome::pure)
 }
 
+fn re_pattern_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::RePattern(p) = obj else {
+        return Err(type_mismatch("re.Pattern"));
+    };
+    crate::eval::modules::re::dispatch_pattern_method(p, method, args, kwargs)
+        .map(MethodOutcome::pure)
+}
+
 fn hash_digest_methods(
     obj: &mut Value,
     method: &str,
@@ -447,6 +460,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Time(_) => Some(time_methods),
         Value::TimeDelta(_) => Some(timedelta_methods),
         Value::ReMatch(_) => Some(re_match_methods),
+        Value::RePattern(_) => Some(re_pattern_methods),
         Value::HashDigest { .. } => Some(hash_digest_methods),
         _ => None,
     }

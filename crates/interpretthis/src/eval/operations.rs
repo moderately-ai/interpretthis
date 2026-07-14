@@ -1110,6 +1110,9 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             }
             af.iter().all(|(name, va)| bf.get(name).is_some_and(|vb| values_equal(va, vb)))
         }
+        // CPython caches compiled patterns, so `re.compile(p) == re.compile(p)`
+        // is True (same cached object). We model that by comparing sources.
+        (Value::RePattern(a), Value::RePattern(b)) => a == b,
         _ => false,
     }
 }

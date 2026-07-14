@@ -455,6 +455,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::ReMatch(m) => {
             16 + m.groups.iter().flatten().map(|g| g.text.len() + 16).sum::<usize>()
         }
+        Value::RePattern(p) => 16 + p.len(),
         Value::Instance(inst) => {
             16 + inst.class_name.len()
                 + inst

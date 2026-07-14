@@ -425,7 +425,10 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
         }
         Value::Type(type_name) | Value::ExceptionType(type_name) => {
             if attr_name == "__name__" || attr_name == "__qualname__" {
-                Ok(Value::String(type_name.clone().into()))
+                // Both `__name__` and `__qualname__` are the bare class name;
+                // the module qualifier on `statistics.StatisticsError` and
+                // friends belongs only to the traceback rendering.
+                Ok(Value::String(Value::short_type_name(type_name).to_string().into()))
             } else {
                 Err(attribute_error("type", attr_name))
             }
@@ -445,6 +448,14 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
             }
         }
         Value::Module(module) => crate::eval::modules::module_member(module, attr_name),
+        // `re.compile(p).pattern` reads the source back.
+        Value::RePattern(pattern) => {
+            if attr_name == "pattern" {
+                Ok(Value::String((**pattern).clone().into()))
+            } else {
+                Err(attribute_error("re.Pattern", attr_name))
+            }
+        }
         // Constructor classmethods: `f = datetime.strptime` (no call yet).
         // Live calls `datetime.strptime(...)` are handled in eval_call's
         // method path via the same registry — keep both in sync.

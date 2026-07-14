@@ -25,13 +25,14 @@ use crate::{
 
 /// Whether `re` provides a function named `name`.
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "findall" | "sub" | "split" | "match" | "search" | "fullmatch")
+    matches!(name, "findall" | "sub" | "split" | "match" | "search" | "fullmatch" | "compile")
 }
 
 /// Invoke a `re` function. `sub`/`split` accept their `count`/`maxsplit`
 /// arguments positionally or by keyword, so kwargs are threaded through.
 pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     match func {
+        "compile" => compile_pattern(func, args),
         "findall" => findall(args),
         "sub" => sub(func, args, kwargs),
         "split" => split(func, args, kwargs),
@@ -62,7 +63,43 @@ fn count_arg(args: &[Value], pos: usize, kwargs: &IndexMap<String, Value>, key: 
 /// Compile a pattern, mapping a syntax error to a Python-style `re.error`.
 fn compile(pattern: &str) -> Result<Regex, EvalError> {
     Regex::new(pattern)
-        .map_err(|e| EvalError::Exception(ExceptionValue::new("error", format!("{e}"))))
+        .map_err(|e| EvalError::Exception(ExceptionValue::new("re.error", format!("{e}"))))
+}
+
+/// `re.compile(pattern)` — validate the pattern (raising `re.error` on a bad
+/// one) and return a compiled [`Value::RePattern`]. The pattern source is
+/// stored; the pattern's methods recompile on each call, matching observable
+/// behaviour without holding a non-`Clone`/non-`Serialize` engine handle in
+/// the `Value` enum.
+fn compile_pattern(func: &str, args: &[Value]) -> EvalResult {
+    let pattern = arg_str(func, args, 0)?;
+    // Validate eagerly so `re.compile("(")` raises here, as CPython does,
+    // rather than deferring the error to first use.
+    compile(pattern)?;
+    Ok(Value::RePattern(Box::new(pattern.to_string())))
+}
+
+/// Dispatch a method call on a compiled pattern (`pat.search(s)`, etc.). Each
+/// method delegates to the module-level function with the stored pattern
+/// spliced in as the leading positional argument.
+pub fn dispatch_pattern_method(
+    pattern: &str,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> EvalResult {
+    match method {
+        "match" | "search" | "fullmatch" | "findall" | "sub" | "split" => {
+            let mut full = Vec::with_capacity(args.len() + 1);
+            full.push(Value::String(pattern.to_string().into()));
+            full.extend_from_slice(args);
+            call(method, &full, kwargs)
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'re.Pattern' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
 }
 
 /// `re.findall(pattern, string)` — all non-overlapping matches. With no capture
@@ -379,6 +416,12 @@ pub struct ReModule;
 impl crate::eval::modules::Module for ReModule {
     fn name(&self) -> &'static str {
         "re"
+    }
+    fn constant(&self, name: &str) -> Option<Value> {
+        // `re.error` — raised on a bad pattern. Unlike statistics/json it
+        // subclasses Exception directly, not ValueError. Stored qualified so
+        // the traceback reads `re.error:`; `type(e).__name__` is `error`.
+        (name == "error").then(|| Value::ExceptionType("re.error".to_string()))
     }
     fn has_function(&self, name: &str) -> bool {
         has_function(name)

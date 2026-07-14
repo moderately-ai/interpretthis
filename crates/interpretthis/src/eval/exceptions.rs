@@ -365,6 +365,12 @@ pub(crate) fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool
             "FileNotFoundError" | "PermissionError" | "TimeoutError" | "IOError" => "OSError",
             "UnicodeDecodeError" | "UnicodeEncodeError" | "UnicodeTranslateError" => "UnicodeError",
             "UnicodeError" => "ValueError",
+            // Stdlib module exception types. Stored module-qualified (the
+            // traceback wording) but placed in the hierarchy so `except
+            // ValueError` / `isinstance(e, ValueError)` honour the real
+            // CPython base. `re.error` subclasses Exception directly.
+            "statistics.StatisticsError" | "json.decoder.JSONDecodeError" => "ValueError",
+            "re.error" => "Exception",
             "NotImplementedError" | "RecursionError" => "RuntimeError",
             "AssertionError" | "AttributeError" | "NameError" | "TypeError" | "ValueError"
             | "RuntimeError" | "OSError" | "LookupError" | "ArithmeticError" | "StopIteration"

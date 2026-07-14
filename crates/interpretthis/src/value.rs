@@ -357,6 +357,13 @@ pub enum Value {
     /// Value enum slot (every clone, every push, every match arm) at the
     /// cost of one heap indirection for the rare re-match path.
     ReMatch(Box<MatchValue>),
+    /// A compiled regular expression, returned by `re.compile(pattern)`.
+    /// Carries the pattern source; its methods (`.match`, `.search`,
+    /// `.fullmatch`, `.findall`, `.sub`, `.split`) delegate to the `re`
+    /// module functions with the stored pattern as the leading argument,
+    /// and `.pattern` reads the source back. Boxed to keep the enum slot
+    /// narrow, mirroring `ReMatch`.
+    RePattern(Box<String>),
     /// A `super()` proxy. Carries the defining class whose
     /// MRO slot we're resuming from plus the bound `self` instance.
     /// Method calls on a `Super` value walk the MRO starting from the
@@ -1296,6 +1303,7 @@ impl Value {
             | Self::ModuleFunction { .. }
             | Self::Date(_)
             | Self::ReMatch(_)
+            | Self::RePattern(_)
             | Self::Super { .. }
             | Self::DateTime { .. }
             | Self::Time(_)
@@ -1380,6 +1388,7 @@ impl Value {
             | Self::UnboundClassMethod { .. } => "builtin_function_or_method",
             Self::Date(_) => "date",
             Self::ReMatch(_) => "re.Match",
+            Self::RePattern(_) => "re.Pattern",
             Self::Super { .. } => "super",
             Self::Counter(_) => "Counter",
             Self::DateTime { .. } => "datetime",
@@ -1804,6 +1813,10 @@ impl fmt::Display for Value {
                 }
             },
             Self::LruCache(_) => write!(f, "<functools._lru_cache_wrapper>"),
+            // CPython: `str(re.compile('a+b'))` == "re.compile('a+b')". The
+            // pattern is rendered via its string repr, so backslashes and
+            // quotes escape as in `re.compile('(\\d+)')`.
+            Self::RePattern(p) => write!(f, "re.compile({})", python_str_repr(p)),
         }
     }
 }
@@ -1818,12 +1831,53 @@ fn format_decimal_str(f: &mut fmt::Formatter<'_>, d: &bigdecimal::BigDecimal) ->
     write!(f, "{}", d.to_plain_string())
 }
 
+/// Python `repr()` of a string: CPython's quote selection plus escaping.
+/// Single quotes are preferred, switching to double only when the string
+/// contains a single quote but no double quote. Backslash, the active quote,
+/// and the C0/DEL control characters are escaped; printable Unicode is kept
+/// verbatim (matching `str.isprintable()` for the common ranges).
+#[must_use]
+pub fn python_str_repr(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                use std::fmt::Write as _;
+                // C0 controls and DEL render as \xNN, as CPython does.
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 impl Value {
+    /// The bare class name from a possibly module-qualified type name.
+    /// `"statistics.StatisticsError"` → `"StatisticsError"`; a name with no
+    /// dot passes through. This is CPython's `type.__name__` (never the
+    /// module-qualified form, which only appears in tracebacks).
+    #[must_use]
+    pub fn short_type_name(name: &str) -> &str {
+        name.rsplit('.').next().unwrap_or(name)
+    }
+
     /// Python `repr()` — strings are quoted, other types match `str()`.
     #[must_use]
     pub fn repr(&self) -> String {
         match self {
-            Self::String(s) => format!("'{s}'"),
+            Self::String(s) => python_str_repr(s),
             // CPython: `repr(date(2026, 1, 1))` == "datetime.date(2026, 1, 1)".
             Self::Date(d) => {
                 use chrono::Datelike;
@@ -1831,8 +1885,12 @@ impl Value {
             }
             // CPython: repr(ValueError('boom')) == "ValueError('boom')".
             // Single-quoted message, type prefix. Display is str() form
-            // (just the message); repr surfaces the typed shape.
-            Self::Exception(e) => format!("{}('{}')", e.type_name, e.message),
+            // (just the message); repr surfaces the typed shape. The type
+            // prefix is the bare class name — CPython's exception repr never
+            // qualifies with the module, even for `statistics.StatisticsError`.
+            Self::Exception(e) => {
+                format!("{}('{}')", Self::short_type_name(&e.type_name), e.message)
+            }
             other => format!("{other}"),
         }
     }

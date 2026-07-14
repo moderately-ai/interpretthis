@@ -970,10 +970,14 @@ print(re.sub(r"(\w)", r"\1x", "ab"))"#,
 }
 
 #[tokio::test]
-async fn re_compile_is_unsupported() {
-    // `re.compile` is not implemented — patterns are compiled on every call
-    // site. CPython exposes a `Pattern` object; we have no equivalent type.
-    assert_error("import re\nre.compile(r\"\\d+\")").await;
+async fn re_compile_returns_reusable_pattern() {
+    // `re.compile` yields a `re.Pattern` whose methods bind the pattern; the
+    // underlying engine is still the Rust `regex` crate, recompiled per call.
+    assert_output(
+        "import re\np = re.compile(r\"\\d+\")\nprint(p.findall(\"a1b22c333\"))",
+        "['1', '22', '333']",
+    )
+    .await;
 }
 
 #[test]

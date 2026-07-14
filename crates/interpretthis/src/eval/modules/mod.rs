@@ -223,6 +223,22 @@ pub async fn call_function(
     tools: &crate::tools::Tools,
 ) -> EvalResult {
     let handler = MODULES.get(module).ok_or_else(|| module_not_found(module))?;
+    // A module attribute that is a callable constant — an exception type such
+    // as `statistics.StatisticsError("msg")` — is constructed by calling the
+    // constant, not by the function dispatcher. Function names never collide
+    // with these (they are not reported by `has_function`), so this only fires
+    // for the constructor form.
+    if !handler.has_function(func) {
+        if let Some(value @ Value::ExceptionType(_)) = handler.constant(func) {
+            // Box the future: call_value_as_function can route back here for
+            // module-function callables, so the two async fns are mutually
+            // recursive and need heap indirection to stay finitely sized.
+            return Box::pin(crate::eval::functions::call_value_as_function(
+                state, &value, args, kwargs, tools,
+            ))
+            .await;
+        }
+    }
     handler.call(state, func, args, kwargs, tools).await
 }
 

@@ -199,6 +199,13 @@ impl crate::eval::modules::Module for StatisticsModule {
     fn name(&self) -> &'static str {
         "statistics"
     }
+    fn constant(&self, name: &str) -> Option<Value> {
+        // `statistics.StatisticsError` — a catchable exception type. Stored
+        // module-qualified so the traceback and hierarchy match CPython;
+        // `type(e).__name__` strips back to the bare name.
+        (name == "StatisticsError")
+            .then(|| Value::ExceptionType("statistics.StatisticsError".to_string()))
+    }
     fn has_function(&self, name: &str) -> bool {
         has_function(name)
     }

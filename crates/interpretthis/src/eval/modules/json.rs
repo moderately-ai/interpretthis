@@ -358,6 +358,13 @@ impl crate::eval::modules::Module for JsonModule {
     fn name(&self) -> &'static str {
         "json"
     }
+    fn constant(&self, name: &str) -> Option<Value> {
+        // `json.JSONDecodeError` — raised by `json.loads`. Stored as the
+        // fully-qualified `json.decoder.JSONDecodeError` (CPython's traceback
+        // and hierarchy name); `type(e).__name__` renders `JSONDecodeError`.
+        (name == "JSONDecodeError")
+            .then(|| Value::ExceptionType("json.decoder.JSONDecodeError".to_string()))
+    }
     fn has_function(&self, name: &str) -> bool {
         has_function(name)
     }
