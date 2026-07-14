@@ -54,7 +54,9 @@ pub(crate) fn dispatch_dict_method(
             // CPython: dict.pop(self, key, default=<unspecified>, /) — positional-only.
             reject_kwargs(method, kwargs)?;
             let key = value_to_key(arg1(method, args)?)?;
-            if let Some(val) = map.swap_remove(&key) {
+            // shift_remove (not swap_remove) preserves the insertion order of
+            // the remaining entries, as CPython's dict.pop does.
+            if let Some(val) = map.shift_remove(&key) {
                 let freed = estimate_key_size(&key) + estimate_value_size(&val);
                 return Ok(MethodOutcome::shrank(val, freed));
             }

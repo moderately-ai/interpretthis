@@ -1923,7 +1923,9 @@ fn list_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalErro
 fn dict_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalError> {
     let Value::Dict(map) = container else { unreachable!("dict_del_item only on DICT_TYPE") };
     let key = crate::eval::literals::value_to_key(index)?;
-    let Some(val) = map.swap_remove(&key) else {
+    // shift_remove preserves insertion order (CPython `del d[k]`), unlike
+    // swap_remove which moves the last entry into the hole.
+    let Some(val) = map.shift_remove(&key) else {
         return Err(crate::value::ExceptionValue::key_error(key).into());
     };
     let freed = crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&val);
@@ -2277,7 +2279,9 @@ fn counter_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalE
         unreachable!("counter_del_item only on COUNTER_TYPE")
     };
     let key = crate::eval::literals::value_to_key(index)?;
-    let Some(val) = map.swap_remove(&key) else {
+    // shift_remove preserves insertion order (CPython `del d[k]`), unlike
+    // swap_remove which moves the last entry into the hole.
+    let Some(val) = map.shift_remove(&key) else {
         return Err(crate::value::ExceptionValue::key_error(key).into());
     };
     let freed = crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&val);
@@ -2491,7 +2495,8 @@ fn defaultdict_del_item(container: &mut Value, index: &Value) -> Result<isize, E
         unreachable!("defaultdict_del_item only on DEFAULTDICT_TYPE")
     };
     let key = crate::eval::literals::value_to_key(index)?;
-    let Some(val) = data.items.swap_remove(&key) else {
+    // shift_remove preserves insertion order (CPython `del dd[k]`).
+    let Some(val) = data.items.shift_remove(&key) else {
         return Err(crate::value::ExceptionValue::key_error(key).into());
     };
     let freed = crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&val);
