@@ -44,7 +44,7 @@ pub fn has_function(name: &str) -> bool {
 /// arguments positionally or by keyword, so kwargs are threaded through.
 pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     match func {
-        "compile" => compile_pattern(func, args),
+        "compile" => compile_pattern(func, args, kwargs),
         "escape" => {
             // CPython 3.7+ escapes only the regex special characters; ordinary
             // text (letters, digits, most punctuation) passes through.
@@ -59,16 +59,18 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
             }
             Ok(Value::String(out.into()))
         }
-        "findall" => findall(args),
-        "finditer" => finditer(args),
+        "findall" => findall(args, kwargs),
+        "finditer" => finditer(args, kwargs),
         "sub" => sub(func, args, kwargs),
         "subn" => subn(func, args, kwargs),
         "split" => split(func, args, kwargs),
         "match" => {
-            anchored_search(func, args, /* anchor_start */ true, /* anchor_end */ false)
+            anchored_search(
+                func, args, kwargs, /* anchor_start */ true, /* anchor_end */ false,
+            )
         }
-        "fullmatch" => anchored_search(func, args, true, true),
-        "search" => anchored_search(func, args, false, false),
+        "fullmatch" => anchored_search(func, args, kwargs, true, true),
+        "search" => anchored_search(func, args, kwargs, false, false),
         _ => {
             Err(InterpreterError::AttributeError(format!("module 're' has no attribute '{func}'"))
                 .into())
@@ -94,17 +96,60 @@ fn compile(pattern: &str) -> Result<Regex, EvalError> {
         .map_err(|e| EvalError::Exception(ExceptionValue::new("re.error", format!("{e}"))))
 }
 
+/// Translate the honoured CPython `re` flag bits to the `regex` crate's global
+/// inline-flag prefix (`(?ims)`). IGNORECASE/MULTILINE/DOTALL/VERBOSE map
+/// directly; UNICODE is already the default, and LOCALE/DEBUG/ASCII have no
+/// clean equivalent, so they are accepted and ignored.
+fn flag_prefix(flags: i64) -> String {
+    let mut inline = String::new();
+    if flags & 2 != 0 {
+        inline.push('i'); // IGNORECASE
+    }
+    if flags & 8 != 0 {
+        inline.push('m'); // MULTILINE
+    }
+    if flags & 16 != 0 {
+        inline.push('s'); // DOTALL
+    }
+    if flags & 64 != 0 {
+        inline.push('x'); // VERBOSE
+    }
+    if inline.is_empty() { String::new() } else { format!("(?{inline})") }
+}
+
+/// Compile `pattern` with CPython `re` flags applied as a global inline prefix.
+fn compile_with_flags(pattern: &str, flags: i64) -> Result<Regex, EvalError> {
+    let prefix = flag_prefix(flags);
+    if prefix.is_empty() { compile(pattern) } else { compile(&format!("{prefix}{pattern}")) }
+}
+
+/// Read a `flags` argument (positional at `idx`, or the `flags` keyword),
+/// defaulting to 0. A bool coerces per Python's int tower.
+fn flags_arg(args: &[Value], idx: usize, kwargs: &IndexMap<String, Value>) -> i64 {
+    let v = args.get(idx).or_else(|| kwargs.get("flags"));
+    match v {
+        Some(Value::Int(n)) => *n,
+        Some(Value::Bool(b)) => i64::from(*b),
+        _ => 0,
+    }
+}
+
 /// `re.compile(pattern)` — validate the pattern (raising `re.error` on a bad
 /// one) and return a compiled [`Value::RePattern`]. The pattern source is
 /// stored; the pattern's methods recompile on each call, matching observable
 /// behaviour without holding a non-`Clone`/non-`Serialize` engine handle in
 /// the `Value` enum.
-fn compile_pattern(func: &str, args: &[Value]) -> EvalResult {
+fn compile_pattern(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     let pattern = arg_str(func, args, 0)?;
+    // Bake any flags into the stored source as an inline prefix so the pattern's
+    // methods (which recompile the stored string) carry them without a separate
+    // flags slot on `Value::RePattern`.
+    let prefix = flag_prefix(flags_arg(args, 1, kwargs));
+    let stored = format!("{prefix}{pattern}");
     // Validate eagerly so `re.compile("(")` raises here, as CPython does,
     // rather than deferring the error to first use.
-    compile(pattern)?;
-    Ok(Value::RePattern(Box::new(pattern.to_string())))
+    compile(&stored)?;
+    Ok(Value::RePattern(Box::new(stored)))
 }
 
 /// Dispatch a method call on a compiled pattern (`pat.search(s)`, etc.). Each
@@ -133,10 +178,10 @@ pub fn dispatch_pattern_method(
 /// `re.findall(pattern, string)` — all non-overlapping matches. With no capture
 /// group, each match is the whole match; with one group, the group; with
 /// several, a tuple of groups.
-fn findall(args: &[Value]) -> EvalResult {
+fn findall(args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     let pattern = arg_str("findall", args, 0)?;
     let text = arg_str("findall", args, 1)?;
-    let re = compile(pattern)?;
+    let re = compile_with_flags(pattern, flags_arg(args, 2, kwargs))?;
     let group_count = re.captures_len().saturating_sub(1);
 
     let mut result = Vec::new();
@@ -160,10 +205,10 @@ fn findall(args: &[Value]) -> EvalResult {
 
 /// `re.finditer(pattern, string)` — an iterator of match objects for every
 /// non-overlapping match. Modelled eagerly as a list of `re.Match` values.
-fn finditer(args: &[Value]) -> EvalResult {
+fn finditer(args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     let pattern = arg_str("finditer", args, 0)?;
     let text = arg_str("finditer", args, 1)?;
-    let re = compile(pattern)?;
+    let re = compile_with_flags(pattern, flags_arg(args, 2, kwargs))?;
     let out: Vec<Value> = re
         .captures_iter(text)
         .map(|caps| Value::ReMatch(Box::new(build_match(&caps, &re, text))))
@@ -181,7 +226,7 @@ fn sub(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResu
     if count < 0 {
         return Ok(Value::String(text.into()));
     }
-    let re = compile(pattern)?;
+    let re = compile_with_flags(pattern, flags_arg(args, 4, kwargs))?;
     let translated = translate_python_repl(repl);
     let replaced = if count == 0 {
         re.replace_all(text, translated.as_str())
@@ -198,7 +243,7 @@ fn subn(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalRes
     let repl = arg_str(func, args, 1)?;
     let text = arg_str(func, args, 2)?;
     let count = count_arg(args, 3, kwargs, "count");
-    let re = compile(pattern)?;
+    let re = compile_with_flags(pattern, flags_arg(args, 4, kwargs))?;
     let translated = translate_python_repl(repl);
     let (replaced, made): (String, usize) = if count < 0 {
         (text.to_string(), 0)
@@ -282,7 +327,7 @@ fn split(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalRe
     if maxsplit < 0 {
         return Ok(Value::List(shared_list(vec![Value::String(text.into())])));
     }
-    let re = compile(pattern)?;
+    let re = compile_with_flags(pattern, flags_arg(args, 3, kwargs))?;
     // CPython interleaves the pattern's captured groups between the pieces:
     // `re.split(r'(\s)', 'a b')` -> ['a', ' ', 'b']. A group that did not
     // participate contributes None. Walk the matches manually (the regex
@@ -311,10 +356,16 @@ fn split(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalRe
 /// `re.match`/`re.search`/`re.fullmatch`. Returns a [`Value::ReMatch`] or
 /// `Value::None`. `anchor_start`/`anchor_end` select the variant's anchoring
 /// (match → start; fullmatch → start+end; search → neither).
-fn anchored_search(func: &str, args: &[Value], anchor_start: bool, anchor_end: bool) -> EvalResult {
+fn anchored_search(
+    func: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    anchor_start: bool,
+    anchor_end: bool,
+) -> EvalResult {
     let pattern = arg_str(func, args, 0)?;
     let text = arg_str(func, args, 1)?;
-    let re = compile(pattern)?;
+    let re = compile_with_flags(pattern, flags_arg(args, 2, kwargs))?;
     // The leftmost match: correct for `search`; `match`/`fullmatch` then require
     // it to begin at 0 (and span to the end for `fullmatch`).
     let Some(caps) = re.captures(text) else {
@@ -487,7 +538,25 @@ impl crate::eval::modules::Module for ReModule {
         // `re.error` — raised on a bad pattern. Unlike statistics/json it
         // subclasses Exception directly, not ValueError. Stored qualified so
         // the traceback reads `re.error:`; `type(e).__name__` is `error`.
-        (name == "error").then(|| Value::ExceptionType("re.error".to_string()))
+        if name == "error" {
+            return Some(Value::ExceptionType("re.error".to_string()));
+        }
+        // Compilation flags. Values match CPython's `re` constants so bit-ors
+        // (`re.I | re.M`) combine correctly; `flag_prefix` honours the ones the
+        // `regex` crate can express.
+        let flag = match name {
+            "A" | "ASCII" => 256,
+            "I" | "IGNORECASE" => 2,
+            "L" | "LOCALE" => 4,
+            "M" | "MULTILINE" => 8,
+            "S" | "DOTALL" => 16,
+            "X" | "VERBOSE" => 64,
+            "U" | "UNICODE" => 32,
+            "DEBUG" => 128,
+            "NOFLAG" => 0,
+            _ => return None,
+        };
+        Some(Value::Int(flag))
     }
     fn has_function(&self, name: &str) -> bool {
         has_function(name)
