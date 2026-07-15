@@ -468,6 +468,12 @@ pub(crate) async fn call_value_as_function(
     match func {
         Value::Function(func_def) => call_user_function(state, func_def, args, kwargs, tools).await,
         Value::Lambda(lambda_def) => call_lambda(state, lambda_def, args, kwargs, tools).await,
+        // A class value obtained from an expression (`type(n, b, ns)()`,
+        // `classes[0]()`, `make_class()()`) instantiates, exactly as the
+        // bare-name call path does.
+        Value::Class(class_name) => {
+            crate::eval::classes::instantiate(state, class_name, args, kwargs, tools).await
+        }
         // A bound builtin method (`d.get`, `s.upper`, ...) passed as
         // a first-class callable. Two receiver shapes:
         //
