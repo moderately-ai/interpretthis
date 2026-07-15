@@ -296,9 +296,10 @@ pub(crate) async fn try_match_handlers(
         let (value, new_error) = match body_result {
             Ok(val) => (val, None),
             // Any error from the handler body — signal or new exception —
-            // replaces the original exception and is returned for the try
-            // to surface after finally runs.
-            Err(err) => (Value::None, Some(err)),
+            // replaces the original exception and is returned for the try to
+            // surface after finally runs. A fresh exception chains the one being
+            // handled as its implicit `__context__` (PEP 3134).
+            Err(err) => (Value::None, Some(chain_context(err, exc))),
         };
 
         if let Some(ref name) = h.name {
@@ -308,6 +309,28 @@ pub(crate) async fn try_match_handlers(
         return Ok(Some((value, new_error)));
     }
     Ok(None)
+}
+
+/// Attach the exception being handled as the implicit `__context__` of a fresh
+/// exception raised inside the handler body (PEP 3134). Only Python-level
+/// exceptions are chained — signals pass through, and an internal
+/// `InterpreterError` is left untouched to preserve its line-stamp and fatal
+/// disposition. A bare/explicit re-raise of the same exception, and an
+/// exception that already carries a `__context__` (set by an inner handler),
+/// are not overwritten. `__context__` lives in the `fields` map alongside
+/// `__suppress_context__`, so no `ExceptionValue` struct field is needed.
+fn chain_context(err: EvalError, handled: &ExceptionValue) -> EvalError {
+    let EvalError::Exception(mut exc) = err else {
+        return err;
+    };
+    let already_chained = exc.fields.contains_key("__context__");
+    let is_reraise = exc.type_name == handled.type_name
+        && exc.message == handled.message
+        && exc.args == handled.args;
+    if !already_chained && !is_reraise {
+        exc.fields.insert("__context__".to_string(), Value::Exception(Box::new(handled.clone())));
+    }
+    EvalError::Exception(exc)
 }
 
 /// Check if an exception matches an except handler.
@@ -516,17 +539,12 @@ pub async fn eval_raise(
         None
     };
 
-    // Implicit `__context__` chaining: if we're inside an except handler and
-    // the raise has NO explicit `from`, CPython attaches the active exception
-    // as the new one's `__context__`. An explicit `from` (including `from
-    // None`) suppresses that. We collapse `__context__` and `__cause__` into
-    // the same `cause` field for the user-visible model.
-    let implicit_context = if has_explicit_from {
-        None
-    } else {
-        state.active_exception_stack.last().cloned().map(Box::new)
-    };
-    let attached_cause = cause.or(implicit_context);
+    // `__cause__` is only the explicit `from` value; the implicit `__context__`
+    // (the exception being handled) is attached separately by `chain_context`
+    // when this raise surfaces as an except-handler body error, so `__cause__`
+    // and `__context__` stay distinct (a plain `raise X` inside a handler has
+    // `__cause__ is None` but a non-None `__context__`).
+    let attached_cause = cause;
 
     // CPython's `__suppress_context__` is set by every explicit `raise X from Y`
     // (including `from None`) and cleared by a plain `raise`. It lives in the

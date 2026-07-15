@@ -515,8 +515,9 @@ fn attribute_error(type_name: &str, attr_name: &str) -> EvalError {
 ///   explicitly; user-constructed exceptions (`ValueError('a','b')`) carry the exact args.
 /// - `.__cause__` — the chained `raise X from Y` cause; `None` if not set. Returns a
 ///   `Value::Exception` wrapping the cause so user code can walk the chain.
-/// - `.__context__` — same as `__cause__` in our model (we don't distinguish implicit context from
-///   explicit cause).
+/// - `.__context__` — the implicit chain: the exception being handled when this one was raised
+///   (PEP 3134), attached by `chain_context`. Distinct from `__cause__`; `None` if this exception
+///   was not raised while another was being handled.
 /// - `.message` — legacy CPython 2 alias for backward compat with code that hasn't migrated; just
 ///   the message body.
 fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
@@ -544,9 +545,13 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
         "value" if exc.type_name == "StopIteration" || exc.type_name == "StopAsyncIteration" => {
             Ok(exc.args.first().cloned().unwrap_or(Value::None))
         }
-        "__cause__" | "__context__" => {
+        // `__cause__` is the explicit `raise X from Y` cause; `__context__` is
+        // the implicit chain (the exception being handled when X was raised),
+        // stored in the fields map by `chain_context`. They are distinct.
+        "__cause__" => {
             Ok(exc.cause.as_ref().map_or(Value::None, |cause| Value::Exception(cause.clone())))
         }
+        "__context__" => Ok(exc.fields.get("__context__").cloned().unwrap_or(Value::None)),
         // Set by `raise X from Y` (stored in the attribute map); defaults to
         // False for any exception that wasn't raised with an explicit cause.
         "__suppress_context__" => {
