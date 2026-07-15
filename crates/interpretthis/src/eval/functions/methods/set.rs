@@ -34,9 +34,10 @@ pub(crate) fn dispatch_set_method(
 
     match method {
         "copy" => Ok(MethodOutcome::pure(Value::Set(items.clone()))),
+        // union/intersection/difference accept any number of iterable args.
         "union" => {
             let mut result = items.clone();
-            if let Some(arg) = args.first() {
+            for arg in args {
                 for item in iterate_value(arg)? {
                     if !set_contains(&result, &item) {
                         result.push(item);
@@ -46,21 +47,25 @@ pub(crate) fn dispatch_set_method(
             Ok(MethodOutcome::pure(Value::Set(result)))
         }
         "intersection" => {
-            let Some(arg) = args.first() else {
-                return Ok(MethodOutcome::pure(Value::Set(items.clone())));
-            };
-            let other = iterate_value(arg)?;
-            let result: Vec<Value> =
-                items.iter().filter(|v| set_contains(&other, v)).cloned().collect();
+            let others: Vec<Vec<Value>> =
+                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
+            // Keep an element only if it is present in every argument iterable.
+            let result: Vec<Value> = items
+                .iter()
+                .filter(|v| others.iter().all(|o| set_contains(o, v)))
+                .cloned()
+                .collect();
             Ok(MethodOutcome::pure(Value::Set(result)))
         }
         "difference" => {
-            let Some(arg) = args.first() else {
-                return Ok(MethodOutcome::pure(Value::Set(items.clone())));
-            };
-            let other = iterate_value(arg)?;
-            let result: Vec<Value> =
-                items.iter().filter(|v| !set_contains(&other, v)).cloned().collect();
+            let others: Vec<Vec<Value>> =
+                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
+            // Drop an element if it appears in any argument iterable.
+            let result: Vec<Value> = items
+                .iter()
+                .filter(|v| !others.iter().any(|o| set_contains(o, v)))
+                .cloned()
+                .collect();
             Ok(MethodOutcome::pure(Value::Set(result)))
         }
         "issubset" => {
@@ -140,25 +145,27 @@ pub(crate) fn dispatch_set_method(
             Ok(MethodOutcome::pure(Value::Set(result)))
         }
         "update" => {
-            let Some(arg) = args.first() else { return Ok(MethodOutcome::pure(Value::None)) };
-            let new_items = iterate_value(arg)?;
             let mut added = 0usize;
-            for item in new_items {
-                if !set_contains(items, &item) {
-                    added += estimate_value_size(&item);
-                    items.push(item);
+            for arg in args {
+                for item in iterate_value(arg)? {
+                    if !set_contains(items, &item) {
+                        added += estimate_value_size(&item);
+                        items.push(item);
+                    }
                 }
             }
             Ok(MethodOutcome::grew(Value::None, added))
         }
         "intersection_update" => {
-            let other = iterate_value(arg1(method, args)?)?;
-            items.retain(|v| set_contains(&other, v));
+            let others: Vec<Vec<Value>> =
+                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
+            items.retain(|v| others.iter().all(|o| set_contains(o, v)));
             Ok(MethodOutcome::pure(Value::None))
         }
         "difference_update" => {
-            let other = iterate_value(arg1(method, args)?)?;
-            items.retain(|v| !set_contains(&other, v));
+            let others: Vec<Vec<Value>> =
+                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
+            items.retain(|v| !others.iter().any(|o| set_contains(o, v)));
             Ok(MethodOutcome::pure(Value::None))
         }
         "symmetric_difference_update" => {

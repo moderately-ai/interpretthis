@@ -1,0 +1,33 @@
+a = {1, 2, 3, 4}
+b = {3, 4, 5, 6}
+print(sorted(a & b))
+print(sorted(a | b))
+print(sorted(a - b))
+print(sorted(a ^ b))
+print(a.issubset({1,2,3,4,5}))
+print(a.issuperset({1,2}))
+print(a.isdisjoint({7,8}))
+print(sorted(a.union(b, {7})))
+print(sorted(a.intersection({2,3}, {3,4})))
+print(len(a), 1 in a, 9 in a)
+c = a.copy()
+c.add(10)
+print(sorted(c), sorted(a))
+c.discard(100)
+c.remove(10)
+print(sorted(c))
+print(type(a & b).__name__)
+frozen = frozenset([1,2,3])
+print(sorted(frozen | {4}))
+print(sorted({x for x in range(10) if x % 3 == 0}))
+print(sorted(set("hello") & set("world")))
+print(sorted(set(range(5)).symmetric_difference(range(3,8))))
+s = {1,2,3,4}
+s.update({5},{6})
+print(sorted(s))
+s2 = {1,2,3,4}
+s2.intersection_update({2,3,4},{3,4})
+print(sorted(s2))
+s3 = {1,2,3,4}
+s3.difference_update({2},{3})
+print(sorted(s3))
