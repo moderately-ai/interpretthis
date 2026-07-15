@@ -19,6 +19,68 @@ use crate::{
 // FunctionDef
 // ---------------------------------------------------------------------------
 
+/// Resolve a nested `def`'s `nonlocal` cell and reader-refresh list.
+///
+/// Kept `#[inline(never)]` and out of `eval_function_def`'s body so the added
+/// code does not perturb the binary layout of the delicately-budgeted recursion
+/// path (the `deep_recursion` canary is layout-sensitive).
+///
+/// Returns `(nonlocal_names, nonlocal_cell_id, cell_refreshes)`:
+/// - sibling closures over the same `nonlocal` name share one cell (reusing the
+///   enclosing frame's existing cell), giving CPython's shared-cell identity;
+/// - `cell_refreshes` names the free (read-only) closure variables an enclosing
+///   frame already backs with a cell, so a reader picks up sibling writes.
+#[inline(never)]
+fn resolve_closure_cells(
+    state: &mut InterpreterState,
+    node: &ast::StmtFunctionDef,
+    closure: &BTreeMap<String, Value>,
+) -> (Vec<String>, Option<u64>, Vec<(String, u64)>) {
+    let nonlocal_names = collect_nonlocal_names(&node.body);
+    let nonlocal_cell_id = if nonlocal_names.is_empty() {
+        None
+    } else {
+        let existing = state
+            .frame_cell_owners
+            .last()
+            .and_then(|owners| nonlocal_names.iter().find_map(|n| owners.get(n).copied()));
+        let cell_id = existing.unwrap_or_else(|| {
+            let id = state.next_nonlocal_cell_id;
+            state.next_nonlocal_cell_id = state.next_nonlocal_cell_id.wrapping_add(1);
+            id
+        });
+        let already: std::collections::HashSet<String> = state
+            .nonlocal_cells
+            .get(&cell_id)
+            .map(|c| c.keys().cloned().collect())
+            .unwrap_or_default();
+        let seeds: Vec<(String, Value)> = nonlocal_names
+            .iter()
+            .filter(|n| !already.contains(n.as_str()))
+            .filter_map(|n| state.variables.get(n).map(|v| (n.clone(), v.clone())))
+            .collect();
+        let cell = state.nonlocal_cells.entry(cell_id).or_default();
+        for (n, v) in seeds {
+            cell.insert(n, v);
+        }
+        if let Some(owners) = state.frame_cell_owners.last_mut() {
+            for n in &nonlocal_names {
+                owners.insert(n.clone(), cell_id);
+            }
+        }
+        Some(cell_id)
+    };
+    let cell_refreshes: Vec<(String, u64)> =
+        state.frame_cell_owners.last().map_or_else(Vec::new, |owners| {
+            closure
+                .keys()
+                .filter(|name| !nonlocal_names.contains(name))
+                .filter_map(|name| owners.get(name).map(|&id| (name.clone(), id)))
+                .collect()
+        });
+    (nonlocal_names, nonlocal_cell_id, cell_refreshes)
+}
+
 /// Evaluate a function definition — store it in state, capturing closure.
 ///
 /// Track B2: applies function-level decorators in CPython's bottom-up
@@ -81,34 +143,8 @@ pub async fn eval_function_def(
     let closure: BTreeMap<String, Value> =
         state.variables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-    let nonlocal_names = collect_nonlocal_names(&node.body);
-    let nonlocal_cell_id = if nonlocal_names.is_empty() {
-        None
-    } else {
-        let cell_id = state.next_nonlocal_cell_id;
-        state.next_nonlocal_cell_id = state.next_nonlocal_cell_id.wrapping_add(1);
-        // Seed the cell with current values of the nonlocal names
-        // from the enclosing scope. After call_user_function writes
-        // back, subsequent calls read these (mutated) values.
-        let mut cell: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
-        for n in &nonlocal_names {
-            if let Some(v) = state.variables.get(n) {
-                cell.insert(n.clone(), v.clone());
-            }
-        }
-        state.nonlocal_cells.insert(cell_id, cell);
-        // Register the cell on the enclosing frame's owner map so
-        // that further assignments to these names in the outer
-        // function flow through to the cell (write-through). This
-        // is what makes `outer reassigns n between inner-def and
-        // inner-call` visible to inner on its next call.
-        if let Some(owners) = state.frame_cell_owners.last_mut() {
-            for n in &nonlocal_names {
-                owners.insert(n.clone(), cell_id);
-            }
-        }
-        Some(cell_id)
-    };
+    let (nonlocal_names, nonlocal_cell_id, cell_refreshes) =
+        resolve_closure_cells(state, node, &closure);
 
     // Walk the body for `assigned_names` (what the checkpoint will
     // snapshot at call time) and `global_names` (which the checkpoint
@@ -141,6 +177,7 @@ pub async fn eval_function_def(
         global_names,
         is_module_level,
         docstring,
+        cell_refreshes,
     }));
 
     // Apply decorators in REVERSE order so the textually nearest one
@@ -209,6 +246,9 @@ pub(super) fn apply_nonlocal_cell(
 /// value would otherwise stomp on the live module value at every call.
 /// The corresponding `VariableCheckpoint` also skips them so
 /// subsequent assignments persist to the module scope.
+// Keep this out of `call_user_function`'s frame (its future rides the
+// recursion path) so its body size doesn't count against the host-stack budget.
+#[inline(never)]
 pub(super) fn apply_function_scope(
     state: &mut InterpreterState,
     func_def: &FunctionDef,
@@ -235,8 +275,28 @@ pub(super) fn apply_function_scope(
         state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
     }
     apply_nonlocal_cell(state, func_def, local_scope)?;
+    apply_cell_refreshes(state, func_def, local_scope)?;
     for (name, value) in local_scope {
         state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
+    }
+    Ok(())
+}
+
+/// Refresh free names backed by an enclosing frame's cell from the live cell so
+/// a reader sees sibling closures' `nonlocal` writes. Kept out of
+/// `apply_function_scope` so that hot frame stays small on the recursion path.
+fn apply_cell_refreshes(
+    state: &mut InterpreterState,
+    func_def: &FunctionDef,
+    local_scope: &rustc_hash::FxHashMap<String, Value>,
+) -> Result<(), EvalError> {
+    for (name, cell_id) in &func_def.cell_refreshes {
+        if local_scope.contains_key(name) {
+            continue;
+        }
+        if let Some(value) = state.nonlocal_cells.get(cell_id).and_then(|c| c.get(name)).cloned() {
+            state.set_variable(name, value).map_err(EvalError::Interpreter)?;
+        }
     }
     Ok(())
 }

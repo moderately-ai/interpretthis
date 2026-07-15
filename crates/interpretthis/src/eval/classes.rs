@@ -529,6 +529,7 @@ fn classify_decorated_method(
             // top-level `def` would have been classified.
             is_module_level: false,
             docstring,
+            cell_refreshes: Vec::new(),
         }
     };
     // No decorators: regular method.

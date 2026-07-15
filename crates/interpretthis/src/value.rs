@@ -1801,6 +1801,12 @@ pub struct FunctionDef {
     /// the wrapped function onto the wrapper.
     #[serde(default)]
     pub docstring: Option<String>,
+    /// Free (closure-captured) names that are backed by an enclosing frame's
+    /// `nonlocal` cell at def time — `(name, cell_id)`. At call time these are
+    /// refreshed from the live cell so a *reader* sees a sibling closure's
+    /// `nonlocal` writes (CPython's shared-cell semantics for free variables).
+    #[serde(default)]
+    pub cell_refreshes: Vec<(String, u64)>,
 }
 
 impl FunctionDef {

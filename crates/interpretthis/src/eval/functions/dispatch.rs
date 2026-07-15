@@ -34,7 +34,7 @@ use crate::{
 /// a fresh segment when it runs low, so recursion runs up to the
 /// configured depth limit (which then raises `RecursionError`)
 /// regardless of the caller's base stack size.
-const STACK_RED_ZONE: usize = 512 * 1024;
+const STACK_RED_ZONE: usize = 1024 * 1024;
 const STACK_GROW_SIZE: usize = 32 * 1024 * 1024;
 
 /// Wrap a future so each poll grows the host stack when it runs low.

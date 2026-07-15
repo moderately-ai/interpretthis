@@ -396,6 +396,7 @@ pub(crate) fn call_namedtuple_with_state(
         // immaterial here.
         is_module_level: false,
         docstring: None,
+        cell_refreshes: Vec::new(),
     };
     let mut methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
     methods.insert("__init__".to_string(), init_def);
@@ -464,6 +465,7 @@ pub(crate) fn call_namedtuple_with_state(
             global_names: Vec::new(),
             is_module_level: false,
             docstring: None,
+            cell_refreshes: Vec::new(),
         },
     );
 
@@ -494,6 +496,7 @@ pub(crate) fn call_namedtuple_with_state(
         global_names: Vec::new(),
         is_module_level: false,
         docstring: None,
+        cell_refreshes: Vec::new(),
     };
     let no_defaults = |args: Vec<Param>, kwarg: Option<String>| FunctionParams {
         args,
