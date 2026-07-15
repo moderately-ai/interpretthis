@@ -3,3 +3,7 @@
 # the signal (what broke) is not buried under hundreds of PASS lines.
 status-level = "fail"
 final-status-level = "fail"
+# Every test should finish in well under a second; a test that runs longer than
+# 5s is a bug (an infinite loop, a deadlock, or a runaway allocation), so kill it
+# rather than hang the run.
+slow-timeout = { period = "5s", terminate-after = 1 }

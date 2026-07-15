@@ -1,0 +1,6 @@
+# Tests are allowed to unwrap/expect/panic — a failed assertion is the point of
+# a test, so the crate-wide `deny(clippy::unwrap_used, expect_used, panic)` (see
+# lib.rs) applies only to non-test code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
