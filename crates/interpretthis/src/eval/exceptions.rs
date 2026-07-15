@@ -277,6 +277,17 @@ pub(crate) async fn try_match_handlers(
             continue;
         }
 
+        // PEP 3134: if this exception is caught while an enclosing handler is
+        // still active, that outer exception is this one's implicit
+        // `__context__`. Set it here (at catch time) so it is observable even
+        // when the exception never escapes this handler — e.g. it is caught by
+        // an inner `try` nested inside an outer `except`. `chain_context` below
+        // covers the complementary case (a fresh error escaping this handler).
+        let mut exc = exc.clone();
+        if let Some(outer) = state.active_exception_stack.last().cloned() {
+            set_implicit_context(&mut exc, &outer);
+        }
+
         if let Some(ref name) = h.name {
             state
                 .set_variable(name.as_str(), Value::Exception(Box::new(exc.clone())))
@@ -299,7 +310,7 @@ pub(crate) async fn try_match_handlers(
             // replaces the original exception and is returned for the try to
             // surface after finally runs. A fresh exception chains the one being
             // handled as its implicit `__context__` (PEP 3134).
-            Err(err) => (Value::None, Some(chain_context(err, exc))),
+            Err(err) => (Value::None, Some(chain_context(err, &exc))),
         };
 
         if let Some(ref name) = h.name {
@@ -323,6 +334,16 @@ fn chain_context(err: EvalError, handled: &ExceptionValue) -> EvalError {
     let EvalError::Exception(mut exc) = err else {
         return err;
     };
+    set_implicit_context(&mut exc, handled);
+    EvalError::Exception(exc)
+}
+
+/// Attach `handled` as the implicit `__context__` of `exc` (PEP 3134), unless
+/// `exc` already carries a context (an inner handler set it first) or `exc`
+/// is a re-raise of `handled` itself (comparing structurally, since exceptions
+/// carry no identity). Shared by the catch-time path (`try_match_handlers`) and
+/// the handler-escape path (`chain_context`).
+fn set_implicit_context(exc: &mut ExceptionValue, handled: &ExceptionValue) {
     let already_chained = exc.fields.contains_key("__context__");
     let is_reraise = exc.type_name == handled.type_name
         && exc.message == handled.message
@@ -330,7 +351,6 @@ fn chain_context(err: EvalError, handled: &ExceptionValue) -> EvalError {
     if !already_chained && !is_reraise {
         exc.fields.insert("__context__".to_string(), Value::Exception(Box::new(handled.clone())));
     }
-    EvalError::Exception(exc)
 }
 
 /// Check if an exception matches an except handler.
