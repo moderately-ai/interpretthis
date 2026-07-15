@@ -201,6 +201,13 @@ pub struct InterpreterState {
     /// / lambda frame and decremented on exit. Guarded against
     /// `config.max_recursion_depth`.
     pub call_depth: u32,
+    /// Arc pointers of the containers currently being rendered by
+    /// `eval::render` (CPython's `Py_ReprEnter` reentrancy set). A container
+    /// re-entered while already here is a cycle and renders as `[...]` / `{...}`.
+    /// Lives in state (not a thread-local) because `render` is async and its
+    /// task can migrate worker threads across an await. Transient — not
+    /// serialized.
+    pub repr_active: rustc_hash::FxHashSet<usize>,
     /// Method-call frame stack. Pushed by `call_method` on entry,
     /// popped on exit. Carries the defining class for the executing
     /// method plus the current `self`, so zero-arg `super()` can pick
@@ -348,6 +355,7 @@ impl InterpreterState {
             decimal_prec: 28,
             memory_used_bytes: 0,
             call_depth: 0,
+            repr_active: rustc_hash::FxHashSet::default(),
             method_frame_stack: Vec::new(),
             yield_stack: Vec::new(),
             generators: rustc_hash::FxHashMap::default(),
@@ -621,8 +629,16 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::MemoryView(inner) => 16 + estimate_value_size(inner),
         // List is shared via Arc<Mutex<Vec>>; lock to walk under the
         // guard. Tuple/Set wrap plain Vec<Value> and walk directly.
+        // `try_lock` (not `lock`): the container is already locked either by an
+        // enclosing mutating method (`l.append(l)` holds the receiver lock while
+        // sizing the argument) or by this walk recursing into a self-reference
+        // (the guard is held across the element walk). Either way a re-entrant
+        // `lock` would deadlock; skip it — its slot is already counted by the
+        // parent.
         Value::List(items) | Value::Array { items, .. } => {
-            let guard = items.lock();
+            let Some(guard) = items.try_lock() else {
+                return 0;
+            };
             STRING_HEADER_BYTES
                 + guard.len() * VALUE_SLOT_BYTES
                 + guard.iter().map(estimate_value_size).sum::<usize>()
@@ -642,7 +658,9 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
                 + items.iter().map(estimate_value_size).sum::<usize>()
         }
         Value::Dict(map) => {
-            let map = map.lock();
+            let Some(map) = map.try_lock() else {
+                return 0;
+            };
             48 + map.len() * (INDEXMAP_PER_ENTRY_BYTES + VALUE_SLOT_BYTES)
                 + map
                     .iter()
@@ -673,13 +691,11 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::RePattern(p) => 16 + p.len(),
         Value::Slice(_) => 32,
         Value::Instance(inst) => {
+            let Some(fields) = inst.fields.try_lock() else {
+                return 16 + inst.class_name.len();
+            };
             16 + inst.class_name.len()
-                + inst
-                    .fields
-                    .lock()
-                    .iter()
-                    .map(|(k, v)| k.len() + estimate_value_size(v))
-                    .sum::<usize>()
+                + fields.iter().map(|(k, v)| k.len() + estimate_value_size(v)).sum::<usize>()
         }
         Value::Super { defining_class, instance } => {
             16 + defining_class.len() + estimate_value_size(&Value::Instance((**instance).clone()))

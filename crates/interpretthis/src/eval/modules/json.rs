@@ -120,6 +120,15 @@ fn write_json(
         Value::Float(f) => out.push_str(&float_repr(*f)),
         Value::String(s) => write_json_str(s, fmt.ensure_ascii, out),
         Value::List(items) => {
+            // A list already being serialised higher on the stack is a circular
+            // reference — CPython's json raises ValueError. The guard is held
+            // across the recursive write and dropped at the end of this arm.
+            let Some(_cycle) = crate::cycle::json_enter(std::sync::Arc::as_ptr(items) as usize)
+            else {
+                return Err(
+                    InterpreterError::ValueError("Circular reference detected".into()).into()
+                );
+            };
             // Snapshot the items under the lock — write_json recurses,
             // and we want a stable sequence for the duration of the
             // serialisation.
@@ -130,6 +139,12 @@ fn write_json(
             write_seq_json(items, fmt, depth, out)?;
         }
         Value::Dict(map) => {
+            let Some(_cycle) = crate::cycle::json_enter(std::sync::Arc::as_ptr(map) as usize)
+            else {
+                return Err(
+                    InterpreterError::ValueError("Circular reference detected".into()).into()
+                );
+            };
             // Snapshot so the lock isn't held across the recursive
             // `write_value_json` (a cyclic dict would otherwise deadlock).
             let snapshot = map.lock().clone();

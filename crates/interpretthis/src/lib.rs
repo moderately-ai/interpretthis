@@ -71,6 +71,7 @@ pub mod interpreter;
 pub mod tools;
 pub mod value;
 
+pub(crate) mod cycle;
 pub(crate) mod eval;
 pub(crate) mod parser;
 /// CPython-compatible hashing (and the residual ValueKey-frozenset ordering used

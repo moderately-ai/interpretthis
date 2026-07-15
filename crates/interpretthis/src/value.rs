@@ -2227,6 +2227,11 @@ impl fmt::Display for Value {
                 write!(f, ")")
             }
             Self::List(items) => {
+                // A list already being formatted higher on the stack is a cycle;
+                // emit `[...]` (CPython's reentrancy guard).
+                let Some(_cycle) = crate::cycle::repr_enter(Arc::as_ptr(items) as usize) else {
+                    return write!(f, "[...]");
+                };
                 let snapshot = items.lock().clone();
                 write!(f, "[")?;
                 for (i, item) in snapshot.iter().enumerate() {
@@ -2973,8 +2978,18 @@ impl Value {
             Self::Float(f) => serde_json::json!(*f),
             Self::String(s) => J::String(s.to_string()),
             Self::Bytes(b) => serde_json::json!(b),
-            // List / Tuple / Set / Deque all project to a JSON array.
-            Self::List(items) => array(&items.lock())?,
+            // List / Tuple / Set / Deque all project to a JSON array. A list
+            // already being serialized higher on the stack is a circular
+            // reference — CPython's json raises `ValueError`. The guard fires
+            // (returns None) before the inner `lock`, so there is no deadlock.
+            Self::List(items) => {
+                let Some(_cycle) = crate::cycle::json_enter(Arc::as_ptr(items) as usize) else {
+                    return Err(crate::error::InterpreterError::ValueError(
+                        "Circular reference detected".into(),
+                    ));
+                };
+                array(&items.lock())?
+            }
             Self::Tuple(items) => array(items)?,
             Self::Set(body) => array(&body.lock().iter_ordered())?,
             Self::Frozenset(body) => array(&body.iter_ordered())?,
@@ -2982,7 +2997,14 @@ impl Value {
                 J::Array(items.iter().map(Self::to_json).collect::<Result<_, _>>()?)
             }
             // Dict / Counter / defaultdict project to a JSON object.
-            Self::Dict(map) => json_object(map.lock().iter())?,
+            Self::Dict(map) => {
+                let Some(_cycle) = crate::cycle::json_enter(Arc::as_ptr(map) as usize) else {
+                    return Err(crate::error::InterpreterError::ValueError(
+                        "Circular reference detected".into(),
+                    ));
+                };
+                json_object(map.lock().iter())?
+            }
             Self::Counter(map) => json_object(map.iter())?,
             Self::DefaultDict(data) => json_object(data.items.iter())?,
             // Decimal keeps its exact digits via arbitrary_precision; Fraction

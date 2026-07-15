@@ -206,11 +206,15 @@ fn list_methods(
     let Value::List(items) = obj else {
         return Err(type_mismatch("list"));
     };
-    // If an argument IS this list (`l.extend(l)`), iterating it while the
-    // receiver lock is held would re-lock the same mutex (deadlock); snapshot
-    // any such aliasing argument to an independent copy first (no lock held).
+    // `l.extend(l)` iterates the argument while the receiver lock is held, which
+    // would re-lock the same mutex (deadlock); snapshot an aliasing argument to
+    // an independent copy first. This applies ONLY to methods that *iterate* the
+    // argument — `append`/`insert` STORE it, so `l.append(l)` must keep the
+    // self-reference (snapshotting there would break the cycle).
     let snapped;
-    let args = if args.iter().any(|a| matches!(a, Value::List(l) if Arc::ptr_eq(l, items))) {
+    let args = if method == "extend"
+        && args.iter().any(|a| matches!(a, Value::List(l) if Arc::ptr_eq(l, items)))
+    {
         snapped = args
             .iter()
             .map(|a| match a {
@@ -415,11 +419,14 @@ fn dict_methods(
         }
         return Ok(MethodOutcome::pure(Value::DictView { dict: map.clone(), kind }));
     }
-    // If an argument IS this dict (`d.update(d)`), reading it under the receiver
-    // lock would re-lock the same mutex (deadlock); snapshot such an aliasing
-    // argument to an independent copy first (no lock held).
+    // `d.update(d)` reads the argument under the receiver lock, which would
+    // re-lock the same mutex (deadlock); snapshot an aliasing argument first.
+    // Only for `update`, which iterates the argument — `setdefault`/`pop` STORE
+    // it (`d.setdefault(k, d)` must keep the self-reference).
     let snapped;
-    let args = if args.iter().any(|a| matches!(a, Value::Dict(d) if Arc::ptr_eq(d, map))) {
+    let args = if method == "update"
+        && args.iter().any(|a| matches!(a, Value::Dict(d) if Arc::ptr_eq(d, map)))
+    {
         snapped = args
             .iter()
             .map(|a| match a {

@@ -127,12 +127,22 @@ fn deep_clone_memo(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             b.iter_ordered().iter().map(|v| deep_clone_memo(v, memo)).collect(),
         ),
         Value::Dict(map) => {
-            let snapshot = map.lock().clone();
-            let mut out = IndexMap::with_capacity(snapshot.len());
-            for (k, v) in &snapshot {
-                out.insert(k.clone(), deep_clone_memo(v, memo));
+            // Memoise before recursing so a self-referential dict (`d['x'] = d`)
+            // terminates — the same placeholder-then-backfill the List/Instance
+            // arms use.
+            let key = Arc::as_ptr(map) as usize;
+            if let Some(existing) = memo.get(&key) {
+                return existing.clone();
             }
-            Value::Dict(crate::value::shared_dict(out))
+            let out = crate::value::shared_dict(IndexMap::new());
+            memo.insert(key, Value::Dict(out.clone()));
+            let snapshot = map.lock().clone();
+            let mut cloned = IndexMap::with_capacity(snapshot.len());
+            for (k, v) in &snapshot {
+                cloned.insert(k.clone(), deep_clone_memo(v, memo));
+            }
+            *out.lock() = cloned;
+            Value::Dict(out)
         }
         Value::Counter(map) => {
             let mut out = IndexMap::with_capacity(map.len());

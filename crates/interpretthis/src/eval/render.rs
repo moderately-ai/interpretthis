@@ -141,11 +141,23 @@ pub fn render<'a>(
         // of the outer mode, so we always render children as Repr.
         match value {
             Value::List(items) => {
+                // A container already being rendered higher on the stack is a
+                // cycle — emit `[...]` (CPython's `Py_ReprEnter` guard). The
+                // active set lives in `state` (not a thread-local): `render` is
+                // async and its task can migrate worker threads across an await
+                // under the node / async-Python runtimes, which would corrupt a
+                // thread-local set.
+                let ptr = std::sync::Arc::as_ptr(items) as usize;
+                if !state.repr_active.insert(ptr) {
+                    return Ok("[...]".to_string());
+                }
                 // Snapshot the items under the lock — render_sequence
                 // is async and walks recursively, so we can't hold a
                 // parking_lot guard across awaits.
                 let snapshot = items.lock().clone();
-                Ok(render_sequence(state, &snapshot, "[", "]", tools).await?)
+                let result = render_sequence(state, &snapshot, "[", "]", tools).await;
+                state.repr_active.remove(&ptr);
+                result
             }
             Value::Tuple(items) => {
                 // `render_sequence` here uses an empty closing delimiter, so the
@@ -174,20 +186,17 @@ pub fn render<'a>(
                 }
             }
             Value::Dict(map) => {
-                let mut out = String::from("{");
-                let mut first = true;
-                let snapshot = map.lock().clone();
-                for (k, v) in &snapshot {
-                    if !first {
-                        out.push_str(", ");
-                    }
-                    first = false;
-                    out.push_str(&render(state, &k.to_value(), RenderMode::Repr, tools).await?);
-                    out.push_str(": ");
-                    out.push_str(&render(state, v, RenderMode::Repr, tools).await?);
+                let ptr = std::sync::Arc::as_ptr(map) as usize;
+                if !state.repr_active.insert(ptr) {
+                    return Ok("{...}".to_string());
                 }
-                out.push('}');
-                Ok(out)
+                let snapshot = map.lock().clone();
+                // Await first, then remove the pointer — so an error mid-render
+                // (e.g. a value's `__repr__` raising) still clears the guard and
+                // a later repr of the same dict isn't wrongly `{...}`.
+                let result = render_mapping(state, &snapshot, tools).await;
+                state.repr_active.remove(&ptr);
+                result
             }
             // `str(exc)` mirrors CPython's BaseException.__str__: no args
             // renders empty, a single arg renders as that arg's str, and
@@ -234,6 +243,28 @@ async fn render_sequence(
         out.push_str(&render(state, item, RenderMode::Repr, tools).await?);
     }
     out.push_str(close);
+    Ok(out)
+}
+
+/// Render a snapshot of dict entries as `{k: v, ...}` (keys and values via
+/// `repr`). The `repr`-reentrancy guard is managed by the caller.
+async fn render_mapping(
+    state: &mut InterpreterState,
+    entries: &IndexMap<crate::value::ValueKey, Value>,
+    tools: &Tools,
+) -> Result<String, EvalError> {
+    let mut out = String::from("{");
+    let mut first = true;
+    for (k, v) in entries {
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        out.push_str(&render(state, &k.to_value(), RenderMode::Repr, tools).await?);
+        out.push_str(": ");
+        out.push_str(&render(state, v, RenderMode::Repr, tools).await?);
+    }
+    out.push('}');
     Ok(out)
 }
 

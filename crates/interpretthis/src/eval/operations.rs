@@ -1132,7 +1132,7 @@ pub fn compare_builtin(
     left: &Value,
     right: &Value,
 ) -> Result<bool, EvalError> {
-    match op {
+    let result = match op {
         ast::CmpOp::Eq => {
             let Value::Bool(b) = crate::types::dispatch_eq(state, left, right)? else {
                 unreachable!("dispatch_eq always returns Value::Bool");
@@ -1162,7 +1162,18 @@ pub fn compare_builtin(
         ast::CmpOp::Is | ast::CmpOp::IsNot | ast::CmpOp::In | ast::CmpOp::NotIn => {
             unreachable!("identity/membership ops handled at eval_compare before reaching here")
         }
+    }?;
+    // The structural walk (`recurse_eq`/`values_equal`) hit the recursion limit
+    // — a cyclic or pathologically deep comparison. Its sync `bool` return can't
+    // raise, so it set a flag; surface it as `RecursionError` here, matching
+    // CPython's `Py_EnterRecursiveCall`.
+    if crate::cycle::take_eq_overflow() {
+        return Err(InterpreterError::RecursionLimitExceeded {
+            limit: crate::cycle::EQ_RECURSION_LIMIT,
+        }
+        .into());
     }
+    Ok(result)
 }
 
 /// Equality as `==` computes it, for the equality half of `<=` / `>=`.
@@ -1195,6 +1206,12 @@ pub fn compare_lt(left: &Value, right: &Value) -> Result<bool, EvalError> {
 
 /// Check value equality (Python semantics: True == 1, False == 0).
 fn values_equal(left: &Value, right: &Value) -> bool {
+    // Bound the structural recursion (shares the depth counter with
+    // `recurse_eq`) so distinct cyclic containers stop rather than overflow the
+    // stack; a same-object cycle short-circuits via `Arc::ptr_eq` below.
+    let Some(_depth) = crate::cycle::eq_depth_enter() else {
+        return false;
+    };
     match (left, right) {
         (Value::None, Value::None) => true,
         // Singletons: identical to themselves, distinct from everything else.
@@ -1224,8 +1241,11 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             if std::sync::Arc::ptr_eq(a, b) {
                 return true;
             }
-            let a_guard = a.lock();
-            let b_guard = b.lock();
+            // Snapshot and release the locks before recursing — `values_equal`
+            // re-locks these lists on a self-reference, which would deadlock if
+            // the guard were still held.
+            let a_guard = a.lock().clone();
+            let b_guard = b.lock().clone();
             a_guard.len() == b_guard.len()
                 && a_guard.iter().zip(b_guard.iter()).all(|(x, y)| values_equal(x, y))
         }
@@ -1233,8 +1253,8 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             if std::sync::Arc::ptr_eq(a, b) {
                 return true;
             }
-            let a_guard = a.lock();
-            let b_guard = b.lock();
+            let a_guard = a.lock().clone();
+            let b_guard = b.lock().clone();
             a_guard.len() == b_guard.len()
                 && a_guard.iter().zip(b_guard.iter()).all(|(x, y)| values_equal(x, y))
         }
@@ -1306,8 +1326,10 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             if std::sync::Arc::ptr_eq(&a.fields, &b.fields) {
                 return true;
             }
-            let af = a.fields.lock();
-            let bf = b.fields.lock();
+            // Snapshot and release before recursing — a field may reference the
+            // instance (cycle), and re-locking under the held guard deadlocks.
+            let af = a.fields.lock().clone();
+            let bf = b.fields.lock().clone();
             if af.len() != bf.len() {
                 return false;
             }

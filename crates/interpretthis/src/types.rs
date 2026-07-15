@@ -1627,9 +1627,12 @@ fn list_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     if std::sync::Arc::ptr_eq(a, b) {
         return Some(true);
     }
-    let a_guard = a.lock();
-    let b_guard = b.lock();
-    Some(elementwise_eq(&a_guard, &b_guard))
+    // Snapshot under the locks and release before `elementwise_eq` →
+    // `recurse_eq`, which re-locks these lists on a self-reference (`a == b`
+    // where `a[0] is a`) — holding the lock across it would deadlock.
+    let a = a.lock().clone();
+    let b = b.lock().clone();
+    Some(elementwise_eq(&a, &b))
 }
 
 fn tuple_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
@@ -1699,6 +1702,13 @@ fn elementwise_eq(a: &[Value], b: &[Value]) -> bool {
 /// Recurse into the type dispatch for an inner-element compare. Falls back
 /// to `false` when both sides return `NotImplemented`.
 pub(crate) fn recurse_eq(lhs: &Value, rhs: &Value) -> bool {
+    // Bound the structural recursion so comparing two *distinct* cyclic
+    // containers stops instead of overflowing the host stack (CPython answers
+    // this with RecursionError; a same-object cycle is already caught by the
+    // `Arc::ptr_eq` short-circuits, so it never reaches the limit).
+    let Some(_depth) = crate::cycle::eq_depth_enter() else {
+        return false;
+    };
     let lhs_type = type_of(lhs);
     if let Some(result) = (lhs_type.eq_slot)(lhs, rhs) {
         return result;
