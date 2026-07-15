@@ -30,3 +30,28 @@ lst = [1, 2]
 lst.append(lst)
 lc = copy.deepcopy(lst)
 print(lc[0], lc[1], lc[2] is lc)
+
+# custom __deepcopy__ / __copy__ dispatched at every level.
+import copy as _copy
+
+
+class Custom:
+    def __init__(self, v):
+        self.v = v
+
+    def __deepcopy__(self, memo):
+        return Custom(self.v * 100)
+
+    def __copy__(self):
+        return Custom(self.v + 1)
+
+    def __repr__(self):
+        return f"Custom({self.v})"
+
+
+print(_copy.deepcopy(Custom(5)))
+print(_copy.copy(Custom(5)))
+print(_copy.deepcopy([Custom(1), Custom(2)]))
+print(_copy.deepcopy({"a": Custom(3)}))
+nested = {"outer": [Custom(7)]}
+print(_copy.deepcopy(nested))
