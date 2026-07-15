@@ -595,11 +595,74 @@ impl crate::eval::modules::Module for CollectionsModule {
         func: &str,
         args: &[Value],
         kwargs: &indexmap::IndexMap<String, Value>,
-        _tools: &crate::tools::Tools,
+        tools: &crate::tools::Tools,
     ) -> EvalResult {
         match func {
             "namedtuple" => call_namedtuple_with_state(state, args),
+            // Counter needs the async hash/eq path when tallying instance
+            // elements; the sync `call` handles every other constructor.
+            "Counter" if counter_has_instance_items(args) => {
+                counter_construct_async(state, args, kwargs, tools).await
+            }
             _ => call(func, args, kwargs),
         }
     }
+}
+
+/// Whether `Counter(iterable)`'s positional argument is an iterable of
+/// instances (so it needs `__hash__`/`__eq__` tallying, not `value_to_key`).
+fn counter_has_instance_items(args: &[Value]) -> bool {
+    let Some(arg) = args.first() else { return false };
+    // A dict/Counter mapping argument keeps its existing (already-keyed) entries.
+    if dict_or_counter_contents(arg).is_some() {
+        return false;
+    }
+    iterate_value(arg).is_ok_and(|items| items.iter().any(|v| matches!(v, Value::Instance(_))))
+}
+
+/// `Counter(iterable_of_instances)` — tally by `__hash__`/`__eq__` since an
+/// instance ValueKey compares by identity and cannot merge equal-but-distinct
+/// instances through the sync entry API.
+async fn counter_construct_async(
+    state: &mut crate::state::InterpreterState,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let mut counts: IndexMap<ValueKey, Value> = IndexMap::new();
+    if let Some(arg) = args.first() {
+        for item in iterate_value(arg)? {
+            if matches!(item, Value::Instance(_)) {
+                let h = crate::eval::op::hash(state, &item, tools).await?;
+                let mut found = false;
+                for (k, v) in &mut counts {
+                    if let ValueKey::Instance { hash: kh, value } = k {
+                        if *kh == h && crate::eval::op::eq(state, value, &item, tools).await? {
+                            if let Value::Int(n) = v {
+                                *n += 1;
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    counts.insert(
+                        ValueKey::Instance { hash: h, value: Box::new(item.clone()) },
+                        Value::Int(1),
+                    );
+                }
+            } else {
+                let key = value_to_key(&item)?;
+                let entry = counts.entry(key).or_insert(Value::Int(0));
+                if let Value::Int(n) = entry {
+                    *n += 1;
+                }
+            }
+        }
+    }
+    for (key, value) in kwargs {
+        counts.insert(ValueKey::String(key.as_str().into()), value.clone());
+    }
+    Ok(Value::Counter(counts))
 }

@@ -98,6 +98,19 @@ pub async fn getitem(
             }
         };
     }
+    // `counter[instance]` — async hash/eq lookup; a missing key yields 0
+    // (Counter's `__missing__`), never a KeyError.
+    if let (Value::Counter(map), Value::Instance(_)) = (container, index) {
+        let h = hash(state, index, tools).await?;
+        for (k, v) in map {
+            if let crate::value::ValueKey::Instance { hash: kh, value } = k {
+                if *kh == h && eq(state, value, index, tools).await? {
+                    return Ok(v.clone());
+                }
+            }
+        }
+        return Ok(Value::Int(0));
+    }
     // `Color["RED"]` — an enum class is subscriptable by member name (CPython's
     // `EnumMeta.__getitem__`), raising KeyError for an unknown name.
     if let (Value::Class(class_name), Value::String(member)) = (container, index) {

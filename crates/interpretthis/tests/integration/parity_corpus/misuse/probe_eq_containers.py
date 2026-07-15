@@ -15,3 +15,8 @@ print(Key("x") in s)
 keys = [Key("a"), Key("b"), Key("a")]
 print(len(set(keys)))
 print(sorted(set([Key("m"), Key("n"), Key("m")]), key=lambda k: k.name))
+from collections import Counter
+c = Counter([Key("a"), Key("a"), Key("b")])
+print(c[Key("a")])
+d2 = dict.fromkeys([Key("p"), Key("q")], 0)
+print(len(d2))
