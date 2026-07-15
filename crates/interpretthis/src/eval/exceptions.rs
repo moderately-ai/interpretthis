@@ -528,10 +528,18 @@ pub async fn eval_raise(
     };
     let attached_cause = cause.or(implicit_context);
 
+    // CPython's `__suppress_context__` is set by every explicit `raise X from Y`
+    // (including `from None`) and cleared by a plain `raise`. It lives in the
+    // exception's attribute map rather than a struct field to keep the hot
+    // `ExceptionValue` (inlined in every `EvalError`) small.
+    let set_suppress = |exc: &mut ExceptionValue| {
+        exc.fields.insert("__suppress_context__".to_string(), Value::Bool(has_explicit_from));
+    };
     match exc_val {
         Value::Exception(exc) => {
             let mut exc = *exc;
             exc.cause = attached_cause;
+            set_suppress(&mut exc);
             Err(EvalError::Exception(exc))
         }
         Value::ExceptionType(type_name) => {
@@ -539,6 +547,7 @@ pub async fn eval_raise(
             if let Some(c) = attached_cause {
                 exc = exc.with_cause(*c);
             }
+            set_suppress(&mut exc);
             Err(EvalError::Exception(exc))
         }
         _ => {
@@ -549,6 +558,7 @@ pub async fn eval_raise(
                 if let Some(c) = attached_cause {
                     exc = exc.with_cause(*c);
                 }
+                set_suppress(&mut exc);
                 Err(EvalError::Exception(exc))
             } else {
                 Err(InterpreterError::TypeError(format!(

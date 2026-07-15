@@ -541,6 +541,11 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
         "__cause__" | "__context__" => {
             Ok(exc.cause.as_ref().map_or(Value::None, |cause| Value::Exception(cause.clone())))
         }
+        // Set by `raise X from Y` (stored in the attribute map); defaults to
+        // False for any exception that wasn't raised with an explicit cause.
+        "__suppress_context__" => {
+            Ok(exc.fields.get("__suppress_context__").cloned().unwrap_or(Value::Bool(false)))
+        }
         // NB: no built-in `.message` — Python 3 removed BaseException.message,
         // so `e.message` resolves only to a user-set field (else AttributeError),
         // letting `self.message = ...` in a custom __init__ win.

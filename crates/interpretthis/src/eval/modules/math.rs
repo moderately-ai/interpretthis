@@ -60,6 +60,7 @@ pub fn has_function(name: &str) -> bool {
             | "comb"
             | "perm"
             | "prod"
+            | "fsum"
             | "dist"
             | "lcm"
             | "isclose"
@@ -124,6 +125,7 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
         "comb" => math_comb(args),
         "perm" => math_perm(args),
         "prod" => math_prod(args, kwargs),
+        "fsum" => math_fsum(args),
         "dist" => math_dist(args),
         "lcm" => math_lcm(args),
         "isclose" => math_isclose(func, args, kwargs),
@@ -345,6 +347,65 @@ fn math_prod(args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> Eval
         acc = crate::eval::operations::apply_binop_builtin(crate::types::BinOp::Mul, &acc, &item)?;
     }
     Ok(acc)
+}
+
+/// `math.fsum(iterable)` — exact floating-point sum via Shewchuk's algorithm,
+/// tracking non-overlapping partial sums so the result is correctly rounded
+/// (a naive left-fold of `[0.1] * 10` drifts to 0.9999999999999999). A
+/// non-finite input dominates: `fsum([inf, -inf])` is nan, `fsum([1, inf])`
+/// is inf.
+fn math_fsum(args: &[Value]) -> EvalResult {
+    let items = crate::eval::control_flow::iterate_value(need_arg("fsum", args, 0)?)?;
+    let mut partials: Vec<f64> = Vec::new();
+    // `special_sum` accumulates every non-finite input; `inf_sum` only the
+    // infinities, so `+inf` and `-inf` together make `inf_sum` NaN — the signal
+    // CPython uses to raise "-inf + inf in fsum".
+    let mut special_sum = 0.0_f64;
+    let mut inf_sum = 0.0_f64;
+    for item in items {
+        let Some(mut x) = item.as_float() else {
+            return Err(type_error(format!("must be real number, not {}", item.type_name())));
+        };
+        let xsave = x;
+        let mut i = 0;
+        for j in 0..partials.len() {
+            let mut y = partials[j];
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let hi = x + y;
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                partials[i] = lo;
+                i += 1;
+            }
+            x = hi;
+        }
+        partials.truncate(i);
+        if x != 0.0 {
+            if x.is_finite() {
+                partials.push(x);
+            } else if xsave.is_finite() {
+                // A finite input whose running partial overflowed to infinity.
+                return Err(overflow_error("intermediate overflow in fsum"));
+            } else {
+                if xsave.is_infinite() {
+                    inf_sum += xsave;
+                }
+                special_sum += xsave;
+                partials.clear();
+            }
+        }
+    }
+    if special_sum != 0.0 {
+        if inf_sum.is_nan() {
+            return Err(value_error("-inf + inf in fsum"));
+        }
+        return Ok(Value::Float(special_sum));
+    }
+    // Fold from +0.0 (not `Iterator::sum`, whose empty identity is -0.0) so an
+    // empty or fully-cancelling sum returns +0.0 as CPython does.
+    Ok(Value::Float(partials.iter().copied().fold(0.0_f64, |a, b| a + b)))
 }
 
 /// `math.dist(p, q)` — Euclidean distance between two equal-length point
