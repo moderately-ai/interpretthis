@@ -95,13 +95,14 @@ pub struct GeneratorFrame {
     /// mid-suspension. Only top-level whiles with direct-statement yields take
     /// this path (see `generator_suspendable`); anything else stays eager.
     pub while_resume: Option<usize>,
-    /// Resume position within a suspended top-level `try` block. Tracks
-    /// which phase (body / a matched `except` handler / `else` /
-    /// `finally`) and the statement index within it, so a `yield`
-    /// anywhere in a `try` resumes exactly where it suspended rather than
-    /// re-running the whole statement. `None` means no try is
-    /// mid-suspension.
-    pub try_resume: Option<TryResume>,
+    /// Resume positions for the stack of nested `try` blocks the
+    /// generator is suspended inside. `try_stack[d]` is the position at
+    /// nesting depth `d` (outermost first): which phase (body / matched
+    /// `except` handler / `else` / `finally`) and the statement index
+    /// within it. A `yield` anywhere in any nesting level thus resumes
+    /// exactly where it suspended rather than re-running the statement.
+    /// Empty means no try is mid-suspension.
+    pub try_stack: Vec<TryResume>,
 }
 
 /// Where a suspended generator is inside a top-level `try` statement.

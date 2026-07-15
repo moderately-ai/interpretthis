@@ -139,7 +139,7 @@ pub(crate) fn create_generator(
             stmt_index: 0,
             for_stack: Vec::new(),
             while_resume: None,
-            try_resume: None,
+            try_stack: Vec::new(),
         },
     );
     Value::Generator { id }
@@ -252,7 +252,7 @@ fn mark_generator_closed(state: &mut InterpreterState, id: u64) {
         frame.finished = true;
         frame.closed = true;
         frame.for_stack.clear();
-        frame.try_resume = None;
+        frame.try_stack.clear();
     }
 }
 
@@ -709,19 +709,25 @@ async fn run_while_suspendable(
 /// the resumable case; a yield nested in the body's own compound
 /// statements resumes at the enclosing body statement (the same
 /// granularity `for`/`while` use).
-async fn run_try_suspendable(
+fn run_try_suspendable<'a>(
+    state: &'a mut InterpreterState,
+    node: &'a rustpython_parser::ast::StmtTry,
+    tools: &'a crate::tools::Tools,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EvalError>> + Send + 'a>> {
+    Box::pin(run_try_suspendable_inner(state, node, tools))
+}
+
+async fn run_try_suspendable_inner(
     state: &mut InterpreterState,
     node: &rustpython_parser::ast::StmtTry,
     tools: &crate::tools::Tools,
 ) -> Result<(), EvalError> {
     use crate::state::{TryPhase, TryResume};
 
-    let resume = state
-        .active_generator_stack
-        .last()
-        .copied()
-        .and_then(|id| state.generators.get(&id))
-        .and_then(|f| f.try_resume);
+    // Pop this nesting level's resume position (LIFO): the outermost try
+    // is resumed first and pops the top; recursing into a nested try pops
+    // the next. An empty stack means a fresh (non-resuming) execution.
+    let resume = pop_try_resume(state);
 
     // Phase 1 — BODY (skip when resuming inside a later phase).
     if resume.is_none_or(|r| matches!(r.phase, TryPhase::Body)) {
@@ -778,14 +784,8 @@ async fn run_try_suspendable(
         Some(TryResume { phase: TryPhase::Finally, index }) => {
             match step_try_phase(state, &node.finalbody, index, TryPhase::Finally, tools).await {
                 TryStep::Yielded(v) => Err(EvalError::Signal(ControlFlow::Yield(v))),
-                TryStep::Completed => {
-                    set_try_resume(state, None);
-                    Ok(())
-                }
-                TryStep::Errored(e) => {
-                    set_try_resume(state, None);
-                    Err(e)
-                }
+                TryStep::Completed => Ok(()),
+                TryStep::Errored(e) => Err(e),
             }
         }
         // Body/Handler already handled by the earlier phases.
@@ -811,21 +811,28 @@ async fn step_try_phase(
 ) -> TryStep {
     let mut i = start;
     while i < stmts.len() {
-        match eval_stmt(state, &stmts[i], tools).await {
+        // A nested `try` is stepped through the suspend engine too, so a
+        // yield deep inside nested trys resumes correctly (its resume
+        // position is pushed by the recursive call). A direct statement
+        // runs via `eval_stmt` and, if it yields, sets `resume_at_yield`
+        // so re-entering that statement delivers the sent value.
+        let (result, nested) = if let Stmt::Try(nested_try) = &stmts[i] {
+            (run_try_suspendable(state, nested_try, tools).await.map(|()| Value::None), true)
+        } else {
+            (eval_stmt(state, &stmts[i], tools).await, false)
+        };
+        match result {
             Ok(_) => {
                 i += 1;
-                if let Some(&id) = state.active_generator_stack.last() {
-                    if let Some(frame) = state.generators.get_mut(&id) {
-                        frame.resume_at_yield = false;
-                    }
-                }
+                clear_resume_at_yield(state);
             }
             Err(EvalError::Signal(ControlFlow::Yield(v))) => {
-                if let Some(&id) = state.active_generator_stack.last() {
-                    if let Some(frame) = state.generators.get_mut(&id) {
-                        frame.resume_at_yield = true;
-                        frame.try_resume = Some(crate::state::TryResume { phase, index: i });
-                    }
+                // Record this level's resume position on the stack.
+                push_try_resume(state, crate::state::TryResume { phase, index: i });
+                // The innermost direct yield already set `resume_at_yield`;
+                // a nested-try yield must not clear/overwrite it.
+                if !nested {
+                    set_resume_at_yield(state);
                 }
                 return TryStep::Yielded(v);
             }
@@ -833,6 +840,35 @@ async fn step_try_phase(
         }
     }
     TryStep::Completed
+}
+
+fn clear_resume_at_yield(state: &mut InterpreterState) {
+    if let Some(&id) = state.active_generator_stack.last() {
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.resume_at_yield = false;
+        }
+    }
+}
+
+fn set_resume_at_yield(state: &mut InterpreterState) {
+    if let Some(&id) = state.active_generator_stack.last() {
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.resume_at_yield = true;
+        }
+    }
+}
+
+fn push_try_resume(state: &mut InterpreterState, resume: crate::state::TryResume) {
+    if let Some(&id) = state.active_generator_stack.last() {
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.try_stack.push(resume);
+        }
+    }
+}
+
+fn pop_try_resume(state: &mut InterpreterState) -> Option<crate::state::TryResume> {
+    let id = *state.active_generator_stack.last()?;
+    state.generators.get_mut(&id)?.try_stack.pop()
 }
 
 /// A body exception: bind + enter the first matching handler (stepping
@@ -901,24 +937,12 @@ async fn finish_try(
     pending: Option<EvalError>,
     tools: &crate::tools::Tools,
 ) -> Result<(), EvalError> {
+    // This level's resume position was already popped on entry, so a
+    // clean completion leaves nothing to clear.
     match step_try_phase(state, finalbody, 0, TryPhase::Finally, tools).await {
         TryStep::Yielded(v) => Err(EvalError::Signal(ControlFlow::Yield(v))),
-        TryStep::Completed => {
-            set_try_resume(state, None);
-            pending.map_or(Ok(()), Err)
-        }
-        TryStep::Errored(e) => {
-            set_try_resume(state, None);
-            Err(e)
-        }
-    }
-}
-
-fn set_try_resume(state: &mut InterpreterState, v: Option<crate::state::TryResume>) {
-    if let Some(&id) = state.active_generator_stack.last() {
-        if let Some(frame) = state.generators.get_mut(&id) {
-            frame.try_resume = v;
-        }
+        TryStep::Completed => pending.map_or(Ok(()), Err),
+        TryStep::Errored(e) => Err(e),
     }
 }
 
