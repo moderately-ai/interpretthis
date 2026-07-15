@@ -213,11 +213,55 @@ fn format_value_body(
             let sign = if c.im.is_sign_negative() { "-" } else { "+" };
             Ok(format!("{re}{sign}{im}j"))
         }
-        // Remaining types (Decimal, Fraction, None, dates, …) render via
-        // Display when no type code is given.
+        // Decimal supports the float presentation codes. Fixed-point and
+        // percent round the exact BigDecimal (so `format(Decimal("2.675"),
+        // ".2f")` is "2.68", not the float "2.67"); scientific/general reuse the
+        // float formatters (a residual for exact half-even in e/g notation).
+        (Value::Decimal(d, _), Some('f' | 'F')) => Ok(format_decimal_fixed(d, prec())),
+        (Value::Decimal(d, _), Some('%')) => {
+            let scaled = d.as_ref().clone() * bigdecimal::BigDecimal::from(100);
+            Ok(format!("{}%", format_decimal_fixed(&scaled, prec())))
+        }
+        (Value::Decimal(d, _), Some('e' | 'E' | 'g' | 'G')) => {
+            use num_traits::ToPrimitive as _;
+            let f = d.to_f64().unwrap_or(f64::NAN);
+            let body = format_value_body(&Value::Float(f), type_char, precision, alternate)?;
+            // Decimal writes the exponent with minimal digits (`e+2`), unlike a
+            // float's zero-padded two (`e+02`).
+            Ok(minimize_exponent_digits(&body))
+        }
+        // Remaining types (Fraction, None, dates, …) render via Display when no
+        // type code is given.
         (_, None) => Ok(format!("{value}")),
         (_, Some(c)) => Err(unknown_format_code(c, value)),
     }
+}
+
+/// Fixed-point Decimal formatting with exact half-even rounding to `precision`
+/// fractional digits (`format(Decimal("3.1"), ".3f")` is "3.100").
+#[expect(clippy::cast_possible_wrap, reason = "precision is a small spec-bounded value")]
+fn format_decimal_fixed(d: &bigdecimal::BigDecimal, precision: usize) -> String {
+    d.with_scale_round(precision as i64, bigdecimal::RoundingMode::HalfEven).to_plain_string()
+}
+
+/// Trim leading zeros from a float-style exponent (`1.00e+02` -> `1.00e+2`),
+/// keeping the sign and at least one digit. `Decimal`'s scientific notation uses
+/// minimal exponent digits where a float pads to two; strings without an
+/// exponent pass through unchanged.
+fn minimize_exponent_digits(s: &str) -> String {
+    let Some(epos) = s.find(['e', 'E']) else {
+        return s.to_string();
+    };
+    let (mantissa, exp) = s.split_at(epos);
+    // exp is `e`/`E`, then a mandatory sign from the float formatter, then digits.
+    if exp.len() < 3 || !matches!(exp.as_bytes().get(1), Some(b'+' | b'-')) {
+        return s.to_string();
+    }
+    let marker = &exp[..1];
+    let sign = &exp[1..2];
+    let trimmed = exp[2..].trim_start_matches('0');
+    let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
+    format!("{mantissa}{marker}{sign}{trimmed}")
 }
 
 /// `ValueError: Unknown format code '<c>' for object of type '<type>'` —
@@ -350,13 +394,24 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
 
     // Apply sign
     let with_sign = match sign {
-        Some('+') => {
-            if matches!(value, Value::Int(i) if *i >= 0)
-                || matches!(value, Value::Float(f) if *f >= 0.0)
-            {
-                if formatted.starts_with('-') { formatted } else { format!("+{formatted}") }
-            } else {
+        // `+` forces an explicit sign on any numeric body that isn't already
+        // negative — Int/BigInt/Bool/Float/Complex/Decimal/Fraction alike.
+        Some('+')
+            if matches!(
+                value,
+                Value::Int(_)
+                    | Value::BigInt(_)
+                    | Value::Bool(_)
+                    | Value::Float(_)
+                    | Value::Complex(_)
+                    | Value::Decimal(..)
+                    | Value::Fraction(_)
+            ) =>
+        {
+            if formatted.starts_with('-') {
                 formatted
+            } else {
+                format!("+{formatted}")
             }
         }
         Some(' ') => {
