@@ -37,7 +37,7 @@ use crate::{
 /// shared CPython-order table, serialized as elements-only. v13: adds the
 /// `OrderedDict` variant (a distinct type from `dict`). v14: adds the
 /// `io.StringIO` variant.
-pub const STATE_FORMAT_VERSION: u32 = 14;
+pub const STATE_FORMAT_VERSION: u32 = 15;
 
 /// Bytes occupied by the little-endian `u32` version prefix before the
 /// JSON state body.

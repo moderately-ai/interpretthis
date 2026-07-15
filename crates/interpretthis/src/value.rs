@@ -613,6 +613,10 @@ pub enum Value {
     /// `functools.lru_cache`-wrapped callable. Shared interior state so
     /// clones share the memo table (CPython identity of the wrapper).
     LruCache(std::sync::Arc<LruCacheData>),
+    /// `functools.singledispatch` generic function. Shared interior state
+    /// so the `.register` decorator mutates the same dispatch table the
+    /// caller invokes against.
+    SingleDispatch(std::sync::Arc<SingleDispatchData>),
     /// A callable bound to a stdlib module function (`math.sqrt`, or a name
     /// pulled in via `from math import sqrt`). Carries the module and function
     /// names; the call path dispatches it against the module registry.
@@ -910,6 +914,50 @@ impl<'de> Deserialize<'de> for LruCacheData {
             hits: std::sync::atomic::AtomicU64::new(0),
             misses: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+}
+
+/// Shared state for [`Value::SingleDispatch`] — a
+/// `functools.singledispatch` generic function. The `default`
+/// implementation handles argument types with no registered override;
+/// `registry` maps a type name to its implementation, in registration
+/// order. Shared behind an `Arc` so the `.register` decorator (which
+/// clones the wrapper value) mutates the same table the caller dispatches
+/// against, matching CPython's single generic-function object.
+#[derive(Debug)]
+pub struct SingleDispatchData {
+    /// Reported name (the decorated function's `__name__`).
+    pub name: String,
+    /// Fallback implementation (the originally decorated function).
+    pub default: Value,
+    /// Type-name → implementation, in registration order. Dispatch walks
+    /// the argument type's MRO and picks the first match.
+    pub registry: Mutex<IndexMap<String, Value>>,
+}
+
+// The registry is rebuildable process-local state; persist name + default
+// and the registered implementations so a restored wrapper still dispatches.
+impl Serialize for SingleDispatchData {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("SingleDispatchData", 3)?;
+        st.serialize_field("name", &self.name)?;
+        st.serialize_field("default", &self.default)?;
+        st.serialize_field("registry", &*self.registry.lock())?;
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SingleDispatchData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            name: String,
+            default: Value,
+            registry: IndexMap<String, Value>,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self { name: w.name, default: w.default, registry: Mutex::new(w.registry) })
     }
 }
 
@@ -1898,9 +1946,15 @@ pub struct FunctionParams {
 }
 
 /// A single function parameter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Param {
     pub name: String,
+    /// Type-annotation name (`def f(x: int)` → `Some("int")`), captured
+    /// for positional parameters only. Consumed by
+    /// `functools.singledispatch`'s annotation-based `.register`. `None`
+    /// when the parameter is unannotated (the common case).
+    #[serde(default)]
+    pub annotation: Option<String>,
 }
 
 impl Value {
@@ -2000,7 +2054,8 @@ impl Value {
             | Self::BuiltinIter { .. }
             | Self::Partial { .. }
             | Self::OperatorGetter(_)
-            | Self::LruCache(_) => true,
+            | Self::LruCache(_)
+            | Self::SingleDispatch(_) => true,
             // Counter, TimeDelta: zero is falsy (matches CPython's
             // `bool(timedelta(0))` being False).
             Self::Counter(c) => !c.is_empty(),
@@ -2104,6 +2159,7 @@ impl Value {
             Self::BuiltinIter { kind, .. } => kind.type_name(),
             Self::Partial { .. } => "functools.partial",
             Self::LruCache(_) => "functools._lru_cache_wrapper",
+            Self::SingleDispatch(_) => "function",
         }
     }
 
@@ -2673,6 +2729,7 @@ impl fmt::Display for Value {
                 }
             },
             Self::LruCache(_) => write!(f, "<functools._lru_cache_wrapper>"),
+            Self::SingleDispatch(d) => write!(f, "<function {}>", d.name),
             // CPython: `str(re.compile('a+b'))` == "re.compile('a+b')". The
             // pattern is rendered via its string repr, so backslashes and
             // quotes escape as in `re.compile('(\\d+)')`.

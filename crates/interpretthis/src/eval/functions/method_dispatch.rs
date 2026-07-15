@@ -1012,6 +1012,57 @@ fn hash_digest_methods(
         .map(MethodOutcome::pure)
 }
 
+fn single_dispatch_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    _kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    // `dispatcher.register(...)` reached as a method call (`@f.register(int)`).
+    // Mirrors the internal `functools::_sd_register`: an explicit type yields a
+    // decorator bound to (dispatcher, type); an annotated implementation is
+    // registered immediately from its first-parameter annotation.
+    let dispatcher = obj.clone();
+    let Value::SingleDispatch(sd) = obj else {
+        return Err(type_mismatch("singledispatch"));
+    };
+    match method {
+        "register" => {
+            let subject = args.first().cloned().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError(
+                    "register() missing required argument".into(),
+                ))
+            })?;
+            if let Some(type_name) = crate::eval::modules::functools::dispatch_type_name(&subject) {
+                return Ok(MethodOutcome::pure(Value::Partial(Box::new(
+                    crate::value::PartialData {
+                        func: Value::ModuleFunction {
+                            module: "functools".into(),
+                            name: "_sd_register_typed".into(),
+                        },
+                        args: vec![dispatcher, Value::String(type_name.into())],
+                        keywords: IndexMap::new(),
+                    },
+                ))));
+            }
+            let type_name = crate::eval::modules::functools::first_param_annotation(&subject)
+                .ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(
+                        "Invalid first argument to `register()`: it must be a type or a callable \
+                         with a type-annotated first argument"
+                            .into(),
+                    ))
+                })?;
+            sd.registry.lock().insert(type_name, subject.clone());
+            Ok(MethodOutcome::pure(subject))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'function' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 fn type_mismatch(expected: &str) -> EvalError {
     InterpreterError::TypeError(format!("internal: method table expected {expected}")).into()
 }
@@ -1023,6 +1074,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::List(_) => Some(list_methods),
         Value::Array { .. } => Some(array_methods),
         Value::LruCache(_) => Some(lru_methods),
+        Value::SingleDispatch(_) => Some(single_dispatch_methods),
         Value::Dict(_) | Value::OrderedDict(_) => Some(dict_methods),
         Value::StringIO(_) => Some(stringio_methods),
         Value::Counter(_) => Some(counter_methods),

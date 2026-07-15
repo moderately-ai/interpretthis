@@ -742,6 +742,15 @@ pub(crate) async fn call_value_as_function(
             };
             return apply_operator_getter(state, getter, obj, tools).await;
         }
+        Value::SingleDispatch(sd) => {
+            // Dispatch on the type of the first positional argument, walking
+            // its MRO to find a registered implementation; fall back to the
+            // default. The chosen implementation receives the full argument
+            // list unchanged.
+            let impl_fn =
+                crate::eval::modules::functools::resolve_dispatch_impl(sd, args.first(), state);
+            return Box::pin(call_value_as_function(state, &impl_fn, args, kwargs, tools)).await;
+        }
         Value::LruCache(data) => {
             // Memoize by positional AND keyword ValueKeys. Keying on positionals
             // only meant `f(1, b=2)` and `f(1, b=3)` collided on the same cache

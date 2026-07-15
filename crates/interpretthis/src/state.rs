@@ -865,6 +865,10 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
             16 + estimate_value_size(&data.func)
                 + data.cache.lock().values().map(estimate_value_size).sum::<usize>()
         }
+        Value::SingleDispatch(sd) => {
+            16 + estimate_value_size(&sd.default)
+                + sd.registry.lock().values().map(estimate_value_size).sum::<usize>()
+        }
     }
 }
 

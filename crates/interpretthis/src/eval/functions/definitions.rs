@@ -854,7 +854,15 @@ pub fn build_function_params(args: &ast::Arguments) -> Result<FunctionParams, Ev
         .posonlyargs
         .iter()
         .chain(args.args.iter())
-        .map(|awd| Param { name: awd.def.arg.as_str().to_string() })
+        .map(|awd| Param {
+            name: awd.def.arg.as_str().to_string(),
+            // Capture a simple `Name` annotation (`x: int`) as its bare
+            // type name; complex annotations are ignored (unused here).
+            annotation: awd.def.annotation.as_deref().and_then(|ann| match ann {
+                ast::Expr::Name(n) => Some(n.id.as_str().to_string()),
+                _ => None,
+            }),
+        })
         .collect();
 
     // Defaults: stored as serialized AST (one per default, aligned to the tail of positional args)
@@ -870,7 +878,7 @@ pub fn build_function_params(args: &ast::Arguments) -> Result<FunctionParams, Ev
     let kwonlyargs: Vec<Param> = args
         .kwonlyargs
         .iter()
-        .map(|awd| Param { name: awd.def.arg.as_str().to_string() })
+        .map(|awd| Param { name: awd.def.arg.as_str().to_string(), annotation: None })
         .collect();
 
     let mut kw_defaults: Vec<Option<String>> = Vec::with_capacity(args.kwonlyargs.len());

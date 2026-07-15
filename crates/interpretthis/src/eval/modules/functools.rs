@@ -8,8 +8,9 @@
 //! / `call_lambda` for each pair) and `wraps` (stamps the wrapped function's
 //! `__name__` onto the wrapper via the `wraps_name` override).
 //!
-//! Also: `partial`, `cmp_to_key`. `lru_cache` / `cache` / `singledispatch`
-//! remain open (see tickets).
+//! Also: `partial`, `cmp_to_key`, `lru_cache` / `cache`, `total_ordering`,
+//! and `singledispatch` (generic functions dispatching on the first
+//! argument's type via `.register`).
 
 use indexmap::IndexMap;
 
@@ -35,6 +36,9 @@ pub fn has_function(name: &str) -> bool {
             | "lru_cache"
             | "cache"
             | "_lru_wrap"
+            | "singledispatch"
+            | "_sd_register"
+            | "_sd_register_typed"
             | "total_ordering"
             // Detected as a method decorator by name at class-def time; the
             // imported binding just needs to exist so the import succeeds.
@@ -177,6 +181,84 @@ pub async fn call(
                 ))
             })?;
             Ok(make_lru_cache(func, maxsize))
+        }
+        "singledispatch" => {
+            // singledispatch(default_func) -> a generic function dispatching
+            // on the type of its first argument. `.register` (accessed via
+            // getattr) adds type-specific implementations.
+            let Some(default) = args.first().cloned() else {
+                return Err(InterpreterError::TypeError(
+                    "singledispatch() missing required argument".into(),
+                )
+                .into());
+            };
+            let name = match &default {
+                Value::Function(fd) => fd.wraps_name.clone().unwrap_or_else(|| fd.name.clone()),
+                Value::Lambda(_) => "<lambda>".to_string(),
+                _ => "singledispatch function".to_string(),
+            };
+            Ok(Value::SingleDispatch(std::sync::Arc::new(crate::value::SingleDispatchData {
+                name,
+                default,
+                registry: parking_lot::Mutex::new(IndexMap::new()),
+            })))
+        }
+        "_sd_register" => {
+            // Internal: _sd_register(dispatcher, type_or_func).
+            //   `@f.register(int)`      → type given, return a decorator that
+            //                             binds the impl on its next call.
+            //   `@f.register` + `def _(x: int)` → annotation form: read the
+            //                             first parameter's annotation, register
+            //                             the impl immediately, return it.
+            let Some(Value::SingleDispatch(sd)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "register() called without a dispatcher".into(),
+                )
+                .into());
+            };
+            let subject = args.get(1).cloned().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError(
+                    "register() missing required argument".into(),
+                ))
+            })?;
+            if let Some(type_name) = dispatch_type_name(&subject) {
+                // Explicit type — return a decorator bound to (dispatcher, type).
+                return Ok(Value::Partial(Box::new(crate::value::PartialData {
+                    func: Value::ModuleFunction {
+                        module: "functools".into(),
+                        name: "_sd_register_typed".into(),
+                    },
+                    args: vec![args[0].clone(), Value::String(type_name.into())],
+                    keywords: IndexMap::new(),
+                })));
+            }
+            // Annotation form — the subject is the implementation function.
+            let type_name = first_param_annotation(&subject).ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError(
+                    "Invalid first argument to `register()`: it must be a type or a callable with \
+                     a type-annotated first argument"
+                        .into(),
+                ))
+            })?;
+            sd.registry.lock().insert(type_name, subject.clone());
+            Ok(subject)
+        }
+        "_sd_register_typed" => {
+            // Internal: _sd_register_typed(dispatcher, type_name, impl).
+            let Some(Value::SingleDispatch(sd)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "register() called without a dispatcher".into(),
+                )
+                .into());
+            };
+            let Some(Value::String(type_name)) = args.get(1) else {
+                return Err(InterpreterError::TypeError("register() missing type".into()).into());
+            };
+            let impl_fn = args.get(2).cloned().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError("register() missing impl".into()))
+            })?;
+            sd.registry.lock().insert(type_name.to_string(), impl_fn.clone());
+            Ok(impl_fn)
         }
         "total_ordering" => {
             // Class decorator: flag the class so op::compare derives the
@@ -331,6 +413,73 @@ pub async fn call(
         ))
         .into()),
     }
+}
+
+/// The bare type name a value denotes when used as a `register(...)`
+/// argument (`int`, `str`, a user class, an exception type), or `None`
+/// when the value is not a type object — in which case `register` treats
+/// it as an implementation whose first-parameter annotation names the type.
+pub(crate) fn dispatch_type_name(value: &Value) -> Option<String> {
+    match value {
+        Value::BuiltinName(s) => Some(s.clone()),
+        Value::Class(name) => Some(name.clone()),
+        Value::ExceptionType(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// The first positional parameter's type annotation of a function value —
+/// the type `@dispatcher.register` binds an implementation to when no
+/// explicit type is passed. `None` for lambdas or unannotated functions.
+pub(crate) fn first_param_annotation(value: &Value) -> Option<String> {
+    match value {
+        Value::Function(fd) => fd.params.args.first().and_then(|p| p.annotation.clone()),
+        _ => None,
+    }
+}
+
+/// The type-name MRO of a runtime value, most-derived first, for
+/// `singledispatch` dispatch. Mirrors CPython walking `type(arg).__mro__`.
+fn dispatch_mro(value: &Value, state: &InterpreterState) -> Vec<String> {
+    let mut chain: Vec<String> = match value {
+        Value::Instance(inst) => {
+            let mut names = vec![inst.class_name.clone()];
+            if let Some(class) = state.classes.get(&inst.class_name) {
+                names.extend(class.mro.iter().cloned());
+            }
+            names
+        }
+        // bool is a subclass of int in CPython — a `register(int)` impl must
+        // catch a bool argument.
+        Value::Bool(_) => vec!["bool".to_string(), "int".to_string()],
+        other => vec![other.type_name().to_string()],
+    };
+    if !chain.iter().any(|n| n == "object") {
+        chain.push("object".to_string());
+    }
+    chain
+}
+
+/// Resolve the implementation a `singledispatch` generic function invokes
+/// for `arg` (its first positional argument), falling back to the default.
+pub(crate) fn resolve_dispatch_impl(
+    sd: &crate::value::SingleDispatchData,
+    arg: Option<&Value>,
+    state: &InterpreterState,
+) -> Value {
+    let Some(arg) = arg else {
+        return sd.default.clone();
+    };
+    let registry = sd.registry.lock();
+    if registry.is_empty() {
+        return sd.default.clone();
+    }
+    for name in dispatch_mro(arg, state) {
+        if let Some(f) = registry.get(&name) {
+            return f.clone();
+        }
+    }
+    sd.default.clone()
 }
 
 /// `functools` module registration. Genuinely async — `reduce(f, iter)`

@@ -332,8 +332,8 @@ pub(crate) fn call_namedtuple_with_state(
 
     use crate::value::{ClassValue, FunctionDef, FunctionParams, Param};
     let init_params = FunctionParams {
-        args: std::iter::once(Param { name: "self".to_string() })
-            .chain(fields.iter().map(|f| Param { name: f.clone() }))
+        args: std::iter::once(Param { name: "self".to_string(), annotation: None })
+            .chain(fields.iter().map(|f| Param { name: f.clone(), annotation: None }))
             .collect(),
         defaults: Vec::new(),
         default_values: Vec::new(),
@@ -445,7 +445,7 @@ pub(crate) fn call_namedtuple_with_state(
             body_key: String::new(),
             wraps_name: None,
             params: FunctionParams {
-                args: vec![Param { name: "self".to_string() }],
+                args: vec![Param { name: "self".to_string(), annotation: None }],
                 defaults: Vec::new(),
                 default_values: Vec::new(),
                 vararg: None,
@@ -527,7 +527,10 @@ pub(crate) fn call_namedtuple_with_state(
     let mut static_methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
     static_methods.insert(
         "_make".to_string(),
-        mk_def(make_key, no_defaults(vec![Param { name: "iterable".to_string() }], None)),
+        mk_def(
+            make_key,
+            no_defaults(vec![Param { name: "iterable".to_string(), annotation: None }], None),
+        ),
     );
 
     let merged_dict = Expr::Dict(ExprDict {
@@ -563,7 +566,10 @@ pub(crate) fn call_namedtuple_with_state(
         "_replace".to_string(),
         mk_def(
             replace_key,
-            no_defaults(vec![Param { name: "self".to_string() }], Some("kwargs".to_string())),
+            no_defaults(
+                vec![Param { name: "self".to_string(), annotation: None }],
+                Some("kwargs".to_string()),
+            ),
         ),
     );
 

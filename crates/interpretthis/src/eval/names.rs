@@ -560,6 +560,23 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
             "__wrapped__" => Ok(data.func.clone()),
             _ => Err(attribute_error("functools._lru_cache_wrapper", attr_name)),
         },
+        Value::SingleDispatch(sd) => match attr_name {
+            // `.register` — a decorator bound to this dispatcher. Modelled as
+            // a partial over the internal `_sd_register` so the next call
+            // (with a type or an annotated impl) registers into `sd`.
+            "register" => Ok(Value::Partial(Box::new(crate::value::PartialData {
+                func: Value::ModuleFunction {
+                    module: "functools".into(),
+                    name: "_sd_register".into(),
+                },
+                args: vec![obj.clone()],
+                keywords: indexmap::IndexMap::new(),
+            }))),
+            "__name__" | "__qualname__" => Ok(Value::String(sd.name.clone().into())),
+            "__doc__" => legacy_attribute(state, &sd.default, attr_name),
+            "__wrapped__" => Ok(sd.default.clone()),
+            _ => Err(attribute_error("function", attr_name)),
+        },
         // An unbound builtin-type method (`str.upper`) is a method descriptor:
         // `__name__` is the method, `__qualname__` is `<type>.<method>`; it has
         // no `__self__`.
