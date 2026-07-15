@@ -126,7 +126,7 @@ pub fn call(
                         crate::value::ValueKey::String("default".into()),
                         f.default.clone().unwrap_or(Value::None),
                     );
-                    Value::Dict(entry)
+                    Value::Dict(crate::value::shared_dict(entry))
                 })
                 .collect();
             Ok(Value::Tuple(items))
@@ -174,7 +174,7 @@ fn asdict_recursive(state: &InterpreterState, inst: &InstanceValue) -> EvalResul
         let converted = convert_for_asdict(state, &raw)?;
         out.insert(crate::value::ValueKey::String(name.as_str().into()), converted);
     }
-    Ok(Value::Dict(out))
+    Ok(Value::Dict(crate::value::shared_dict(out)))
 }
 
 fn convert_for_asdict(state: &InterpreterState, value: &Value) -> EvalResult {
@@ -205,11 +205,12 @@ fn convert_for_asdict(state: &InterpreterState, value: &Value) -> EvalResult {
             Ok(Value::Tuple(out))
         }
         Value::Dict(items) => {
+            let snapshot = items.lock().clone();
             let mut out: IndexMap<crate::value::ValueKey, Value> = IndexMap::new();
-            for (key, val) in items {
+            for (key, val) in &snapshot {
                 out.insert(key.clone(), convert_for_asdict(state, val)?);
             }
-            Ok(Value::Dict(out))
+            Ok(Value::Dict(crate::value::shared_dict(out)))
         }
         other => Ok(other.clone()),
     }
@@ -265,11 +266,12 @@ fn convert_for_astuple(state: &InterpreterState, value: &Value) -> EvalResult {
             Ok(Value::Tuple(out))
         }
         Value::Dict(items) => {
+            let snapshot = items.lock().clone();
             let mut out: IndexMap<crate::value::ValueKey, Value> = IndexMap::new();
-            for (key, val) in items {
+            for (key, val) in &snapshot {
                 out.insert(key.clone(), convert_for_astuple(state, val)?);
             }
-            Ok(Value::Dict(out))
+            Ok(Value::Dict(crate::value::shared_dict(out)))
         }
         other => Ok(other.clone()),
     }
@@ -403,7 +405,7 @@ fn build_field_sentinel(kwargs: &IndexMap<String, Value>) -> Value {
             dict.insert(crate::value::ValueKey::String(key.as_str().into()), value.clone());
         }
     }
-    Value::Dict(dict)
+    Value::Dict(crate::value::shared_dict(dict))
 }
 
 /// Unpacked shape of a `field(...)` sentinel — the named-parameter
@@ -421,6 +423,7 @@ struct FieldSentinel {
 /// field sentinel (a regular literal default flows through unchanged).
 fn unpack_field_sentinel(value: &Value) -> Option<FieldSentinel> {
     let Value::Dict(dict) = value else { return None };
+    let dict = dict.lock();
     let kind = dict.get(&crate::value::ValueKey::String("__interpretthis_kind__".into()))?;
     let Value::String(kind_str) = kind else { return None };
     if kind_str != FIELD_SENTINEL {

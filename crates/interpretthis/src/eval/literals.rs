@@ -101,8 +101,8 @@ pub async fn eval_dict(
             let unpacked = eval_expr(state, value_expr, tools).await?;
             match unpacked {
                 Value::Dict(d) => {
-                    for (k, v) in d {
-                        map.insert(k, v);
+                    for (k, v) in d.lock().iter() {
+                        map.insert(k.clone(), v.clone());
                     }
                 }
                 _ => {
@@ -114,7 +114,7 @@ pub async fn eval_dict(
             }
         }
     }
-    Ok(Value::Dict(map))
+    Ok(Value::Dict(crate::value::shared_dict(map)))
 }
 
 /// Build a `Value::Set` from already-evaluated candidates, deduplicating and

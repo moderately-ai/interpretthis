@@ -801,6 +801,7 @@ fn format_get_attr(value: &Value, attr: &str) -> EvalResult {
     // exposes `{d.key}` as key access rather than CPython's getattr).
     if let Value::Dict(map) = value {
         return map
+            .lock()
             .get(&ValueKey::String(attr.into()))
             .cloned()
             .ok_or_else(|| EvalError_value_error(format!("dict has no key '{attr}'")));
@@ -835,6 +836,7 @@ fn format_get_item(value: &Value, key: &str) -> EvalResult {
                 .ok_or_else(|| EvalError_value_error("format index out of range".into())),
             _ => match value {
                 Value::Dict(map) => map
+                    .lock()
                     .get(&ValueKey::Int(idx_to_i64(idx)?))
                     .cloned()
                     .ok_or_else(|| EvalError_value_error(format!("dict has no key {idx}"))),
@@ -848,6 +850,7 @@ fn format_get_item(value: &Value, key: &str) -> EvalResult {
     }
     match value {
         Value::Dict(map) => map
+            .lock()
             .get(&ValueKey::String(key.into()))
             .cloned()
             .ok_or_else(|| EvalError_value_error(format!("dict has no key '{key}'"))),
@@ -894,7 +897,9 @@ pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
         Value::Dict(_) => Vec::new(),
         other => vec![other.clone()],
     };
-    let mapping = arg.as_dict();
+    // Snapshot the mapping once so the per-field lookups below don't
+    // each re-lock, and the shape stays `Option<IndexMap>`.
+    let mapping = arg.as_dict().map(|m| m.lock().clone());
 
     let mut out = String::new();
     let mut next_arg = 0usize;
@@ -986,7 +991,7 @@ pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
 
         // Fetch the value this conversion consumes.
         let value = if let Some(ref key) = mapping_key {
-            let map = mapping.ok_or_else(|| {
+            let map = mapping.as_ref().ok_or_else(|| {
                 EvalError::from(InterpreterError::TypeError("format requires a mapping".into()))
             })?;
             map.get(&ValueKey::String(key.as_str().into())).cloned().ok_or_else(|| {
@@ -1026,7 +1031,7 @@ pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
 
     // Positional over-supply is a TypeError in CPython ("not all arguments
     // converted"). Mapping form does not consume positionally, so skip then.
-    if mapping_key_unused(mapping, next_arg, positional.len()) {
+    if mapping_key_unused(mapping.as_ref(), next_arg, positional.len()) {
         return Err(InterpreterError::TypeError(
             "not all arguments converted during string formatting".into(),
         )

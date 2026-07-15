@@ -1279,6 +1279,13 @@ fn tuple_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 fn dict_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     let Value::Dict(a) = lhs else { return None };
     let Value::Dict(b) = rhs else { return None };
+    if std::sync::Arc::ptr_eq(a, b) {
+        return Some(true);
+    }
+    // Snapshot both under their locks and release before `recurse_eq`,
+    // which may lock other dicts — never hold a dict lock across it.
+    let a = a.lock().clone();
+    let b = b.lock().clone();
     if a.len() != b.len() {
         return Some(false);
     }
@@ -1556,7 +1563,7 @@ fn dict_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
     // An unhashable probe raises `TypeError: unhashable type`, it does not answer
     // False — propagate the value_to_key error instead of swallowing it.
     let key = crate::eval::literals::value_to_key(item)?;
-    Ok(map.contains_key(&key))
+    Ok(map.lock().contains_key(&key))
 }
 
 /// `needle in str`: substring check. CPython requires `needle` to be a str
@@ -1781,7 +1788,7 @@ fn bytes_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
 #[expect(clippy::unnecessary_wraps, reason = "IterSlot protocol; dict iteration cannot fail")]
 fn dict_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
     let Value::Dict(map) = value else { unreachable!("dict_iter only on DICT_TYPE") };
-    Ok(map.keys().map(crate::value::ValueKey::to_value).collect())
+    Ok(map.lock().keys().map(crate::value::ValueKey::to_value).collect())
 }
 
 /// `iter(range)` — materialize the arithmetic progression as a `Vec<Int>`.
@@ -2066,8 +2073,8 @@ fn bytes_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> 
 fn dict_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
     let Value::Dict(map) = container else { unreachable!("dict_get_item only on DICT_TYPE") };
     let key = crate::eval::literals::value_to_key(index)?;
-    if let Some(value) = map.get(&key) {
-        return Ok(value.clone());
+    if let Some(value) = map.lock().get(&key).cloned() {
+        return Ok(value);
     }
     if let Some(missing) = type_of(container).missing_slot {
         return missing(container, index);
@@ -2111,7 +2118,7 @@ fn dict_set_item(container: &mut Value, index: &Value, value: Value) -> Result<i
     let Value::Dict(map) = container else { unreachable!("dict_set_item only on DICT_TYPE") };
     let key = crate::eval::literals::value_to_key(index)?;
     let new_size = crate::state::estimate_value_size(&value);
-    let delta = map.insert(key.clone(), value).map_or_else(
+    let delta = map.lock().insert(key.clone(), value).map_or_else(
         || to_isize_sat(crate::state::estimate_key_size(&key) + new_size),
         |old| size_delta(crate::state::estimate_value_size(&old), new_size),
     );
@@ -2136,7 +2143,7 @@ fn dict_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalErro
     let key = crate::eval::literals::value_to_key(index)?;
     // shift_remove preserves insertion order (CPython `del d[k]`), unlike
     // swap_remove which moves the last entry into the hole.
-    let Some(val) = map.shift_remove(&key) else {
+    let Some(val) = map.lock().shift_remove(&key) else {
         return Err(crate::value::ExceptionValue::key_error(key).into());
     };
     let freed = crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&val);
@@ -2288,7 +2295,8 @@ fn bytes_len(value: &Value) -> Result<usize, EvalError> {
 #[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]
 fn dict_len(value: &Value) -> Result<usize, EvalError> {
     let Value::Dict(map) = value else { unreachable!("dict_len only on DICT_TYPE") };
-    Ok(map.len())
+    let len = map.lock().len();
+    Ok(len)
 }
 
 /// `len(range)`: closed-form arithmetic.
@@ -2591,13 +2599,14 @@ fn frozenset_get_attr(value: &Value, name: &str) -> EvalResult {
 /// is a dict subclass).
 fn counter_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     let Value::Counter(a) = lhs else { return None };
+    // Compare against the other map's contents (Counter stores an
+    // IndexMap by value; Dict is behind a lock).
+    let compare = |b: &indexmap::IndexMap<crate::value::ValueKey, Value>| {
+        a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| recurse_eq(v, bv)))
+    };
     match rhs {
-        Value::Counter(b) | Value::Dict(b) => {
-            if a.len() != b.len() {
-                return Some(false);
-            }
-            Some(a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| recurse_eq(v, bv))))
-        }
+        Value::Counter(b) => Some(compare(b)),
+        Value::Dict(b) => Some(compare(&b.lock())),
         _ => None,
     }
 }

@@ -1068,7 +1068,7 @@ async fn dataclass_instantiate(
 fn empty_for_builtin_factory(name: &str) -> EvalResult {
     match name {
         "list" => Ok(Value::List(shared_list(Vec::new()))),
-        "dict" => Ok(Value::Dict(IndexMap::new())),
+        "dict" => Ok(Value::Dict(crate::value::shared_dict(IndexMap::new()))),
         "set" => Ok(Value::Set(Vec::new())),
         "frozenset" => Ok(Value::Frozenset(Vec::new())),
         "tuple" => Ok(Value::Tuple(Vec::new())),
@@ -1711,7 +1711,7 @@ pub(crate) fn dynamic_type_new(
     }
     let mut class_attrs = BTreeMap::new();
     if let Value::Dict(map) = dict_v {
-        for (k, v) in map {
+        for (k, v) in map.lock().iter() {
             if let crate::value::ValueKey::String(s) = k {
                 class_attrs.insert(s.to_string(), v.clone());
             }
@@ -1759,7 +1759,7 @@ async fn invoke_metaclass_prepare(
     .await?;
     let _ = meta;
     match returned {
-        Value::Dict(map) => Ok(Some(map)),
+        Value::Dict(map) => Ok(Some(map.lock().clone())),
         Value::None => Ok(None),
         other => Err(InterpreterError::TypeError(format!(
             "__prepare__() must return a mapping, not '{}'",
@@ -1790,7 +1790,7 @@ async fn invoke_metaclass_init(
     }
     let bases_t = Value::Tuple(class.bases.iter().map(|b| Value::Class(b.clone())).collect());
     let name_v = Value::String(class_name.into());
-    let ns_v = Value::Dict(ns);
+    let ns_v = Value::Dict(crate::value::shared_dict(ns));
     // CPython: Meta.__init__(cls, name, bases, ns) with cls = the new class.
     let cls_v = Value::Class(class_name.to_string());
     let call = crate::eval::functions::CallArgs {
@@ -1823,7 +1823,7 @@ async fn invoke_metaclass_new(
     }
     let bases_t = Value::Tuple(class.bases.iter().map(|b| Value::Class(b.clone())).collect());
     let name_v = Value::String(class_name.into());
-    let ns_v = Value::Dict(ns);
+    let ns_v = Value::Dict(crate::value::shared_dict(ns));
     let meta_v = Value::Class(meta.to_string());
     // call_method prepends the receiver as `self`/`cls`.
     let call = crate::eval::functions::CallArgs {

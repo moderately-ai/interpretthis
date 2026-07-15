@@ -530,6 +530,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
                 + items.iter().map(estimate_value_size).sum::<usize>()
         }
         Value::Dict(map) => {
+            let map = map.lock();
             48 + map.len() * (INDEXMAP_PER_ENTRY_BYTES + VALUE_SLOT_BYTES)
                 + map
                     .iter()

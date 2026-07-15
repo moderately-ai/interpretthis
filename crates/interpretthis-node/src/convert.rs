@@ -173,7 +173,7 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
             construct_global(env, "Set", array)
         }
 
-        Value::Dict(map) => dict_to_js(env, map),
+        Value::Dict(map) => dict_to_js(env, &map.lock()),
 
         // A Python `range` is a lazy sequence; JS has no counterpart, so it
         // materialises as an array. The alternative — an opaque handle — would
@@ -467,7 +467,7 @@ fn map_to_value(env: &Env, value: &Unknown<'_>) -> Result<Value> {
         };
         map.insert(to_key(key)?, val.clone());
     }
-    Ok(Value::Dict(map))
+    Ok(Value::Dict(interpretthis::shared_dict(map)))
 }
 
 /// Pull every item out of a JS iterator (`Set.values()`, `Map.entries()`).
@@ -527,7 +527,7 @@ fn plain_object_to_value(env: &Env, value: Unknown<'_>) -> Result<Value> {
         let property: Unknown = object.get_named_property(&name)?;
         map.insert(ValueKey::String(name.as_str().into()), js_to_value(env, property)?);
     }
-    Ok(Value::Dict(map))
+    Ok(Value::Dict(interpretthis::shared_dict(map)))
 }
 
 /// Derive a dict key, deferring to the evaluator's own coercion.

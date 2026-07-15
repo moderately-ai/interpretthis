@@ -691,6 +691,7 @@ fn translate(s: &str, table: &Value) -> EvalResult {
         ))
         .into());
     };
+    let map = map.lock();
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         let key = crate::value::ValueKey::Int(i64::from(u32::from(c)));

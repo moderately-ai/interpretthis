@@ -37,6 +37,20 @@ pub fn shared_list(items: Vec<Value>) -> SharedList {
     Arc::new(Mutex::new(items))
 }
 
+/// Shared backing store for [`Value::Dict`]. Same identity model as
+/// [`SharedList`]: cloning a `dict` Value is a refcount bump, so key
+/// writes / `del` / `.update` through any alias are visible on every
+/// other alias and through a dict passed to a function — matching
+/// CPython's dict reference semantics.
+pub type SharedDict = Arc<Mutex<IndexMap<ValueKey, Value>>>;
+
+/// Construct a fresh [`SharedDict`] from an `IndexMap`.
+#[inline]
+#[must_use]
+pub fn shared_dict(map: IndexMap<ValueKey, Value>) -> SharedDict {
+    Arc::new(Mutex::new(map))
+}
+
 /// Mutable, shared backing store for [`Value::ByteArray`]. Same identity model
 /// as [`SharedList`]: a `bytearray` clone shares storage, so in-place mutation
 /// (`b[0] = ...`, `.append(...)`) is visible through every alias.
@@ -198,6 +212,21 @@ fn deserialize_dict<'de, D: serde::Deserializer<'de>>(
     Ok(pairs.into_iter().collect())
 }
 
+/// Serialize a [`SharedDict`] (lock, then emit the `[key, value]` pairs).
+fn serialize_shared_dict<S: serde::Serializer>(
+    map: &SharedDict,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serialize_dict(&map.lock(), serializer)
+}
+
+/// Deserialize `[key, value]` pairs into a fresh [`SharedDict`].
+fn deserialize_shared_dict<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SharedDict, D::Error> {
+    Ok(shared_dict(deserialize_dict(deserializer)?))
+}
+
 /// The dynamic value type flowing through the interpreter.
 ///
 /// Which builtin lazy iterator a [`Value::BuiltinIter`] is, carried
@@ -285,11 +314,16 @@ pub enum Value {
     ),
     /// Python `tuple`.
     Tuple(Vec<Self>),
-    /// Python `dict` (ordered, hashable keys only).
+    /// Python `dict` (ordered, hashable keys only). Shared storage so
+    /// aliases and dicts passed to functions observe each other's
+    /// mutations (CPython reference semantics).
     /// Serialized as a list of `[key, value]` pairs since JSON requires string keys.
     Dict(
-        #[serde(serialize_with = "serialize_dict", deserialize_with = "deserialize_dict")]
-        IndexMap<ValueKey, Self>,
+        #[serde(
+            serialize_with = "serialize_shared_dict",
+            deserialize_with = "deserialize_shared_dict"
+        )]
+        SharedDict,
     ),
     /// Python `set` (stored as Vec since Value isn't Hash).
     Set(Vec<Self>),
@@ -883,7 +917,9 @@ impl PartialEq for Value {
             | (Self::Set(a), Self::Frozenset(b)) => {
                 a.len() == b.len() && a.iter().all(|x| b.contains(x))
             }
-            (Self::Dict(a), Self::Dict(b)) => a == b,
+            // Value-equality on contents; guard the same-Arc case first
+            // so `d == d` doesn't lock the one mutex twice (deadlock).
+            (Self::Dict(a), Self::Dict(b)) => Arc::ptr_eq(a, b) || *a.lock() == *b.lock(),
             (
                 Self::Range { start: s1, stop: e1, step: st1 },
                 Self::Range { start: s2, stop: e2, step: st2 },
@@ -1440,7 +1476,7 @@ impl Value {
             Self::MemoryView(inner) => inner.is_truthy(),
             Self::List(l) => !l.lock().is_empty(),
             Self::Tuple(t) => !t.is_empty(),
-            Self::Dict(d) => !d.is_empty(),
+            Self::Dict(d) => !d.lock().is_empty(),
             Self::Set(s) | Self::Frozenset(s) => !s.is_empty(),
             // Always truthy: callables, exceptions, proxies, type/class/module
             // objects, dates, match objects. (An instance is truthy unless it
@@ -1766,7 +1802,7 @@ impl fmt::Display for Value {
             }
             Self::Dict(map) => {
                 write!(f, "{{")?;
-                for (i, (k, v)) in map.iter().enumerate() {
+                for (i, (k, v)) in map.lock().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -2172,9 +2208,10 @@ impl Value {
         }
     }
 
-    /// Get as dict reference if this is a `Value::Dict`.
+    /// Get the shared dict handle if this is a `Value::Dict`. Callers
+    /// `.lock()` to read; the handle aliases the live dict.
     #[must_use]
-    pub const fn as_dict(&self) -> Option<&IndexMap<ValueKey, Self>> {
+    pub const fn as_dict(&self) -> Option<&SharedDict> {
         match self {
             Self::Dict(map) => Some(map),
             _ => None,
@@ -2218,7 +2255,7 @@ impl Value {
     /// Returns `Err(self)` when the value isn't a `Value::Dict`.
     pub fn try_into_dict(self) -> Result<IndexMap<ValueKey, Self>, Self> {
         match self {
-            Self::Dict(map) => Ok(map),
+            Self::Dict(map) => Ok(map.lock().clone()),
             other => Err(other),
         }
     }
@@ -2265,7 +2302,7 @@ impl From<Vec<Self>> for Value {
 }
 impl From<IndexMap<ValueKey, Self>> for Value {
     fn from(v: IndexMap<ValueKey, Self>) -> Self {
-        Self::Dict(v)
+        Self::Dict(shared_dict(v))
     }
 }
 impl<T: Into<Self>> From<Option<T>> for Value {
@@ -2320,7 +2357,7 @@ impl Value {
                 for (k, v) in obj {
                     map.insert(ValueKey::String(k.into()), Self::from_json(v));
                 }
-                Self::Dict(map)
+                Self::Dict(shared_dict(map))
             }
         }
     }
@@ -2358,7 +2395,7 @@ impl Value {
                 J::Array(items.iter().map(Self::to_json).collect::<Result<_, _>>()?)
             }
             // Dict / Counter / defaultdict project to a JSON object.
-            Self::Dict(map) => json_object(map.iter())?,
+            Self::Dict(map) => json_object(map.lock().iter())?,
             Self::Counter(map) => json_object(map.iter())?,
             Self::DefaultDict(data) => json_object(data.items.iter())?,
             // Decimal keeps its exact digits via arbitrary_precision; Fraction

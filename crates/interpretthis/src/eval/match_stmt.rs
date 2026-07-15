@@ -380,7 +380,9 @@ async fn match_mapping(
     let Value::Dict(map) = subject else {
         return Ok(false);
     };
-    let map = map.clone();
+    // Snapshot the contents so the lock isn't held across the async
+    // `pattern_matches` recursion below.
+    let map = map.lock().clone();
 
     let mut matched_keys: Vec<ValueKey> = Vec::new();
     for (key_expr, sub) in pattern.keys.iter().zip(&pattern.patterns) {
@@ -401,7 +403,8 @@ async fn match_mapping(
             .filter(|(k, _)| !matched_keys.contains(k))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        bindings.push((rest.as_str().to_string(), Value::Dict(remaining)));
+        bindings
+            .push((rest.as_str().to_string(), Value::Dict(crate::value::shared_dict(remaining))));
     }
     Ok(true)
 }

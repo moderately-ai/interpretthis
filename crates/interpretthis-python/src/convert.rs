@@ -115,7 +115,8 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
         }
         Value::Dict(map) => {
             let dict = PyDict::new(py);
-            for (key, val) in map {
+            let snapshot = map.lock().clone();
+            for (key, val) in &snapshot {
                 // Keys round-trip through `ValueKey::to_value`, so a folded
                 // integral-float key (`{2.0: x}` is stored as `Int(2)`) comes
                 // back as `2` — the documented, deliberate coercion.
@@ -237,7 +238,7 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
             let key = key.to_key().map_err(|e| PyTypeError::new_err(e.to_string()))?;
             map.insert(key, py_to_value(&val)?);
         }
-        return Ok(Value::Dict(map));
+        return Ok(Value::Dict(interpretthis::shared_dict(map)));
     }
 
     // datetime BEFORE date: `datetime.datetime` subclasses `datetime.date`, so

@@ -365,7 +365,7 @@ pub fn dispatch_match_method(
                     .map_or(Value::None, |g| Value::String(g.text.as_str().into()));
                 map.insert(ValueKey::String(name.as_str().into()), value);
             }
-            Ok(Value::Dict(map))
+            Ok(Value::Dict(crate::value::shared_dict(map)))
         }
         "start" => Ok(Value::Int(group_span(m, args)?.0)),
         "end" => Ok(Value::Int(group_span(m, args)?.1)),

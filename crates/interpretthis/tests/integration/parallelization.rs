@@ -838,7 +838,7 @@ async fn parallelization_resolve_at_subscript() {
                 Value::String("test".into()),
             );
             map.insert(interpretthis::ValueKey::String("score".into()), Value::Int(42));
-            Ok(Value::Dict(map))
+            Ok(Value::Dict(interpretthis::shared_dict(map)))
         }
     }
 

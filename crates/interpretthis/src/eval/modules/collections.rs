@@ -20,6 +20,16 @@ pub fn has_function(name: &str) -> bool {
     matches!(name, "Counter" | "deque" | "defaultdict" | "OrderedDict" | "namedtuple")
 }
 
+/// Snapshot a `dict` or `Counter` argument's entries into an owned map
+/// (Dict is behind a lock; Counter stores an `IndexMap` by value).
+fn dict_or_counter_contents(arg: &Value) -> Option<IndexMap<ValueKey, Value>> {
+    match arg {
+        Value::Dict(map) => Some(map.lock().clone()),
+        Value::Counter(map) => Some(map.clone()),
+        _ => None,
+    }
+}
+
 /// Invoke a `collections` callable.
 pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     match func {
@@ -29,8 +39,8 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
         "Counter" => {
             let mut counts: IndexMap<ValueKey, Value> = IndexMap::new();
             if let Some(arg) = args.first() {
-                if let Value::Dict(map) | Value::Counter(map) = arg {
-                    for (k, v) in map {
+                if let Some(map) = dict_or_counter_contents(arg) {
+                    for (k, v) in &map {
                         counts.insert(k.clone(), v.clone());
                     }
                 } else {
@@ -103,7 +113,7 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
             let mut items: IndexMap<ValueKey, Value> = IndexMap::new();
             if let Some(arg) = args.get(1) {
                 if let Value::Dict(map) = arg {
-                    for (k, v) in map {
+                    for (k, v) in map.lock().iter() {
                         items.insert(k.clone(), v.clone());
                     }
                 } else {
@@ -129,8 +139,8 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
         "OrderedDict" => {
             let mut entries: IndexMap<ValueKey, Value> = IndexMap::new();
             if let Some(arg) = args.first() {
-                if let Value::Dict(map) | Value::Counter(map) = arg {
-                    for (k, v) in map {
+                if let Some(map) = dict_or_counter_contents(arg) {
+                    for (k, v) in &map {
                         entries.insert(k.clone(), v.clone());
                     }
                 } else {
@@ -147,7 +157,7 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
                     }
                 }
             }
-            Ok(Value::Dict(entries))
+            Ok(Value::Dict(crate::value::shared_dict(entries)))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'collections' has no attribute '{func}'"

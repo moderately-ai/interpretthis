@@ -124,12 +124,15 @@ fn write_json(
             write_seq_json(items, fmt, depth, out)?;
         }
         Value::Dict(map) => {
-            if map.is_empty() {
+            // Snapshot so the lock isn't held across the recursive
+            // `write_value_json` (a cyclic dict would otherwise deadlock).
+            let snapshot = map.lock().clone();
+            if snapshot.is_empty() {
                 out.push_str("{}");
                 return Ok(());
             }
             // Optionally emit keys in sorted order (`json.dumps(..., sort_keys=True)`).
-            let mut entries: Vec<(&ValueKey, &Value)> = map.iter().collect();
+            let mut entries: Vec<(&ValueKey, &Value)> = snapshot.iter().collect();
             if fmt.sort_keys {
                 entries.sort_by(|a, b| compare_keys_for_sort(a.0, b.0));
             }

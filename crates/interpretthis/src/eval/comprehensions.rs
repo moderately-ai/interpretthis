@@ -155,7 +155,7 @@ pub async fn eval_dict_comp(
     checkpoint.restore(state);
     outcome?;
 
-    Ok(Value::Dict(result_map))
+    Ok(Value::Dict(crate::value::shared_dict(result_map)))
 }
 
 /// Evaluate a set comprehension {expr for x in iterable if cond}.

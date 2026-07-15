@@ -730,7 +730,7 @@ async fn invoke_factory(
                 "bytes" => Ok(Value::Bytes(Vec::new())),
                 "list" => Ok(Value::List(shared_list(Vec::new()))),
                 "tuple" => Ok(Value::Tuple(Vec::new())),
-                "dict" => Ok(Value::Dict(indexmap::IndexMap::new())),
+                "dict" => Ok(Value::Dict(crate::value::shared_dict(indexmap::IndexMap::new()))),
                 "set" => Ok(Value::Set(Vec::new())),
                 "frozenset" => Ok(Value::Frozenset(Vec::new())),
                 _ => Err(InterpreterError::TypeError(format!(

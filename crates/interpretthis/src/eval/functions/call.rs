@@ -51,7 +51,8 @@ pub async fn eval_call(
             // **kwargs unpacking
             let val = eval_expr(state, &kw.value, tools).await?;
             if let Value::Dict(map) = val {
-                for (k, v) in map {
+                let snapshot = map.lock().clone();
+                for (k, v) in snapshot {
                     // A non-string key raises `TypeError: keywords must be
                     // strings` — it was previously skipped silently, so
                     // `f(**{1: 2})` quietly passed no arguments.
@@ -102,6 +103,7 @@ pub async fn eval_call(
                     ))
                 })?;
                 let kw: IndexMap<String, Value> = mapping
+                    .lock()
                     .iter()
                     .filter_map(|(k, v)| match k {
                         ValueKey::String(s) => Some((s.as_str().to_string(), v.clone())),

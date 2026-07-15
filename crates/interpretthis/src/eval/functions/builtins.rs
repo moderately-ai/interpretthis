@@ -937,25 +937,28 @@ pub(super) async fn try_builtin(
         "dict" => {
             check_arg_count(name, args, 0, 1)?;
             if args.is_empty() && kwargs.is_empty() {
-                return Ok(Some(Value::Dict(IndexMap::new())));
+                return Ok(Some(Value::Dict(crate::value::shared_dict(IndexMap::new()))));
             }
             let mut map = IndexMap::new();
             // `dict(mapping)` copies key→value; only a non-mapping argument is
             // read as an iterable of pairs. Iterating a mapping yields its keys,
-            // so the pairs path below would wrongly reject it.
-            let mapping_src = match args.first() {
-                Some(Value::Dict(src) | Value::Counter(src)) => Some(src),
-                Some(Value::DefaultDict(data)) => Some(&data.items),
+            // so the pairs path below would wrongly reject it. Snapshot the
+            // source's contents (Dict is behind a lock; Counter/DefaultDict
+            // store an IndexMap by value).
+            let mapping_src: Option<IndexMap<ValueKey, Value>> = match args.first() {
+                Some(Value::Dict(src)) => Some(src.lock().clone()),
+                Some(Value::Counter(src)) => Some(src.clone()),
+                Some(Value::DefaultDict(data)) => Some(data.items.clone()),
                 _ => None,
             };
             if let Some(src) = mapping_src {
-                for (k, v) in src {
+                for (k, v) in &src {
                     map.insert(k.clone(), v.clone());
                 }
                 for (k, v) in kwargs {
                     map.insert(ValueKey::String(k.clone().into()), v.clone());
                 }
-                return Ok(Some(Value::Dict(map)));
+                return Ok(Some(Value::Dict(crate::value::shared_dict(map))));
             }
             if !args.is_empty() {
                 // dict from iterable of pairs
@@ -995,7 +998,7 @@ pub(super) async fn try_builtin(
             for (k, v) in kwargs {
                 map.insert(ValueKey::String(k.clone().into()), v.clone());
             }
-            Ok(Some(Value::Dict(map)))
+            Ok(Some(Value::Dict(crate::value::shared_dict(map))))
         }
         "set" => {
             check_arg_count(name, args, 0, 1)?;

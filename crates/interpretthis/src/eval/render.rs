@@ -147,7 +147,8 @@ pub fn render<'a>(
             Value::Dict(map) => {
                 let mut out = String::from("{");
                 let mut first = true;
-                for (k, v) in map {
+                let snapshot = map.lock().clone();
+                for (k, v) in &snapshot {
                     if !first {
                         out.push_str(", ");
                     }

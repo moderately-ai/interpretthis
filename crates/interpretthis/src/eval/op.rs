@@ -637,12 +637,15 @@ pub async fn eq(
 /// Instance keys and cannot run user dunders).
 async fn dict_get_instance_key(
     state: &mut InterpreterState,
-    map: &indexmap::IndexMap<crate::value::ValueKey, Value>,
+    map: &crate::value::SharedDict,
     needle: &Value,
     tools: &Tools,
 ) -> Result<Option<Value>, EvalError> {
     let h = hash(state, needle, tools).await?;
-    for (k, v) in map {
+    // Snapshot the entries so the dict lock isn't held across the async
+    // `eq` (which may itself lock / mutate dicts).
+    let snapshot = map.lock().clone();
+    for (k, v) in &snapshot {
         if let crate::value::ValueKey::Instance { hash: kh, value } = k {
             if *kh == h && eq(state, value, needle, tools).await? {
                 return Ok(Some(v.clone()));

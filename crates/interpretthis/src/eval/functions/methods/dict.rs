@@ -48,7 +48,7 @@ pub(crate) fn dispatch_dict_method(
         }
         "copy" => {
             reject_kwargs(method, kwargs)?;
-            Ok(MethodOutcome::pure(Value::Dict(map.clone())))
+            Ok(MethodOutcome::pure(Value::Dict(crate::value::shared_dict(map.clone()))))
         }
         "pop" => {
             // CPython: dict.pop(self, key, default=<unspecified>, /) — positional-only.
@@ -83,7 +83,7 @@ pub(crate) fn dispatch_dict_method(
                     )
                     .into());
                 };
-                for (k, v) in new_entries.clone() {
+                for (k, v) in new_entries.lock().clone() {
                     delta = delta.saturating_add(insert_entry(map, k, v));
                 }
             }

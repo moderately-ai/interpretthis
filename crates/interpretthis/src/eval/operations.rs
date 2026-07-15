@@ -807,11 +807,11 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     }
     // Dict merge (Python 3.9+)
     if let (Value::Dict(a), Value::Dict(b)) = (left, right) {
-        let mut result = a.clone();
-        for (k, v) in b {
+        let mut result = a.lock().clone();
+        for (k, v) in b.lock().iter() {
             result.insert(k.clone(), v.clone());
         }
-        return Ok(Value::Dict(result));
+        return Ok(Value::Dict(crate::value::shared_dict(result)));
     }
     let l = to_int(left)?;
     let r = to_int(right)?;
@@ -1100,6 +1100,11 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
         }
         (Value::Dict(a), Value::Dict(b)) => {
+            if std::sync::Arc::ptr_eq(a, b) {
+                return true;
+            }
+            let a = a.lock().clone();
+            let b = b.lock().clone();
             if a.len() != b.len() {
                 return false;
             }

@@ -209,7 +209,7 @@ pub(crate) async fn bind_params(
                 extra_kwargs.insert(ValueKey::String(k.clone().into()), v.clone());
             }
         }
-        scope.insert(kwarg_name.clone(), Value::Dict(extra_kwargs));
+        scope.insert(kwarg_name.clone(), Value::Dict(crate::value::shared_dict(extra_kwargs)));
     } else {
         for k in kwargs.keys() {
             let claimed = params.args.iter().any(|p| &p.name == k)

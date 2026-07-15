@@ -312,7 +312,7 @@ pub(super) fn str_maketrans(args: &[Value]) -> EvalResult {
     let mut map: IndexMap<ValueKey, Value> = IndexMap::new();
     match args {
         [Value::Dict(d)] => {
-            for (k, v) in d {
+            for (k, v) in d.lock().iter() {
                 let key = match k {
                     ValueKey::Int(_) => k.clone(),
                     ValueKey::String(s) => single_char_key(s)?,
@@ -358,7 +358,7 @@ pub(super) fn str_maketrans(args: &[Value]) -> EvalResult {
             .into());
         }
     }
-    Ok(Value::Dict(map))
+    Ok(Value::Dict(crate::value::shared_dict(map)))
 }
 
 fn hex_digit(b: u8) -> Result<u8, EvalError> {
@@ -450,7 +450,7 @@ pub(super) async fn dict_fromkeys(
         let key = crate::eval::op::key(state, &item, tools).await?;
         map.insert(key, value.clone());
     }
-    Ok(Value::Dict(map))
+    Ok(Value::Dict(crate::value::shared_dict(map)))
 }
 
 /// "Not a list, can't `.sort()`" — shared between the place and

@@ -217,7 +217,11 @@ fn dict_methods(
     let Value::Dict(map) = obj else {
         return Err(type_mismatch("dict"));
     };
-    methods::dict::dispatch_dict_method(map, method, args, kwargs)
+    // The dict methods are sync and mutate through the guard, so
+    // holding the lock across the call is deadlock-free and the shared
+    // dict observes the mutation.
+    let mut guard = map.lock();
+    methods::dict::dispatch_dict_method(&mut guard, method, args, kwargs)
 }
 
 fn counter_methods(

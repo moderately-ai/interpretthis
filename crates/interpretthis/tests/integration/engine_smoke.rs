@@ -320,6 +320,7 @@ fn engine_value_from_json_object() {
     let v = Value::from_json(serde_json::json!({"name": "Alice", "age": 30}));
     match v {
         Value::Dict(map) => {
+            let map = map.lock();
             assert_eq!(map.len(), 2);
             assert!(
                 matches!(map.get(&ValueKey::String("name".into())), Some(Value::String(s)) if s == "Alice")
@@ -338,6 +339,7 @@ fn engine_value_from_json_nested() {
     }));
     match v {
         Value::Dict(map) => {
+            let map = map.lock();
             assert_eq!(map.len(), 2);
             match map.get(&ValueKey::String("users".into())) {
                 Some(Value::List(users)) => {
@@ -367,7 +369,7 @@ fn engine_value_to_json_collections() {
 
     let mut map = indexmap::IndexMap::new();
     map.insert(ValueKey::String("a".into()), Value::Int(1));
-    let dict = Value::Dict(map);
+    let dict = Value::Dict(interpretthis::shared_dict(map));
     assert_eq!(dict.to_json().unwrap(), serde_json::json!({"a": 1}));
 }
 
@@ -449,8 +451,8 @@ fn engine_value_as_list() {
 fn engine_value_as_dict() {
     let mut map = indexmap::IndexMap::new();
     map.insert(ValueKey::String("a".into()), Value::Int(1));
-    let dict = Value::Dict(map);
-    assert_eq!(dict.as_dict().unwrap().len(), 1);
+    let dict = Value::Dict(interpretthis::shared_dict(map));
+    assert_eq!(dict.as_dict().unwrap().lock().len(), 1);
     assert!(Value::Int(1).as_dict().is_none());
 }
 

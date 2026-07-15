@@ -70,7 +70,7 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         // generic-alias machinery we don't model.
         "get_args" => Ok(Value::Tuple(Vec::new())),
         "get_origin" => Ok(Value::None),
-        "get_type_hints" => Ok(Value::Dict(indexmap::IndexMap::new())),
+        "get_type_hints" => Ok(Value::Dict(crate::value::shared_dict(indexmap::IndexMap::new()))),
         // TYPE_CHECKING is a constant False (the runtime check). The
         // constant() path also resolves it; calling it as a function
         // shouldn't happen but we return False defensively.

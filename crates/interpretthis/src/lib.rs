@@ -90,4 +90,4 @@ pub use tools::{KwargsExt, ToolDefinition, ToolError, ToolHandler, Tools};
 // `FunctionDef`, `MatchValue`, …) remain available under `interpretthis::value`
 // for advanced hosts but are intentionally not re-exported at the crate root.
 pub use types::memoryview_bytes;
-pub use value::{ExceptionValue, Value, ValueKey, shared_bytes, shared_list};
+pub use value::{ExceptionValue, Value, ValueKey, shared_bytes, shared_dict, shared_list};

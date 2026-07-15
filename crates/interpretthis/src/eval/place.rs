@@ -194,7 +194,8 @@ fn nav_recurse<R>(
             }
             Value::Dict(map) => {
                 let k = value_to_key(key)?;
-                let v = map
+                let mut guard = map.lock();
+                let v = guard
                     .get_mut(&k)
                     .ok_or_else(|| EvalError::Exception(ExceptionValue::key_error(&k)))?;
                 nav_recurse(v, tail, f)
@@ -219,7 +220,8 @@ fn nav_recurse<R>(
         },
         PlaceStep::Attr(name) => match cur {
             Value::Dict(map) => {
-                let v = map.get_mut(&ValueKey::String(name.as_str().into())).ok_or_else(
+                let mut guard = map.lock();
+                let v = guard.get_mut(&ValueKey::String(name.as_str().into())).ok_or_else(
                     || -> EvalError {
                         InterpreterError::AttributeError(format!(
                             "'dict' object has no attribute '{name}'"

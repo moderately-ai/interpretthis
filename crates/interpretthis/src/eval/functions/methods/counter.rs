@@ -32,7 +32,7 @@ pub(crate) fn dispatch_counter_method(
             // up the return value here so callers see the right type.
             let value = if method == "copy" {
                 match outcome.value {
-                    Value::Dict(d) => Value::Counter(d),
+                    Value::Dict(d) => Value::Counter(d.lock().clone()),
                     other => other,
                 }
             } else {
@@ -146,9 +146,14 @@ fn counter_apply_in_place(
     op: fn(i64, i64) -> i64,
 ) -> Result<(), EvalError> {
     let Some(other) = other_arg else { return Ok(()) };
-    // Mapping branch.
-    if let Value::Dict(other_map) | Value::Counter(other_map) = other {
-        for (k, v) in other_map {
+    // Mapping branch. Snapshot Dict/Counter contents into an owned map.
+    let other_map = match other {
+        Value::Dict(m) => Some(m.lock().clone()),
+        Value::Counter(m) => Some(m.clone()),
+        _ => None,
+    };
+    if let Some(other_map) = other_map {
+        for (k, v) in &other_map {
             let delta = match v {
                 Value::Int(i) => *i,
                 Value::Bool(b) => i64::from(*b),

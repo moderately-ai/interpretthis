@@ -22,7 +22,7 @@ use indexmap::IndexMap;
 
 use crate::{
     error::{EvalResult, InterpreterError},
-    value::{Value, shared_fields, shared_list},
+    value::{Value, shared_dict, shared_fields, shared_list},
 };
 
 pub fn has_function(name: &str) -> bool {
@@ -68,10 +68,12 @@ fn shallow_clone(value: &Value) -> Value {
         Value::ByteArray(bytes) => {
             Value::ByteArray(crate::value::shared_bytes(bytes.lock().clone()))
         }
-        // Dict / Set / Frozenset / Tuple / Counter / DefaultDict / Deque
-        // store their contents by value, so a plain clone is already an
+        // Dict is Arc-shared, so a fresh backing store is needed (an
+        // Arc clone would alias the source); its elements stay shared.
+        Value::Dict(map) => Value::Dict(shared_dict(map.lock().clone())),
+        // Set / Frozenset / Tuple / Counter / DefaultDict / Deque store
+        // their contents by value, so a plain clone is already an
         // independent outer container with shared elements.
-        Value::Dict(map) => Value::Dict(map.clone()),
         Value::Set(items) => Value::Set(items.clone()),
         Value::Frozenset(items) => Value::Frozenset(items.clone()),
         Value::Tuple(items) => Value::Tuple(items.clone()),
@@ -123,11 +125,12 @@ fn deep_clone_memo(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
             Value::Frozenset(items.iter().map(|v| deep_clone_memo(v, memo)).collect())
         }
         Value::Dict(map) => {
-            let mut out = IndexMap::with_capacity(map.len());
-            for (k, v) in map {
+            let snapshot = map.lock().clone();
+            let mut out = IndexMap::with_capacity(snapshot.len());
+            for (k, v) in &snapshot {
                 out.insert(k.clone(), deep_clone_memo(v, memo));
             }
-            Value::Dict(out)
+            Value::Dict(crate::value::shared_dict(out))
         }
         Value::Counter(map) => {
             let mut out = IndexMap::with_capacity(map.len());
