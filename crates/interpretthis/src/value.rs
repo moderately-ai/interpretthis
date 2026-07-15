@@ -2350,6 +2350,12 @@ impl Value {
             Self::EnumMember { class_name, member_name, value, .. } => {
                 format!("<{class_name}.{member_name}: {}>", value.repr())
             }
+            // `repr(Decimal('1.5'))` == "Decimal('1.5')" — the digit string is
+            // the Display form (which already restores a negative zero).
+            Self::Decimal(..) => format!("Decimal('{self}')"),
+            // `repr(Fraction(3, 2))` == "Fraction(3, 2)"; the denominator is
+            // always shown, even when it is 1 (`Fraction(5, 1)`).
+            Self::Fraction(fr) => format!("Fraction({}, {})", fr.numer(), fr.denom()),
             other => format!("{other}"),
         }
     }
