@@ -234,6 +234,13 @@ pub async fn iter(
         return Ok(items);
     }
     let Some(iter_method) = instance_slot(state, value, "__iter__") else {
+        // Old-style sequence iteration: a class with `__getitem__` (int
+        // indices) but no `__iter__` is iterated by `__getitem__(0)`,
+        // `(1)`, … until it raises `IndexError` — CPython's fallback
+        // iteration protocol.
+        if instance_slot(state, value, "__getitem__").is_some() {
+            return Box::pin(getitem_iterate(state, value, tools)).await;
+        }
         return crate::types::dispatch_iter(value);
     };
 
@@ -265,6 +272,34 @@ pub async fn iter(
                 iterator_value = updated_self;
             }
             Err(EvalError::Exception(exc)) if exc.type_name == "StopIteration" => {
+                return Ok(items);
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Err(InterpreterError::LimitExceeded(format!(
+        "iterator exceeded maximum iterations ({max_iters})"
+    ))
+    .into())
+}
+
+/// CPython's `__getitem__`-based sequence iteration: index from `0`
+/// upward until `__getitem__` raises `IndexError`. Used for a class that
+/// defines `__getitem__` but not `__iter__`.
+async fn getitem_iterate(
+    state: &mut InterpreterState,
+    value: &Value,
+    tools: &Tools,
+) -> Result<Vec<Value>, EvalError> {
+    let max_iters = state.config.max_while_iterations;
+    let mut items: Vec<Value> = Vec::new();
+    for i in 0..max_iters {
+        let idx = i64::try_from(i).map_err(|_| {
+            EvalError::from(InterpreterError::Runtime("sequence index overflow".into()))
+        })?;
+        match getitem(state, value, &Value::Int(idx), tools).await {
+            Ok(item) => items.push(item),
+            Err(EvalError::Exception(exc)) if exc.type_name == "IndexError" => {
                 return Ok(items);
             }
             Err(other) => return Err(other),
