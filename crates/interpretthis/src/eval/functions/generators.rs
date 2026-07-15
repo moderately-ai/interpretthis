@@ -124,7 +124,16 @@ fn if_branch_suspendable(stmts: &[Stmt]) -> bool {
                     if_branch_suspendable(&eh.body)
                 })
         }
-        Stmt::For(_) | Stmt::While(_) | Stmt::With(_) | Stmt::TryStar(_) | Stmt::Match(_) => {
+        // `step_try_phase` steps a yield-bearing `while` through its loop
+        // stepper (see the arm there), so a `while` may carry a yield as long as
+        // its own body is loop-suspendable and it has no `else` clause. (`for`
+        // is not yet delegated — its position-based resume doesn't survive the
+        // try re-entry — so it stays on the eager fallback.)
+        Stmt::While(w) => {
+            !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
+                || (w.orelse.is_empty() && loop_body_suspendable(&w.body))
+        }
+        Stmt::For(_) | Stmt::With(_) | Stmt::TryStar(_) | Stmt::Match(_) => {
             !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
         }
         _ => true,
@@ -1082,18 +1091,27 @@ async fn step_try_phase(
         // position is pushed by the recursive call). A direct statement
         // runs via `eval_stmt` and, if it yields, sets `resume_at_yield`
         // so re-entering that statement delivers the sent value.
+        let stmt_yields = super::definitions::contains_yield_stmts(std::slice::from_ref(&stmts[i]));
         let (result, nested) = match &stmts[i] {
             Stmt::Try(nested_try) => {
                 (run_try_suspendable(state, nested_try, tools).await.map(|()| Value::None), true)
             }
             Stmt::If(if_node)
-                if if_branch_suspendable(&if_node.body)
-                    && if_branch_suspendable(&if_node.orelse)
-                    && super::definitions::contains_yield_stmts(std::slice::from_ref(
-                        &stmts[i],
-                    )) =>
+                if stmt_yields
+                    && if_branch_suspendable(&if_node.body)
+                    && if_branch_suspendable(&if_node.orelse) =>
             {
                 (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+            }
+            // A yield-bearing loop inside the `try` steps through its own loop
+            // stepper so `try: while True: yield` (cleanup generators) suspends
+            // at the yield. Safe because its loop body cannot nest another
+            // same-shape loop with a yield (`loop_body_suspendable`), so the
+            // single `while_resume`/for-resume field never conflicts.
+            Stmt::While(w)
+                if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
+            {
+                (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
             }
             _ => (eval_stmt(state, &stmts[i], tools).await, false),
         };
