@@ -20,6 +20,13 @@ use crate::{
 /// design).
 type EvalFut<'a> = Pin<Box<dyn Future<Output = EvalResult> + Send + 'a>>;
 
+/// Grow the host stack when the remaining headroom drops below this, matching
+/// the async function-call path (`dispatch::grow_stack`). Lets the sync numeric
+/// tree-evaluator recurse up to `max_recursion_depth` regardless of the base
+/// stack size instead of overflowing first.
+const STACK_RED_ZONE: usize = 512 * 1024;
+const STACK_GROW_SIZE: usize = 32 * 1024 * 1024;
+
 /// 1-based line number that byte `offset` falls on inside `source`.
 /// Returns 1 if `offset` is past the end (caller passed a degenerate
 /// or default range), so a stamped message still names *some* line
@@ -118,6 +125,23 @@ pub mod strings;
 /// state machine is only as large as the active arm (not the max of all
 /// arms). That cuts native stack use per recursive Python call and is
 /// what lets realistic recursion depths work on default OS stacks.
+/// Wrap a *compound* statement's evaluation (`if`/`for`/`while`/`with`/`try`/
+/// `match`/class body — the ones that recurse into a nested block) with the
+/// expression-depth guard and on-demand stack growth, so deeply nested blocks
+/// raise a catchable RecursionError instead of overflowing the host stack.
+/// Simple statements and loop *iterations* (which re-enter `eval_body`, not
+/// this macro) pay nothing.
+macro_rules! guarded_block {
+    ($state:ident, $line:ident, $call:expr) => {
+        grow_expr(async move {
+            $state.enter_expr().map_err(EvalError::Interpreter)?;
+            let r = $call.await.map_err(|e| stamp_line(e, $line));
+            $state.exit_expr();
+            r
+        })
+    };
+}
+
 pub fn eval_stmt<'a>(
     state: &'a mut InterpreterState,
     stmt: &'a Stmt,
@@ -157,15 +181,15 @@ pub fn eval_stmt<'a>(
                 .await
                 .map_err(|e| stamp_line(e, stmt_line))
         }),
-        Stmt::If(node) => Box::pin(async move {
-            control_flow::eval_if(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
-        }),
-        Stmt::For(node) => Box::pin(async move {
-            control_flow::eval_for(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
-        }),
-        Stmt::While(node) => Box::pin(async move {
-            control_flow::eval_while(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
-        }),
+        Stmt::If(node) => {
+            guarded_block!(state, stmt_line, control_flow::eval_if(state, node, tools))
+        }
+        Stmt::For(node) => {
+            guarded_block!(state, stmt_line, control_flow::eval_for(state, node, tools))
+        }
+        Stmt::While(node) => {
+            guarded_block!(state, stmt_line, control_flow::eval_while(state, node, tools))
+        }
         Stmt::Break(_) => Box::pin(async move { Err(EvalError::Signal(ControlFlow::Break)) }),
         Stmt::Continue(_) => Box::pin(async move { Err(EvalError::Signal(ControlFlow::Continue)) }),
         Stmt::Return(node) => Box::pin(async move {
@@ -187,14 +211,12 @@ pub fn eval_stmt<'a>(
                 .await
                 .map_err(|e| stamp_line(e, stmt_line))
         }),
-        Stmt::Try(node) => Box::pin(async move {
-            exceptions::eval_try(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
-        }),
-        Stmt::TryStar(node) => Box::pin(async move {
-            exceptions::eval_try_star(state, node, tools)
-                .await
-                .map_err(|e| stamp_line(e, stmt_line))
-        }),
+        Stmt::Try(node) => {
+            guarded_block!(state, stmt_line, exceptions::eval_try(state, node, tools))
+        }
+        Stmt::TryStar(node) => {
+            guarded_block!(state, stmt_line, exceptions::eval_try_star(state, node, tools))
+        }
         Stmt::Raise(node) => Box::pin(async move {
             exceptions::eval_raise(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
         }),
@@ -204,12 +226,12 @@ pub fn eval_stmt<'a>(
         Stmt::Delete(node) => Box::pin(async move {
             delete::eval_delete(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
         }),
-        Stmt::Match(node) => Box::pin(async move {
-            match_stmt::eval_match(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
-        }),
-        Stmt::With(node) => Box::pin(async move {
-            control_flow::eval_with(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
-        }),
+        Stmt::Match(node) => {
+            guarded_block!(state, stmt_line, match_stmt::eval_match(state, node, tools))
+        }
+        Stmt::With(node) => {
+            guarded_block!(state, stmt_line, control_flow::eval_with(state, node, tools))
+        }
         Stmt::Import(node) => {
             let r = modules::eval_import(state, node).map_err(|e| stamp_line(e, stmt_line));
             Box::pin(async move { r })
@@ -218,9 +240,9 @@ pub fn eval_stmt<'a>(
             let r = modules::eval_import_from(state, node).map_err(|e| stamp_line(e, stmt_line));
             Box::pin(async move { r })
         }
-        Stmt::ClassDef(node) => Box::pin(async move {
-            classes::eval_class_def(state, node, tools).await.map_err(|e| stamp_line(e, stmt_line))
-        }),
+        Stmt::ClassDef(node) => {
+            guarded_block!(state, stmt_line, classes::eval_class_def(state, node, tools))
+        }
         Stmt::Pass(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => {
             Box::pin(async move { Ok(Value::None) })
         }
@@ -282,7 +304,7 @@ pub fn try_eval_expr_sync(
 /// to user instances, lazy proxies, strings/containers, builtins, or anything
 /// else return `None` so the async path can preserve dunder/proxy semantics.
 fn try_eval_numeric_expr_sync(state: &mut InterpreterState, expr: &Expr) -> Option<EvalResult> {
-    let outcome = eval_numeric_unmetered(state, expr)?;
+    let outcome = eval_numeric_unmetered(state, expr, 0)?;
     let op_count = match &outcome {
         Ok((_, count)) | Err((_, count)) => *count,
     };
@@ -299,8 +321,29 @@ fn try_eval_numeric_expr_sync(state: &mut InterpreterState, expr: &Expr) -> Opti
 
 type NumericSync = Result<(Value, usize), (EvalError, usize)>;
 
-fn eval_numeric_unmetered(state: &InterpreterState, expr: &Expr) -> Option<NumericSync> {
-    match expr {
+fn eval_numeric_unmetered(
+    state: &InterpreterState,
+    expr: &Expr,
+    depth: u32,
+) -> Option<NumericSync> {
+    // A deeply left/right-nested numeric expression (`1+1+…+1` with tens of
+    // thousands of terms) recurses here once per operator. Two guards, mirroring
+    // the function-call recursion (see dispatch::grow_stack): the depth counter
+    // raises a catchable RecursionError at the configured limit, and
+    // `stacker::maybe_grow` grows the host stack on demand so the recursion
+    // reaches that limit cleanly instead of overflowing first (an uncatchable
+    // SIGABRT) on a small base stack. Real numeric expressions are shallow, so
+    // maybe_grow never actually grows on the hot path — it's a cheap check.
+    if depth >= state.config.max_recursion_depth {
+        return Some(Err((
+            crate::error::InterpreterError::RecursionLimitExceeded {
+                limit: state.config.max_recursion_depth,
+            }
+            .into(),
+            1,
+        )));
+    }
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || match expr {
         Expr::Constant(node) => {
             let value = literals::eval_constant(&node.value);
             is_sync_numeric(&value).then_some(Ok((value, 1)))
@@ -310,12 +353,12 @@ fn eval_numeric_unmetered(state: &InterpreterState, expr: &Expr) -> Option<Numer
             is_sync_numeric(&value).then_some(Ok((value, 1)))
         }
         Expr::BinOp(node) => {
-            let left = eval_numeric_unmetered(state, &node.left)?;
+            let left = eval_numeric_unmetered(state, &node.left, depth + 1)?;
             let (left, left_count) = match left {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let right = eval_numeric_unmetered(state, &node.right)?;
+            let right = eval_numeric_unmetered(state, &node.right, depth + 1)?;
             let (right, right_count) = match right {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -333,27 +376,28 @@ fn eval_numeric_unmetered(state: &InterpreterState, expr: &Expr) -> Option<Numer
                 .map_err(|err| (err, count)),
             )
         }
-        Expr::Compare(node) => eval_numeric_compare_unmetered(state, node),
+        Expr::Compare(node) => eval_numeric_compare_unmetered(state, node, depth),
         _ => None,
-    }
+    })
 }
 
 fn eval_numeric_compare_unmetered(
     state: &InterpreterState,
     node: &rustpython_parser::ast::ExprCompare,
+    depth: u32,
 ) -> Option<NumericSync> {
     if node.ops.iter().any(|op| {
         matches!(op, rustpython_parser::ast::CmpOp::In | rustpython_parser::ast::CmpOp::NotIn)
     }) {
         return None;
     }
-    let left = eval_numeric_unmetered(state, &node.left)?;
+    let left = eval_numeric_unmetered(state, &node.left, depth + 1)?;
     let (mut left, mut count) = match left {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
     for (op, comparator) in node.ops.iter().zip(node.comparators.iter()) {
-        let right = eval_numeric_unmetered(state, comparator)?;
+        let right = eval_numeric_unmetered(state, comparator, depth + 1)?;
         let (right, right_count) = match right {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
@@ -378,6 +422,14 @@ fn eval_numeric_compare_unmetered(
 
 const fn is_sync_numeric(value: &Value) -> bool {
     matches!(value, Value::Bool(_) | Value::Int(_) | Value::BigInt(_) | Value::Float(_))
+}
+
+/// Box an expression future so each poll runs under `stacker::maybe_grow`,
+/// letting a deep recursive expression chain grow the host stack on demand
+/// instead of overflowing it. Only the recursion-prone, non-bracketed arms of
+/// [`eval_expr`] use this; the sync fast path never allocates it.
+fn grow_expr<'a>(fut: impl Future<Output = EvalResult> + Send + 'a) -> EvalFut<'a> {
+    Box::pin(functions::dispatch::grow_stack(fut))
 }
 
 /// Evaluate a single expression.
@@ -414,14 +466,22 @@ pub fn eval_expr<'a>(
             let r = names::eval_name(state, node, tools);
             Box::pin(async move { r })
         }
-        Expr::Attribute(node) => Box::pin(names::eval_attribute(state, node, tools)),
-        Expr::Subscript(node) => Box::pin(names::eval_subscript(state, node, tools)),
-        Expr::BinOp(node) => Box::pin(operations::eval_binop(state, node, tools)),
-        Expr::UnaryOp(node) => Box::pin(operations::eval_unaryop(state, node, tools)),
+        // These arms nest recursively through `eval_expr` without introducing a
+        // bracket (`a.b.c.d…`, `not not…`, `"a"+"a"+…`, `x if p else x if p …`),
+        // so a pathological chain would overflow the host stack before the
+        // per-node op counter bounds it. Grow the stack on demand (as the
+        // function-call path does) so deep chains evaluate — or hit the op /
+        // memory limit — instead of aborting the process. Bracketed nesting
+        // (nested list/call/subscript) is bounded earlier by the parse-time
+        // depth guard; flat nodes (Compare, BoolOp) don't recurse.
+        Expr::Attribute(node) => grow_expr(names::eval_attribute(state, node, tools)),
+        Expr::Subscript(node) => grow_expr(names::eval_subscript(state, node, tools)),
+        Expr::BinOp(node) => grow_expr(operations::eval_binop(state, node, tools)),
+        Expr::UnaryOp(node) => grow_expr(operations::eval_unaryop(state, node, tools)),
         Expr::Compare(node) => Box::pin(operations::eval_compare(state, node, tools)),
         Expr::BoolOp(node) => Box::pin(operations::eval_boolop(state, node, tools)),
-        Expr::IfExp(node) => Box::pin(operations::eval_ifexp(state, node, tools)),
-        Expr::Call(node) => Box::pin(functions::eval_call(state, node, tools)),
+        Expr::IfExp(node) => grow_expr(operations::eval_ifexp(state, node, tools)),
+        Expr::Call(node) => grow_expr(functions::eval_call(state, node, tools)),
         Expr::Lambda(node) => Box::pin(functions::eval_lambda_def(state, node, tools)),
         Expr::JoinedStr(node) => Box::pin(strings::eval_joined_str(state, node, tools)),
         Expr::FormattedValue(node) => Box::pin(strings::eval_formatted_value(state, node, tools)),
@@ -431,7 +491,7 @@ pub fn eval_expr<'a>(
         Expr::GeneratorExp(node) => {
             Box::pin(comprehensions::eval_generator_exp(state, node, tools))
         }
-        Expr::NamedExpr(node) => Box::pin(names::eval_named_expr(state, node, tools)),
+        Expr::NamedExpr(node) => grow_expr(names::eval_named_expr(state, node, tools)),
         Expr::Starred(node) => eval_expr(state, &node.value, tools),
         Expr::Slice(node) => Box::pin(names::eval_slice(state, node, tools)),
         Expr::Yield(node) => Box::pin(async move {

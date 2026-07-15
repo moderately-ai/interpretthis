@@ -52,6 +52,20 @@ pub async fn eval_binop(
     node: &ast::ExprBinOp,
     tools: &Tools,
 ) -> EvalResult {
+    // Bound async expression nesting (non-numeric chains like `"a"+"a"+…`) so a
+    // pathological chain raises RecursionError and stops growing the host stack
+    // rather than recursing to the op-count limit.
+    state.enter_expr().map_err(EvalError::Interpreter)?;
+    let out = eval_binop_inner(state, node, tools).await;
+    state.exit_expr();
+    out
+}
+
+async fn eval_binop_inner(
+    state: &mut InterpreterState,
+    node: &ast::ExprBinOp,
+    tools: &Tools,
+) -> EvalResult {
     let left = match crate::eval::try_eval_expr_sync(state, &node.left, tools) {
         Some(r) => r?,
         None => eval_expr(state, &node.left, tools).await?,
@@ -975,6 +989,18 @@ pub async fn eval_unaryop(
     node: &ast::ExprUnaryOp,
     tools: &Tools,
 ) -> EvalResult {
+    // Bound `not not …` / `- - - …` chains (see eval_binop).
+    state.enter_expr().map_err(EvalError::Interpreter)?;
+    let out = eval_unaryop_inner(state, node, tools).await;
+    state.exit_expr();
+    out
+}
+
+async fn eval_unaryop_inner(
+    state: &mut InterpreterState,
+    node: &ast::ExprUnaryOp,
+    tools: &Tools,
+) -> EvalResult {
     let operand = eval_expr(state, &node.operand, tools).await?;
     let operand = resolve_proxy(&operand).await?;
     // Route through op::unaryop so a user-class operand's __neg__/__pos__/
@@ -1523,6 +1549,18 @@ pub async fn eval_boolop(
 
 /// Evaluate a conditional expression (ternary: x if cond else y).
 pub async fn eval_ifexp(
+    state: &mut InterpreterState,
+    node: &ast::ExprIfExp,
+    tools: &Tools,
+) -> EvalResult {
+    // Bound nested-ternary chains `x if p else x if p else …` (see eval_binop).
+    state.enter_expr().map_err(EvalError::Interpreter)?;
+    let out = eval_ifexp_inner(state, node, tools).await;
+    state.exit_expr();
+    out
+}
+
+async fn eval_ifexp_inner(
     state: &mut InterpreterState,
     node: &ast::ExprIfExp,
     tools: &Tools,

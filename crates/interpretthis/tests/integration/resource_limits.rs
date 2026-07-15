@@ -624,3 +624,160 @@ async fn resource_limits_repeated_execution_does_not_leak_proxies() {
         assert_eq!(resp.stdout.trim(), format!("iteration_{i}"));
     }
 }
+
+// --- AST-depth DoS guard ---
+
+#[tokio::test]
+async fn dos_deep_parens_clean_error() {
+    // A paren bomb must fail cleanly (SyntaxError/limit), never SIGSEGV the host.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let n = 100_000;
+    let code = format!("x = {}1{}", "(".repeat(n), ")".repeat(n));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean error for deep-paren input");
+}
+
+#[tokio::test]
+async fn dos_deep_chain_clean_error() {
+    // A long left-associative chain (no brackets) yields a deep AST: the sync
+    // numeric fast path recurses per operator and its Drop is deep. Must be a
+    // clean RecursionError, never a SIGABRT. ~200 KB, under the source cap.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let n = 100_000;
+    let code = format!("x = 1{}\nprint(x)", "+1".repeat(n));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean recursion error for deep chain");
+}
+
+#[tokio::test]
+async fn dos_oversized_source_rejected() {
+    // Above the byte cap: clean SyntaxError, never a crash.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let code = format!("x = '{}'", "a".repeat(600 * 1024));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected oversized source to be rejected");
+}
+
+#[tokio::test]
+async fn dos_large_shallow_program_ok() {
+    // Many shallow statements (large but not deep) must still run.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let mut code = String::new();
+    for i in 0..5000 {
+        code.push_str(&format!("v{i} = {i}\n"));
+    }
+    code.push_str("print(v4999)\n");
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "4999");
+}
+
+#[tokio::test]
+async fn dos_normal_nesting_still_ok() {
+    // Reasonable nesting well under the limit must still evaluate.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let code = "x = ((((1 + 2)) * 3))\nprint(x)";
+    let resp = interp.execute(code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "9");
+}
+
+#[tokio::test]
+async fn dos_deep_list_clean_error() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let n = 100_000;
+    let code = format!("x = {}1{}", "[".repeat(n), "]".repeat(n));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean error for deep nested list");
+}
+
+#[tokio::test]
+async fn dos_deep_call_clean_error() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let n = 100_000;
+    let code = format!("x = {}1{}", "abs(".repeat(n), ")".repeat(n));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean error for deep nested calls");
+}
+
+#[tokio::test]
+async fn dos_deep_attribute_chain_clean_error() {
+    // a.b.c.d… (no brackets) recurses the async attribute path — must raise
+    // RecursionError, not overflow / grow the stack unbounded.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let code = format!("v = x{}", ".a".repeat(50_000));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean error for deep attribute chain");
+}
+
+#[tokio::test]
+async fn dos_deep_not_chain_clean_error() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let code = format!("v = {}True", "not ".repeat(50_000));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean error for deep not chain");
+}
+
+#[tokio::test]
+async fn dos_deep_str_concat_chain_clean_error() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let code = format!("v = 'a'{}", "+'a'".repeat(50_000));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean error for deep str-concat chain");
+}
+
+#[tokio::test]
+async fn dos_shallow_attribute_and_ops_ok() {
+    // Ordinary nesting/attribute access is well under the limit and must work.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let code = "class C:\n    def __init__(self): self.v = 5\no = C()\nprint(o.v + 1 + 2 + 3)\nprint('a' + 'b' + 'c')\nprint(not not True)\n";
+    let resp = interp.execute(code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "11\nabc\nTrue");
+}
+
+#[tokio::test]
+async fn dos_deep_subscript_chain_clean_error() {
+    // a[0][0][0]… — sequential subscripts don't increase bracket depth, so the
+    // parse-time bracket guard misses them; the eval_place depth guard catches
+    // them instead.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let code = format!("v = a{}", "[0]".repeat(50_000));
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "expected clean error for deep subscript chain");
+}
+
+#[tokio::test]
+async fn dos_deep_nested_statements_clean_error() {
+    // Nested compound statements with 1-space-per-level indentation keep the
+    // source small (~O(depth^2)/2) so ~700 levels fit under the byte cap and
+    // exercise the statement-eval recursion. Must not overflow the host stack.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let mut code = String::new();
+    for i in 0..700 {
+        for _ in 0..i {
+            code.push(' ');
+        }
+        code.push_str("if True:\n");
+    }
+    for _ in 0..700 {
+        code.push(' ');
+    }
+    code.push_str("x = 1\n");
+    assert!(code.len() < 512 * 1024, "test source should fit under the cap: {}", code.len());
+    let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
+    let _ = resp.error; // bounded outcome, never a crash
+}

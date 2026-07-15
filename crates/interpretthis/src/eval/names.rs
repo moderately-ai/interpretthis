@@ -129,6 +129,18 @@ pub async fn eval_named_expr(
     node: &ast::ExprNamedExpr,
     tools: &Tools,
 ) -> EvalResult {
+    // Bound deeply nested walrus `(a := (b := (c := …)))` — see eval_binop.
+    state.enter_expr().map_err(EvalError::from)?;
+    let out = eval_named_expr_inner(state, node, tools).await;
+    state.exit_expr();
+    out
+}
+
+async fn eval_named_expr_inner(
+    state: &mut InterpreterState,
+    node: &ast::ExprNamedExpr,
+    tools: &Tools,
+) -> EvalResult {
     let value = eval_expr(state, &node.value, tools).await?;
     match node.target.as_ref() {
         ast::Expr::Name(name_node) => {
@@ -156,6 +168,19 @@ pub async fn eval_named_expr(
 /// borrow for class-registry lookups. B1's user-class TypeObject
 /// promotion replaces that fallback with a state-aware slot.
 pub async fn eval_attribute(
+    state: &mut InterpreterState,
+    node: &ast::ExprAttribute,
+    tools: &Tools,
+) -> EvalResult {
+    // Bound deep attribute chains `a.b.c.d…` so a pathological chain raises
+    // RecursionError and stops growing the host stack (see operations::eval_binop).
+    state.enter_expr().map_err(EvalError::from)?;
+    let out = eval_attribute_inner(state, node, tools).await;
+    state.exit_expr();
+    out
+}
+
+async fn eval_attribute_inner(
     state: &mut InterpreterState,
     node: &ast::ExprAttribute,
     tools: &Tools,
@@ -578,6 +603,19 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
 /// `__getitem__`. Index access routes through `dispatch_getitem` (A5) so
 /// list/tuple/str/bytes/dict/range all share one entry point.
 pub async fn eval_subscript(
+    state: &mut InterpreterState,
+    node: &ast::ExprSubscript,
+    tools: &Tools,
+) -> EvalResult {
+    // Bound deep subscript chains `a[0][0][0]…` (sequential subscripts don't
+    // nest brackets, so the parse-time guard misses them) — see eval_binop.
+    state.enter_expr().map_err(EvalError::from)?;
+    let out = eval_subscript_inner(state, node, tools).await;
+    state.exit_expr();
+    out
+}
+
+async fn eval_subscript_inner(
     state: &mut InterpreterState,
     node: &ast::ExprSubscript,
     tools: &Tools,

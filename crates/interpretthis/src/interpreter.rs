@@ -11,6 +11,67 @@ use crate::{
     value::Value,
 };
 
+/// Hard cap on submitted source length. Deep pathological input (a 100k-term
+/// expression is ~200 KB) is the stack-overflow-DoS vector; a generous byte cap
+/// is the cheap outer bound. Real structured-output code is far smaller.
+const MAX_SOURCE_BYTES: usize = 512 * 1024;
+
+/// Stack size for the parse and the AST Drop — the two operations whose depth
+/// tracks the *whole* AST rather than the (recursion-limited) eval. Bracket
+/// nesting is capped before parse and `MAX_SOURCE_BYTES` bounds the deepest
+/// possible chain, so this comfortably covers the recursive `Drop` of the
+/// deepest AST a legal submission can produce. Allocated lazily by `stacker`
+/// only when a poll actually runs low, so it is a virtual bound, not a resident
+/// cost on normal input.
+const AST_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// Whether the maximum bracket-nesting depth of `code` exceeds `limit`.
+///
+/// A conservative, iterative (non-recursive) scan: it counts `([{` / `)]}`
+/// outside string literals and `#` comments. It does not fully model triple
+/// quotes or f-strings, but any imprecision only over-counts (rejecting some
+/// otherwise-legal but absurdly bracket-dense input), never under-counts real
+/// nesting — and the limit sits far above any real program. This runs before
+/// the recursive-descent parser so a bracket bomb (`[[[…]]]` × 100k) is a clean
+/// SyntaxError instead of a parser stack overflow.
+fn bracket_depth_exceeds(code: &str, limit: usize) -> bool {
+    let mut depth: usize = 0;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    let mut in_comment = false;
+    for ch in code.chars() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => in_string = Some(ch),
+            '#' => in_comment = true,
+            '(' | '[' | '{' => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Response from a single interpreter execution.
 ///
 /// Check `is_ok()` or `result()` for the execution outcome. Even on error,
@@ -117,16 +178,43 @@ impl Interpreter {
         // Store source for function source extraction
         state.current_source = code.to_string();
 
-        // Parse
-        let stmts = match crate::parser::parse(code) {
+        // Defence-in-depth against a stack-overflow DoS: a pathologically deep
+        // expression (`[[[…]]]`, `f(f(f(…)))`, `1+1+…+1` × 100k) would otherwise
+        // overflow the host stack — during the recursive-descent parse, during
+        // eval, or during the recursive Drop of the resulting AST — as an
+        // *uncatchable* SIGABRT rather than a catchable error. Bound the input
+        // size and bracket-nesting depth up front (a caller-side limit usually
+        // masks this, but the core must be safe on its own), evaluate the
+        // numeric fast path under a recursion counter (see eval_numeric_unmetered),
+        // and run the parse and the AST Drop on a large stack.
+        if code.len() > MAX_SOURCE_BYTES {
+            return InterpreterResponse {
+                stdout: state.print_buffer.clone(),
+                error: Some(InterpreterError::Syntax(format!(
+                    "source exceeds the {MAX_SOURCE_BYTES}-byte limit"
+                ))),
+            };
+        }
+        if bracket_depth_exceeds(code, state.config.max_recursion_depth as usize) {
+            return InterpreterResponse {
+                stdout: state.print_buffer.clone(),
+                error: Some(InterpreterError::Syntax("expression nesting is too deep".to_string())),
+            };
+        }
+
+        // Parse (on a large stack: deeply nested source recurses the parser).
+        let stmts = match stacker::grow(AST_STACK_SIZE, || crate::parser::parse(code)) {
             Ok(s) => s,
             Err(e) => {
                 return InterpreterResponse { stdout: state.print_buffer.clone(), error: Some(e) };
             }
         };
 
-        // Evaluate
-        match crate::eval::eval_body(&mut state, &stmts, tools).await {
+        // Evaluate, then Drop the (possibly very deep) AST on a large stack so a
+        // long operator chain / deep nesting can't overflow during recursive Drop.
+        let eval_result = crate::eval::eval_body(&mut state, &stmts, tools).await;
+        stacker::grow(AST_STACK_SIZE, move || drop(stmts));
+        match eval_result {
             Ok(_) => {
                 // CPython runs a generator's `finally`/`with` cleanup when
                 // it is finalised at interpreter shutdown; finalise any

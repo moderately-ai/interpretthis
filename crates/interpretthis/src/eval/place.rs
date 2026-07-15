@@ -78,61 +78,76 @@ pub(crate) fn eval_place<'a>(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<Place>, EvalError>> + Send + 'a>,
 > {
-    Box::pin(async move {
-        match expr {
-            Expr::Name(name_node) => {
-                Ok(Some(Place { root: name_node.id.as_str().to_string(), steps: Vec::new() }))
-            }
-            Expr::Subscript(sub) => {
-                let Some(mut place) = eval_place(state, &sub.value, tools).await? else {
-                    return Ok(None);
-                };
-                if let Expr::Slice(slice) = sub.slice.as_ref() {
-                    let lower = eval_opt(state, slice.lower.as_deref(), tools).await?;
-                    let upper = eval_opt(state, slice.upper.as_deref(), tools).await?;
-                    let step = eval_opt(state, slice.step.as_deref(), tools).await?;
-                    place.steps.push(PlaceStep::Slice(Box::new(SliceSpec { lower, upper, step })));
-                } else {
-                    let key = eval_expr(state, &sub.slice, tools).await?;
-                    // A computed `slice()` object subscript (`lst[s] = v` where
-                    // `s = slice(...)`) is slice assignment, exactly like the
-                    // `lst[i:j:k]` syntax — turn it into a Slice step rather than
-                    // an integer-index step.
-                    if let Value::Slice(s) = key {
-                        let to_opt =
-                            |v: Value| if matches!(v, Value::None) { None } else { Some(v) };
+    // Recursive place resolution (`a.b.c.d…`, `a[0][0][0]…`) is grown on demand
+    // like the eval spine so a deep chain reaches the expression-depth limit
+    // (below) instead of overflowing the host stack first.
+    Box::pin(crate::eval::functions::dispatch::grow_stack(async move {
+        // Bound recursive place resolution by the same expression-depth limit as
+        // the eval spine, so a pathological chain raises RecursionError.
+        state.enter_expr().map_err(EvalError::Interpreter)?;
+        let result = async {
+            match expr {
+                Expr::Name(name_node) => {
+                    Ok(Some(Place { root: name_node.id.as_str().to_string(), steps: Vec::new() }))
+                }
+                Expr::Subscript(sub) => {
+                    let Some(mut place) = eval_place(state, &sub.value, tools).await? else {
+                        return Ok(None);
+                    };
+                    if let Expr::Slice(slice) = sub.slice.as_ref() {
+                        let lower = eval_opt(state, slice.lower.as_deref(), tools).await?;
+                        let upper = eval_opt(state, slice.upper.as_deref(), tools).await?;
+                        let step = eval_opt(state, slice.step.as_deref(), tools).await?;
                         place.steps.push(PlaceStep::Slice(Box::new(SliceSpec {
-                            lower: to_opt(s.start),
-                            upper: to_opt(s.stop),
-                            step: to_opt(s.step),
+                            lower,
+                            upper,
+                            step,
                         })));
                     } else {
-                        place.steps.push(PlaceStep::Index(key));
+                        let key = eval_expr(state, &sub.slice, tools).await?;
+                        // A computed `slice()` object subscript (`lst[s] = v` where
+                        // `s = slice(...)`) is slice assignment, exactly like the
+                        // `lst[i:j:k]` syntax — turn it into a Slice step rather than
+                        // an integer-index step.
+                        if let Value::Slice(s) = key {
+                            let to_opt =
+                                |v: Value| if matches!(v, Value::None) { None } else { Some(v) };
+                            place.steps.push(PlaceStep::Slice(Box::new(SliceSpec {
+                                lower: to_opt(s.start),
+                                upper: to_opt(s.stop),
+                                step: to_opt(s.step),
+                            })));
+                        } else {
+                            place.steps.push(PlaceStep::Index(key));
+                        }
                     }
+                    Ok(Some(place))
                 }
-                Ok(Some(place))
-            }
-            Expr::Attribute(attr) => {
-                crate::security::validator::validate_attribute(attr.attr.as_str())?;
-                // A class attribute (`Base.registry`) is not a navigable variable
-                // slot — its storage lives in `state.classes` and is a shared
-                // handle. Return None so the caller takes the non-place path
-                // (evaluate the attribute to its shared Dict/List and mutate it),
-                // which keeps `Base.registry[k] = v` visible on the class.
-                if let Expr::Name(base) = attr.value.as_ref() {
-                    if matches!(state.variables.get(base.id.as_str()), Some(Value::Class(_))) {
+                Expr::Attribute(attr) => {
+                    crate::security::validator::validate_attribute(attr.attr.as_str())?;
+                    // A class attribute (`Base.registry`) is not a navigable variable
+                    // slot — its storage lives in `state.classes` and is a shared
+                    // handle. Return None so the caller takes the non-place path
+                    // (evaluate the attribute to its shared Dict/List and mutate it),
+                    // which keeps `Base.registry[k] = v` visible on the class.
+                    if let Expr::Name(base) = attr.value.as_ref() {
+                        if matches!(state.variables.get(base.id.as_str()), Some(Value::Class(_))) {
+                            return Ok(None);
+                        }
+                    }
+                    let Some(mut place) = eval_place(state, &attr.value, tools).await? else {
                         return Ok(None);
-                    }
+                    };
+                    place.steps.push(PlaceStep::Attr(attr.attr.as_str().to_string()));
+                    Ok(Some(place))
                 }
-                let Some(mut place) = eval_place(state, &attr.value, tools).await? else {
-                    return Ok(None);
-                };
-                place.steps.push(PlaceStep::Attr(attr.attr.as_str().to_string()));
-                Ok(Some(place))
+                _ => Ok(None),
             }
-            _ => Ok(None),
         }
-    })
+        .await;
+        state.exit_expr();
+        result
+    }))
 }
 
 /// Assign `receiver[slice] = value` for a computed (non-place)

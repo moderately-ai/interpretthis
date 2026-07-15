@@ -25,6 +25,20 @@ pub async fn eval_call(
     node: &ast::ExprCall,
     tools: &Tools,
 ) -> EvalResult {
+    // Bound deep call-expression chains `f()()()…` (sequential calls don't nest
+    // brackets, so the parse-time guard misses them) by the expression-depth
+    // limit — separate from the function-body call-depth limit. See eval_binop.
+    state.enter_expr().map_err(EvalError::Interpreter)?;
+    let out = eval_call_inner(state, node, tools).await;
+    state.exit_expr();
+    out
+}
+
+async fn eval_call_inner(
+    state: &mut InterpreterState,
+    node: &ast::ExprCall,
+    tools: &Tools,
+) -> EvalResult {
     // Resolve the function name for dispatch
     let (func_name, is_method_call, method_obj_expr) = resolve_func_info(&node.func);
 

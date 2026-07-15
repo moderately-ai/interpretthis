@@ -201,6 +201,18 @@ pub struct InterpreterState {
     /// / lambda frame and decremented on exit. Guarded against
     /// `config.max_recursion_depth`.
     pub call_depth: u32,
+    /// Current nested *expression* depth on the async eval path (recursive
+    /// non-bracketed chains like `a.b.c…`, `not not…`, `"a"+"a"+…`, `f()()…`).
+    /// Guarded against `config.max_recursion_depth` so a pathological chain
+    /// raises a catchable RecursionError — and stops growing the host stack —
+    /// instead of recursing to the op-count limit. This is *per call frame*:
+    /// entering a function body saves and resets it (see `enter_call`), so it
+    /// bounds expression nesting within one frame without conflating with the
+    /// separate function-call recursion limit (`call_depth`).
+    pub expr_depth: u32,
+    /// Saved `expr_depth` values, one per active call frame, restored on
+    /// `exit_call`. Keeps a caller's mid-expression depth intact across a call.
+    pub saved_expr_depth: Vec<u32>,
     /// Arc pointers of the containers currently being rendered by
     /// `eval::render` (CPython's `Py_ReprEnter` reentrancy set). A container
     /// re-entered while already here is a cycle and renders as `[...]` / `{...}`.
@@ -355,6 +367,8 @@ impl InterpreterState {
             decimal_prec: 28,
             memory_used_bytes: 0,
             call_depth: 0,
+            expr_depth: 0,
+            saved_expr_depth: Vec::new(),
             repr_active: rustc_hash::FxHashSet::default(),
             method_frame_stack: Vec::new(),
             yield_stack: Vec::new(),
@@ -378,19 +392,46 @@ impl InterpreterState {
     /// exceed `config.max_recursion_depth` — the counter is not bumped
     /// on that failure path, so the caller must only pair a successful
     /// `enter_call` with a matching `exit_call`.
-    pub const fn enter_call(&mut self) -> Result<(), crate::error::InterpreterError> {
+    pub fn enter_call(&mut self) -> Result<(), crate::error::InterpreterError> {
         if self.call_depth >= self.config.max_recursion_depth {
             return Err(crate::error::InterpreterError::RecursionLimitExceeded {
                 limit: self.config.max_recursion_depth,
             });
         }
         self.call_depth = self.call_depth.saturating_add(1);
+        // A function body is a fresh expression context: save the caller's
+        // mid-expression depth and start the callee at zero, so `expr_depth`
+        // never conflates with the (separately limited) call recursion.
+        self.saved_expr_depth.push(self.expr_depth);
+        self.expr_depth = 0;
         Ok(())
     }
 
-    /// Decrement the call-depth counter on exit from a user frame.
-    pub const fn exit_call(&mut self) {
+    /// Decrement the call-depth counter on exit from a user frame and restore
+    /// the caller's saved expression depth.
+    pub fn exit_call(&mut self) {
         self.call_depth = self.call_depth.saturating_sub(1);
+        if let Some(saved) = self.saved_expr_depth.pop() {
+            self.expr_depth = saved;
+        }
+    }
+
+    /// Bump the expression-nesting counter for a recursive async expression
+    /// arm. Same limit and contract as [`enter_call`]: not bumped on the error
+    /// path, so a successful `enter_expr` must be paired with one `exit_expr`.
+    pub const fn enter_expr(&mut self) -> Result<(), crate::error::InterpreterError> {
+        if self.expr_depth >= self.config.max_recursion_depth {
+            return Err(crate::error::InterpreterError::RecursionLimitExceeded {
+                limit: self.config.max_recursion_depth,
+            });
+        }
+        self.expr_depth = self.expr_depth.saturating_add(1);
+        Ok(())
+    }
+
+    /// Decrement the expression-nesting counter.
+    pub const fn exit_expr(&mut self) {
+        self.expr_depth = self.expr_depth.saturating_sub(1);
     }
 
     /// Set a variable, tracking memory usage.
