@@ -57,6 +57,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "issubclass",
         "super",
         "hasattr",
+        "vars",
         "callable",
         "abs",
         "round",

@@ -420,3 +420,62 @@ async fn security_small_format_width_ok() {
     assert!(resp.error.is_none(), "error: {:?}", resp.error);
     assert_eq!(resp.stdout.trim_end(), "        42");
 }
+
+// --- vars(): bounded instance-only builtin ---
+
+#[tokio::test]
+async fn security_vars_instance_ok() {
+    // The supported form: vars(instance) exposes only its fields (a copy),
+    // which are all already reachable via getattr.
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r"
+class C:
+    def __init__(self):
+        self.a = 1
+        self.b = 2
+print(vars(C()) == {'a': 1, 'b': 2})
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_none(), "error: {:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "True");
+}
+
+#[tokio::test]
+async fn security_vars_no_arg_blocked() {
+    // vars() with no args == locals(), which the sandbox does not expose.
+    let interp = interpreter();
+    let resp = interp.execute("x = vars()", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some());
+}
+
+#[tokio::test]
+async fn security_vars_module_rejected() {
+    // vars(module) would re-expose module internals — rejected (narrower than CPython).
+    let interp = interpreter();
+    let resp = interp.execute("import math\nx = vars(math)", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some());
+}
+
+#[tokio::test]
+async fn security_vars_non_instance_rejected() {
+    let interp = interpreter();
+    for src in ["x = vars(1)", "x = vars('s')", "x = vars([1])", "x = vars({})"] {
+        let resp = interp.execute(src, &no_tools(), HashMap::new()).await;
+        assert!(resp.error.is_some(), "expected vars() to reject: {src}");
+    }
+}
+
+#[tokio::test]
+async fn security_locals_globals_still_blocked() {
+    // Removing `vars` from the denylist must not have loosened locals/globals.
+    let interp = interpreter();
+    for src in ["x = locals()", "x = globals()"] {
+        let resp = interp.execute(src, &no_tools(), HashMap::new()).await;
+        assert!(resp.error.is_some(), "expected block for: {src}");
+    }
+}

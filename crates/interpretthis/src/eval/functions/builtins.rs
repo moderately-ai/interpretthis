@@ -696,6 +696,43 @@ pub(super) async fn try_builtin(
                 Err(e) => Err(e),
             }
         }
+        "vars" => {
+            // Bounded, instance-only. `vars(obj)` returns a *copy* of the
+            // instance's fields — every value is already reachable via
+            // getattr(obj, name), and field keys provably can never be a blocked
+            // dunder (the attribute-write paths validate names), so this exposes
+            // nothing new. Keys are re-filtered through validate_attribute as
+            // defence-in-depth against any future unguarded field-write path.
+            //
+            // Deliberately NARROWER than CPython: the no-arg form (== locals()),
+            // and the module / class / type forms are rejected. Those would
+            // re-expose scope bindings or the class-walk chain (bases / mro /
+            // methods) that BLOCKED_ATTRIBUTES exists to hide. locals/globals
+            // stay on the security denylist.
+            check_arg_count(name, args, 0, 1)?;
+            let Some(arg) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "vars() with no arguments is not supported in the sandboxed interpreter (locals() is blocked)".into(),
+                )
+                .into());
+            };
+            let obj = resolve_proxy(arg).await?;
+            let Value::Instance(inst) = obj else {
+                return Err(InterpreterError::TypeError(
+                    "vars() argument must have __dict__ attribute".into(),
+                )
+                .into());
+            };
+            let snapshot = inst.fields.lock().clone();
+            let mut map = indexmap::IndexMap::new();
+            for (k, v) in snapshot {
+                if crate::security::validator::validate_attribute(&k).is_err() {
+                    continue;
+                }
+                map.insert(crate::value::ValueKey::String(k.as_str().into()), v);
+            }
+            Ok(Some(Value::Dict(crate::value::shared_dict(map))))
+        }
         "setattr" => {
             check_arg_count(name, args, 3, 3)?;
             let attr_name = match &args[1] {

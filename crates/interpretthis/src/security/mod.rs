@@ -10,10 +10,15 @@
 //! - **Import allowlist** — only modules registered in `eval/modules` may be
 //!   imported; `__import__` is blocked by name. Dotted, relative, and star
 //!   imports are rejected.
-//! - **Dangerous names blocked** — `eval` / `exec` / `compile` / `getattr` /
-//!   `setattr` / `delattr` / `globals` / `locals` / `vars` / `dir` / `open` /
-//!   plus `os` / `sys` / `subprocess` / `shutil`. See [`names::DANGEROUS_NAMES`].
-//!   (`input` is blocked separately as a builtin.)
+//! - **Dangerous names blocked** — `eval` / `exec` / `compile` / `__import__` /
+//!   `globals` / `locals` / `dir` / `open` / `file` / `os` / `sys` /
+//!   `subprocess` / `shutil`. See [`names::DANGEROUS_NAMES`]. (`input` is
+//!   blocked separately as a builtin.)
+//! - **Bounded builtins** — `getattr` / `setattr` / `delattr` are allowed but
+//!   validate the attribute name against `BLOCKED_ATTRIBUTES`; `vars` is allowed
+//!   but instance-only (returns a copy of an instance's fields — all already
+//!   reachable via `getattr` — and rejects the no-arg / module / class forms
+//!   that would re-expose scope bindings or the class-walk chain).
 //! - **Class-walk dunders blocked** — `__class__` / `__bases__` /
 //!   `__subclasses__` / `__mro__` / `__globals__` / `__code__` / `__closure__` /
 //!   `__dict__` / `__builtins__` / `__spec__` / `__loader__`. See

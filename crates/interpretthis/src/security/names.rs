@@ -4,17 +4,19 @@
 
 /// Names that are blocked from use in interpreter code.
 pub const DANGEROUS_NAMES: &[&str] = &[
-    // getattr/setattr/delattr are available as *bounded* builtins: the
-    // attribute name is validated against BLOCKED_ATTRIBUTES (see
-    // CONFORMANCE.md#eval-exec). Bare names stay off this list so the
-    // builtins can resolve.
+    // getattr/setattr/delattr — and vars — are available as *bounded* builtins:
+    // the attribute name is validated against BLOCKED_ATTRIBUTES (see
+    // CONFORMANCE.md#eval-exec). Bare names stay off this list so the builtins
+    // can resolve. `vars` accepts ONLY an instance (returning a copy of its
+    // fields, which are all already reachable via getattr and provably free of
+    // blocked-dunder keys); the module/class/no-arg forms that would re-expose
+    // scope bindings or the class-walk chain (bases/mro) raise TypeError.
     "eval",
     "exec",
     "compile",
     "__import__",
     "globals",
     "locals",
-    "vars",
     "dir",
     "open",
     "file",

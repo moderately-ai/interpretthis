@@ -40,7 +40,7 @@ Supported (not in this rejection table): multi-level classes + C3 MRO + `super()
 The construct is supported in principle, but execution checks against a vetted whitelist.
 
 - **Imports** — `crates/interpretthis/src/eval/modules/mod.rs::MODULES` is the registry of every shippable stdlib module (including `copy`). The registry IS the allowlist; `is_known_module` reads from it. Any other module raises `ModuleNotFoundError`.
-- **Bare-name resolution** — `DANGEROUS_NAMES` at `crates/interpretthis/src/security/names.rs` rejects `eval`, `exec`, `compile`, `getattr`, `setattr`, `delattr`, `__import__`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, `shutil` even though the parser accepts them as identifiers. Checked in `crates/interpretthis/src/security/validator.rs`.
+- **Bare-name resolution** — `DANGEROUS_NAMES` at `crates/interpretthis/src/security/names.rs` rejects `eval`, `exec`, `compile`, `__import__`, `globals`, `locals`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, `shutil` even though the parser accepts them as identifiers. Checked in `crates/interpretthis/src/security/validator.rs`. `getattr` / `setattr` / `delattr` / `vars` are **bounded builtins**, not blocked: they resolve, but validate the attribute name against `BLOCKED_ATTRIBUTES` (and `vars` is instance-only, returning a copy of fields already reachable via `getattr`).
 - **Attribute access** — `BLOCKED_ATTRIBUTES` at `crates/interpretthis/src/security/names.rs` rejects `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. Single-underscore names (`obj._field`) are allowed; only the explicit dunder list is gated.
 
 ### 4. Dynamically validated
@@ -86,8 +86,9 @@ This document is the security-side view of what is rejected at parse / eval time
 | `().__class__`                                              | `__class__` in `BLOCKED_ATTRIBUTES` (`security/names.rs`)       |
 | `().__class__.__bases__[0].__subclasses__()`                | `__class__` and `__bases__` both blocked                        |
 | `eval("...")` / `exec("...")` / `compile(...)`              | `eval` / `exec` / `compile` in `DANGEROUS_NAMES`                |
-| `getattr(obj, '__globals__')`                               | `getattr` in `DANGEROUS_NAMES`                                  |
-| `setattr(obj, 'x', 1)` / `delattr(obj, 'x')`                | `setattr` / `delattr` in `DANGEROUS_NAMES`                      |
+| `getattr(obj, '__globals__')`                               | `getattr` validates the name against `BLOCKED_ATTRIBUTES`       |
+| `setattr(obj, '__class__', 1)` / `delattr(obj, '__mro__')`  | `setattr` / `delattr` validate the name against `BLOCKED_ATTRIBUTES` |
+| `vars(fn)` / `vars(cls)` / `vars()`                         | `vars` is instance-only; module/class/no-arg forms raise `TypeError` |
 | `import os` / `from os import path`                         | `os` not in the `MODULES` registry (`eval/modules/mod.rs`)      |
 | `from . import sibling`                                     | relative-import gate in `eval/modules/mod.rs::eval_import_from` |
 | `from collections import *`                                 | star-import gate in `eval/modules/mod.rs::eval_import_from`     |
