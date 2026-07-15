@@ -528,17 +528,24 @@ pub(crate) async fn dsu_sort(
         for entry in decorated {
             let mut insert_at = sorted_dec.len();
             for (i, existing) in sorted_dec.iter().enumerate() {
-                if crate::eval::op::lt(state, &entry.0, &existing.0, tools).await? {
+                // `reverse` flips the comparison direction rather than reversing
+                // the result, so equal keys keep their original order (CPython's
+                // reverse sort is stable). Insert before the first existing key
+                // that is strictly greater (ascending) or strictly lesser
+                // (descending) than `entry`.
+                let goes_before = if reverse {
+                    crate::eval::op::lt(state, &existing.0, &entry.0, tools).await?
+                } else {
+                    crate::eval::op::lt(state, &entry.0, &existing.0, tools).await?
+                };
+                if goes_before {
                     insert_at = i;
                     break;
                 }
             }
             sorted_dec.insert(insert_at, entry);
         }
-        let mut sorted: Vec<Value> = sorted_dec.into_iter().map(|(_, v)| v).collect();
-        if reverse {
-            sorted.reverse();
-        }
+        let sorted: Vec<Value> = sorted_dec.into_iter().map(|(_, v)| v).collect();
         return Ok(sorted);
     }
     // Capture the first comparison error out of the sort_by closure (which
@@ -551,7 +558,7 @@ pub(crate) async fn dsu_sort(
         if cmp_err.is_some() {
             return Ordering::Equal;
         }
-        match crate::eval::operations::compare_lt(&a.0, &b.0) {
+        let base = match crate::eval::operations::compare_lt(&a.0, &b.0) {
             Ok(true) => Ordering::Less,
             Ok(false) => match crate::eval::operations::compare_lt(&b.0, &a.0) {
                 Ok(true) => Ordering::Greater,
@@ -565,15 +572,16 @@ pub(crate) async fn dsu_sort(
                 cmp_err = Some(e);
                 Ordering::Equal
             }
-        }
+        };
+        // `reverse` flips the comparison, not the output: `sort_by` is stable, so
+        // equal keys (Ordering::Equal, unchanged by `.reverse()`) keep their
+        // original order — matching CPython's stable reverse sort.
+        if reverse { base.reverse() } else { base }
     });
     if let Some(e) = cmp_err {
         return Err(e);
     }
-    let mut sorted: Vec<Value> = decorated.into_iter().map(|(_, v)| v).collect();
-    if reverse {
-        sorted.reverse();
-    }
+    let sorted: Vec<Value> = decorated.into_iter().map(|(_, v)| v).collect();
     Ok(sorted)
 }
 
