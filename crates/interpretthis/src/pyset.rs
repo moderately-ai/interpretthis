@@ -23,10 +23,6 @@
 //! async `__eq__`, and the numeric/temporal types not yet in `python_hash`) go
 //! in a [`SetBody::Fallback`] insertion-order `Vec` — CPython's order for those
 //! is address-based and non-reproducible anyway.
-//
-// TODO(set-table refactor): drop this `allow` once Stage 2 wires `SetBody` into
-// `Value::Set`; the module is validated in isolation ahead of that integration.
-#![allow(dead_code)]
 
 use crate::pyhash::python_hash;
 use crate::value::Value;
@@ -40,10 +36,14 @@ const PERTURB_SHIFT: u32 = 5;
 
 #[inline]
 fn eq(a: &Value, b: &Value) -> bool {
-    crate::eval::operations::values_equal_pub(a, b)
+    // The type-object equality dispatch (both directions), so the full numeric
+    // tower holds — `1 == 1.0 == True == Decimal('1') == Fraction(1, 1)` — for
+    // membership and dedup. (`values_equal` is a second, incomplete table with
+    // no Decimal/Fraction arm.)
+    crate::types::recurse_eq(a, b)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Slot {
     Empty,
     /// A tombstone left by `discard` — it terminates neither probing nor
@@ -56,7 +56,7 @@ enum Slot {
 }
 
 /// A CPython open-addressing set table over `python_hash`-able values.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SetTable {
     slots: Vec<Slot>,
     mask: usize,
@@ -300,6 +300,29 @@ impl SetTable {
             _ => None,
         })
     }
+
+    /// CPython's post-`difference_update` cleanup: rehash to shed tombstones
+    /// once more than a quarter of the table is dummies (this can shrink the
+    /// table, which reorders the survivors — so it is observable).
+    fn compact_if_sparse(&mut self) {
+        if (self.fill - self.used) > self.mask / 4 {
+            let minused = if self.used > 50000 { self.used * 2 } else { self.used * 4 };
+            self.resize(minused);
+        }
+    }
+
+    /// Remove and return the first active element in slot order (`set.pop`).
+    pub fn pop_first(&mut self) -> Option<Value> {
+        for slot in &mut self.slots {
+            if let Slot::Active { value, .. } = slot {
+                let v = value.clone();
+                *slot = Slot::Dummy;
+                self.used -= 1;
+                return Some(v);
+            }
+        }
+        None
+    }
 }
 
 /// Build a table by incrementally adding `items` (their true insertion order) —
@@ -373,10 +396,7 @@ pub fn difference_update(a: &mut SetTable, b: &SetTable) {
     for (value, hash) in removals {
         a.discard(&value, hash);
     }
-    if (a.fill - a.used) > a.mask / 4 {
-        let minused = if a.used > 50000 { a.used * 2 } else { a.used * 4 };
-        a.resize(minused);
-    }
+    a.compact_if_sparse();
 }
 
 /// `a ^ b` — copy `b`, then toggle each of `a`'s elements (discard if present,
@@ -408,13 +428,109 @@ pub fn constant_literal_table(items: &[Value]) -> Option<SetTable> {
 
 /// A set's element store: the CPython-order table when every element is
 /// `python_hash`-able, else an insertion-order `Vec` (instances etc.).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SetBody {
     Table(SetTable),
     Fallback(Vec<Value>),
 }
 
 impl SetBody {
+    /// An empty set body (an empty table).
+    #[must_use]
+    pub fn empty() -> SetBody {
+        SetBody::Table(SetTable::with_capacity(MINSIZE))
+    }
+
+    /// Build a set body from `items` (in insertion order, deduped by the caller
+    /// for instance elements): the CPython-order table when every element is
+    /// `python_hash`-able, else the insertion-order fallback.
+    #[must_use]
+    pub fn from_items(items: Vec<Value>) -> SetBody {
+        match table_from_incremental(&items) {
+            Some(t) => SetBody::Table(t),
+            None => SetBody::Fallback(items),
+        }
+    }
+
+    /// Build a set body for a **constant** set/frozenset literal (all-constant
+    /// elements), using CPython's compiler constant-fold order.
+    #[must_use]
+    pub fn from_constant_literal(items: Vec<Value>) -> SetBody {
+        match constant_literal_table(&items) {
+            Some(t) => SetBody::Table(t),
+            None => SetBody::Fallback(items),
+        }
+    }
+
+    /// Membership by structural equality. `value` must be hashable; a fallback
+    /// set (instances) falls back to a linear scan.
+    #[must_use]
+    pub fn contains(&self, value: &Value) -> bool {
+        match self {
+            SetBody::Table(t) => python_hash(value).is_some_and(|h| t.contains(value, h)),
+            SetBody::Fallback(v) => v.iter().any(|x| eq(x, value)),
+        }
+    }
+
+    /// Insert `value`; returns whether it was newly added. Adding a
+    /// non-`python_hash`-able element degrades a table to the fallback.
+    pub fn add_value(&mut self, value: Value) -> bool {
+        match self {
+            SetBody::Table(t) => match python_hash(&value) {
+                Some(h) => {
+                    let before = t.used;
+                    t.add(value, h);
+                    t.used > before
+                }
+                None => {
+                    let mut items = t.iter_ordered();
+                    if items.iter().any(|x| eq(x, &value)) {
+                        return false;
+                    }
+                    items.push(value);
+                    *self = SetBody::Fallback(items);
+                    true
+                }
+            },
+            SetBody::Fallback(v) => {
+                if v.iter().any(|x| eq(x, &value)) {
+                    false
+                } else {
+                    v.push(value);
+                    true
+                }
+            }
+        }
+    }
+
+    /// Remove `value` if present; returns whether it was removed.
+    pub fn discard_value(&mut self, value: &Value) -> bool {
+        match self {
+            SetBody::Table(t) => python_hash(value).is_some_and(|h| t.discard(value, h)),
+            SetBody::Fallback(v) => {
+                if let Some(i) = v.iter().position(|x| eq(x, value)) {
+                    v.remove(i);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Remove and return the first element in iteration order (`set.pop`).
+    pub fn pop_first(&mut self) -> Option<Value> {
+        match self {
+            SetBody::Table(t) => t.pop_first(),
+            SetBody::Fallback(v) => (!v.is_empty()).then(|| v.remove(0)),
+        }
+    }
+
+    /// Empty the set.
+    pub fn clear(&mut self) {
+        *self = SetBody::empty();
+    }
+
     /// Active elements in observation order (CPython slot order, or insertion
     /// order for the fallback).
     #[must_use]
@@ -436,6 +552,108 @@ impl SetBody {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// CPython `set_copy`: a presized merge into a fresh table. Distinct from
+    /// `clone`, which preserves the source's tombstones and exact capacity — the
+    /// operators (`|`/`&`/`-`/`^`) and `set.copy()` start from `copied`, whereas
+    /// in-place mutators (`update`/`difference_update`) keep the live table.
+    #[must_use]
+    pub fn copied(&self) -> SetBody {
+        match self {
+            SetBody::Table(t) => SetBody::Table(copy(t)),
+            SetBody::Fallback(v) => SetBody::Fallback(v.clone()),
+        }
+    }
+
+    /// Shed tombstones if the table is more than a quarter dummies (CPython's
+    /// post-`difference_update` cleanup); a no-op for the fallback.
+    fn compact_if_sparse(&mut self) {
+        if let SetBody::Table(t) = self {
+            t.compact_if_sparse();
+        }
+    }
+
+    /// In-place union with another set body (`set.update` with a set argument,
+    /// `|=`): CPython `set_merge` (presized) when both are tables, else a
+    /// per-element add (which degrades a table to the fallback on an instance).
+    pub fn merge_from(&mut self, other: &SetBody) {
+        if let (SetBody::Table(a), SetBody::Table(b)) = (&mut *self, other) {
+            a.merge(b);
+            return;
+        }
+        for v in other.iter_ordered() {
+            self.add_value(v);
+        }
+    }
+
+    /// In-place difference with another set body (`set.difference_update` with a
+    /// set argument, `-=`): CPython `set_difference_update` (with its
+    /// tombstone-resize) when both are tables, else a per-element discard.
+    pub fn difference_from(&mut self, other: &SetBody) {
+        if let (SetBody::Table(a), SetBody::Table(b)) = (&mut *self, other) {
+            difference_update(a, b);
+            return;
+        }
+        for v in other.iter_ordered() {
+            self.discard_value(&v);
+        }
+        self.compact_if_sparse();
+    }
+
+    /// `a | b` — CPython `set_union` (copy `self`, merge `other`).
+    #[must_use]
+    pub fn union_with(&self, other: &SetBody) -> SetBody {
+        if let (SetBody::Table(a), SetBody::Table(b)) = (self, other) {
+            return SetBody::Table(union(a, b));
+        }
+        let mut r = self.copied();
+        r.merge_from(other);
+        r
+    }
+
+    /// `a & b` — CPython `set_intersection` (iterate the smaller operand — the
+    /// right one on a size tie — keeping elements present in the larger).
+    #[must_use]
+    pub fn intersection_with(&self, other: &SetBody) -> SetBody {
+        if let (SetBody::Table(a), SetBody::Table(b)) = (self, other) {
+            return SetBody::Table(intersection(a, b));
+        }
+        let (small, large) = if self.len() >= other.len() { (other, self) } else { (self, other) };
+        let mut r = SetBody::empty();
+        for v in small.iter_ordered() {
+            if large.contains(&v) {
+                r.add_value(v);
+            }
+        }
+        r
+    }
+
+    /// `a - b` — CPython `set_difference`.
+    #[must_use]
+    pub fn difference_with(&self, other: &SetBody) -> SetBody {
+        if let (SetBody::Table(a), SetBody::Table(b)) = (self, other) {
+            return SetBody::Table(difference(a, b));
+        }
+        let mut r = self.copied();
+        r.difference_from(other);
+        r
+    }
+
+    /// `a ^ b` — CPython `set_symmetric_difference` (build from `other`, then
+    /// toggle `self`'s elements in, in `other`'s slot order).
+    #[must_use]
+    pub fn symmetric_difference_with(&self, other: &SetBody) -> SetBody {
+        if let (SetBody::Table(a), SetBody::Table(b)) = (self, other) {
+            return SetBody::Table(symmetric_difference(a, b));
+        }
+        let mut r = other.copied();
+        for v in self.iter_ordered() {
+            if !r.discard_value(&v) {
+                r.add_value(v);
+            }
+        }
+        r
     }
 }
 

@@ -4,189 +4,263 @@
 
 //! `set` method dispatch — union/intersection/difference/symmetric_difference/
 //! issubset/issuperset/isdisjoint plus mutating add/remove/discard/pop/clear/
-//! update and the `*_update` variants. Sets are stored as `Vec<Value>` (Value
-//! is not `Hash`), so membership is a linear scan under the structural
-//! comparator (`set_contains`), which — unlike `value_to_key` keying — keeps
-//! distinct instances distinct.
+//! update and the `*_update` variants. Sets carry a CPython-order hash table
+//! ([`crate::pyset::SetBody`]): a set-vs-set operation runs CPython's
+//! presize/merge table algebra (so the result's iteration and `pop` order
+//! match), while a set-vs-other-iterable operation adds or discards
+//! element-by-element — the same split CPython's `setobject.c` makes.
+
+use std::sync::Arc;
 
 use super::super::{MethodOutcome, arg1};
 use crate::{
     error::{EvalError, InterpreterError},
     eval::{control_flow::iterate_value, literals::value_to_key},
+    pyset::SetBody,
     state::estimate_value_size,
-    value::{ExceptionValue, Value},
+    value::{ExceptionValue, SharedSet, Value},
 };
 
+/// Wrap a computed body in a fresh `set` value.
+fn set_value(body: SetBody) -> Value {
+    Value::Set(crate::value::shared_set(body))
+}
+
+/// A method argument as a set body: a set/frozenset yields a snapshot of its
+/// body; any other iterable is built incrementally (CPython
+/// `make_new_set_basetype(other)`). Locks the argument only here, with the
+/// receiver lock already released, so `s.method(s)` cannot re-lock the mutex.
+fn arg_body(arg: &Value) -> Result<SetBody, EvalError> {
+    match arg {
+        Value::Set(s) => Ok(s.lock().clone()),
+        Value::Frozenset(f) => Ok((**f).clone()),
+        other => Ok(SetBody::from_items(iterate_value(other)?)),
+    }
+}
+
+/// Fold one `union`/`update` argument into `acc`: a set/frozenset merges
+/// (CPython `set_merge`, presized), any other iterable adds element-by-element.
+fn apply_union(acc: &mut SetBody, arg: &Value) -> Result<(), EvalError> {
+    match arg {
+        Value::Set(s) => acc.merge_from(&s.lock()),
+        Value::Frozenset(f) => acc.merge_from(f),
+        other => {
+            for item in iterate_value(other)? {
+                acc.add_value(item);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `acc ∩ arg` as a new body: a set intersects via the table op (iterate the
+/// smaller); any other iterable is iterated in its own order, keeping the
+/// elements present in `acc` — CPython `set_intersection`.
+fn intersect_arg(acc: &SetBody, arg: &Value) -> Result<SetBody, EvalError> {
+    match arg {
+        Value::Set(s) => Ok(acc.intersection_with(&s.lock())),
+        Value::Frozenset(f) => Ok(acc.intersection_with(f)),
+        other => {
+            let mut r = SetBody::empty();
+            for item in iterate_value(other)? {
+                if acc.contains(&item) {
+                    r.add_value(item);
+                }
+            }
+            Ok(r)
+        }
+    }
+}
+
+/// Fold one `difference`/`difference_update` argument into `acc` in place: a
+/// set uses the table op (tombstone-resize included), any other iterable
+/// discards element-by-element then compacts — CPython
+/// `set_difference_update_internal`.
+fn apply_difference(acc: &mut SetBody, arg: &Value) -> Result<(), EvalError> {
+    match arg {
+        Value::Set(s) => acc.difference_from(&s.lock()),
+        Value::Frozenset(f) => acc.difference_from(f),
+        other => {
+            let items = iterate_value(other)?;
+            acc.difference_from(&SetBody::from_items(items));
+        }
+    }
+    Ok(())
+}
+
+/// Estimated element bytes of a body, for the memory-accounting delta.
+fn body_bytes(body: &SetBody) -> usize {
+    body.iter_ordered().iter().map(estimate_value_size).sum()
+}
+
+/// Outcome for a bulk mutation, reporting the signed change in element bytes.
+fn delta_outcome(old: usize, new: usize) -> MethodOutcome {
+    if new >= old {
+        MethodOutcome::grew(Value::None, new - old)
+    } else {
+        MethodOutcome::shrank(Value::None, old - new)
+    }
+}
+
+/// Dispatch a `set` method. Takes the shared handle, not a held guard: every
+/// operation snapshots the receiver body (lock released) before touching the
+/// arguments, so an argument that IS the receiver (`s.update(s)`) can never
+/// re-lock the one mutex (the mutex is non-reentrant). Set-vs-set operations go
+/// through CPython's presize/merge table algebra (order-faithful); set-vs-other
+/// iterables add/discard element-by-element, matching CPython's own split.
 pub(crate) fn dispatch_set_method(
-    items: &mut Vec<Value>,
+    shared: &SharedSet,
     method: &str,
     args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
     crate::eval::functions::reject_kwargs(method, kwargs)?;
-    // Sets are stored as a `Vec` (Value is not `Hash`), so membership is a
-    // linear scan under the shared structural comparator. `value_to_key`
-    // returns `None` for every instance, so keying on it would collapse
-    // distinct objects into one — `set_contains` distinguishes them.
-    use crate::eval::operations::{set_contains, values_equal_pub};
-    let position =
-        |items: &[Value], probe: &Value| items.iter().position(|r| values_equal_pub(r, probe));
 
     match method {
-        "copy" => Ok(MethodOutcome::pure(Value::Set(items.clone()))),
+        // `set.copy()` is CPython `set_copy` — a presized fresh table, not a
+        // verbatim clone (drops tombstones).
+        "copy" => Ok(MethodOutcome::pure(set_value(shared.lock().copied()))),
         // union/intersection/difference accept any number of iterable args.
         "union" => {
-            let mut result = items.clone();
+            let mut acc = shared.lock().copied();
             for arg in args {
-                for item in iterate_value(arg)? {
-                    if !set_contains(&result, &item) {
-                        result.push(item);
-                    }
-                }
+                apply_union(&mut acc, arg)?;
             }
-            Ok(MethodOutcome::pure(Value::Set(result)))
+            Ok(MethodOutcome::pure(set_value(acc)))
         }
         "intersection" => {
-            let others: Vec<Vec<Value>> =
-                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
-            // Keep an element only if it is present in every argument iterable.
-            let result: Vec<Value> = items
-                .iter()
-                .filter(|v| others.iter().all(|o| set_contains(o, v)))
-                .cloned()
-                .collect();
-            Ok(MethodOutcome::pure(Value::Set(result)))
+            if args.is_empty() {
+                return Ok(MethodOutcome::pure(set_value(shared.lock().copied())));
+            }
+            let mut acc = shared.lock().clone();
+            for arg in args {
+                acc = intersect_arg(&acc, arg)?;
+            }
+            Ok(MethodOutcome::pure(set_value(acc)))
         }
         "difference" => {
-            let others: Vec<Vec<Value>> =
-                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
-            // Drop an element if it appears in any argument iterable.
-            let result: Vec<Value> = items
-                .iter()
-                .filter(|v| !others.iter().any(|o| set_contains(o, v)))
-                .cloned()
-                .collect();
-            Ok(MethodOutcome::pure(Value::Set(result)))
+            let mut acc = shared.lock().copied();
+            for arg in args {
+                apply_difference(&mut acc, arg)?;
+            }
+            Ok(MethodOutcome::pure(set_value(acc)))
+        }
+        "symmetric_difference" => {
+            let other = arg_body(arg1(method, args)?)?;
+            let result = shared.lock().symmetric_difference_with(&other);
+            Ok(MethodOutcome::pure(set_value(result)))
         }
         "issubset" => {
-            let other = iterate_value(arg1(method, args)?)?;
-            let result = items.iter().all(|v| set_contains(&other, v));
+            let other = arg_body(arg1(method, args)?)?;
+            let result = shared.lock().iter_ordered().iter().all(|v| other.contains(v));
             Ok(MethodOutcome::pure(Value::Bool(result)))
         }
         "issuperset" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let result = other.iter().all(|v| set_contains(items, v));
+            let body = shared.lock();
+            let result = other.iter().all(|v| body.contains(v));
             Ok(MethodOutcome::pure(Value::Bool(result)))
         }
         "isdisjoint" => {
             let other = iterate_value(arg1(method, args)?)?;
-            let result = !items.iter().any(|v| set_contains(&other, v));
+            let body = shared.lock();
+            let result = !other.iter().any(|v| body.contains(v));
             Ok(MethodOutcome::pure(Value::Bool(result)))
         }
         "add" => {
             let arg = arg1(method, args)?;
             // A genuinely-unhashable element (list/dict/set) raises. Instances
-            // are hashable by identity in CPython, so they are allowed (their
-            // structural dedup here is best-effort — sets are stored as a Vec
-            // and these methods are sync, so async `__eq__` cannot run).
+            // are hashable by identity in CPython, so they are allowed.
             if !matches!(arg, Value::Instance(_)) {
                 value_to_key(arg)?;
             }
-            if set_contains(items, arg) {
-                Ok(MethodOutcome::pure(Value::None))
-            } else {
-                let size = estimate_value_size(arg);
-                items.push(arg.clone());
+            let size = estimate_value_size(arg);
+            if shared.lock().add_value(arg.clone()) {
                 Ok(MethodOutcome::grew(Value::None, size))
+            } else {
+                Ok(MethodOutcome::pure(Value::None))
             }
         }
         "remove" => {
             let arg = arg1(method, args)?;
-            let Some(idx) = position(items, arg) else {
-                return Err(EvalError::Exception(ExceptionValue::new("KeyError", arg.repr())));
-            };
-            let removed = items.remove(idx);
-            Ok(MethodOutcome::shrank(Value::None, estimate_value_size(&removed)))
+            let freed = estimate_value_size(arg);
+            if shared.lock().discard_value(arg) {
+                Ok(MethodOutcome::shrank(Value::None, freed))
+            } else {
+                Err(EvalError::Exception(ExceptionValue::new("KeyError", arg.repr())))
+            }
         }
         "discard" => {
             let arg = arg1(method, args)?;
-            // discard() on a missing element is a no-op.
-            let Some(idx) = position(items, arg) else {
-                return Ok(MethodOutcome::pure(Value::None));
-            };
-            let removed = items.remove(idx);
-            Ok(MethodOutcome::shrank(Value::None, estimate_value_size(&removed)))
-        }
-        "pop" => {
-            if items.is_empty() {
-                return Err(EvalError::Exception(ExceptionValue::new(
-                    "KeyError",
-                    "pop from an empty set",
-                )));
+            let freed = estimate_value_size(arg);
+            if shared.lock().discard_value(arg) {
+                Ok(MethodOutcome::shrank(Value::None, freed))
+            } else {
+                // discard() on a missing element is a no-op.
+                Ok(MethodOutcome::pure(Value::None))
             }
-            // CPython's set.pop() returns the first element in hash-table
-            // order, not our insertion order.
-            let idx = crate::pyhash::cpython_set_order_indices(items)
-                .and_then(|order| order.first().copied())
-                .unwrap_or(0);
-            let val = items.remove(idx);
-            let freed = estimate_value_size(&val);
-            Ok(MethodOutcome::shrank(val, freed))
         }
+        "pop" => match shared.lock().pop_first() {
+            Some(val) => {
+                let freed = estimate_value_size(&val);
+                Ok(MethodOutcome::shrank(val, freed))
+            }
+            None => {
+                Err(EvalError::Exception(ExceptionValue::new("KeyError", "pop from an empty set")))
+            }
+        },
         "clear" => {
-            let freed: usize = items.iter().map(estimate_value_size).sum();
-            items.clear();
+            let mut body = shared.lock();
+            let freed: usize = body.iter_ordered().iter().map(estimate_value_size).sum();
+            body.clear();
             Ok(MethodOutcome::shrank(Value::None, freed))
         }
-        "symmetric_difference" => {
-            let other = iterate_value(arg1(method, args)?)?;
-            let mut result: Vec<Value> =
-                items.iter().filter(|v| !set_contains(&other, v)).cloned().collect();
-            for item in other {
-                if !set_contains(items, &item) && !set_contains(&result, &item) {
-                    result.push(item);
-                }
-            }
-            Ok(MethodOutcome::pure(Value::Set(result)))
-        }
         "update" => {
-            let mut added = 0usize;
+            // In-place merge keeps the live table (CPython `set_update`), unlike
+            // `union` which starts from a copy. Snapshot to compute off-lock,
+            // then write back — so an aliasing argument can't deadlock.
+            let mut acc = shared.lock().clone();
+            let old = body_bytes(&acc);
             for arg in args {
-                for item in iterate_value(arg)? {
-                    if !set_contains(items, &item) {
-                        added += estimate_value_size(&item);
-                        items.push(item);
-                    }
-                }
+                apply_union(&mut acc, arg)?;
             }
-            Ok(MethodOutcome::grew(Value::None, added))
+            let new = body_bytes(&acc);
+            *shared.lock() = acc;
+            Ok(delta_outcome(old, new))
         }
         "intersection_update" => {
-            let others: Vec<Vec<Value>> =
-                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
-            items.retain(|v| others.iter().all(|o| set_contains(o, v)));
-            Ok(MethodOutcome::pure(Value::None))
+            let mut acc = shared.lock().clone();
+            let old = body_bytes(&acc);
+            for arg in args {
+                acc = intersect_arg(&acc, arg)?;
+            }
+            let new = body_bytes(&acc);
+            *shared.lock() = acc;
+            Ok(delta_outcome(old, new))
         }
         "difference_update" => {
-            let others: Vec<Vec<Value>> =
-                args.iter().map(iterate_value).collect::<Result<_, _>>()?;
-            items.retain(|v| !others.iter().any(|o| set_contains(o, v)));
-            Ok(MethodOutcome::pure(Value::None))
+            let mut acc = shared.lock().clone();
+            let old = body_bytes(&acc);
+            for arg in args {
+                apply_difference(&mut acc, arg)?;
+            }
+            let new = body_bytes(&acc);
+            *shared.lock() = acc;
+            Ok(delta_outcome(old, new))
         }
         "symmetric_difference_update" => {
-            let other = iterate_value(arg1(method, args)?)?;
-            // Snapshot original membership before mutating, so the decision of
-            // which `other` items to append is made against the pre-image.
-            let original = items.clone();
-            items.retain(|v| !set_contains(&other, v));
-            let mut added = 0usize;
-            for item in other {
-                if !set_contains(&original, &item) && !set_contains(items, &item) {
-                    added += estimate_value_size(&item);
-                    items.push(item);
+            let other = arg_body(arg1(method, args)?)?;
+            let mut acc = shared.lock().clone();
+            let old = body_bytes(&acc);
+            // Toggle each of `other`'s elements in `other`'s slot order.
+            for item in other.iter_ordered() {
+                if !acc.discard_value(&item) {
+                    acc.add_value(item);
                 }
             }
-            Ok(MethodOutcome::grew(Value::None, added))
+            let new = body_bytes(&acc);
+            *shared.lock() = acc;
+            Ok(delta_outcome(old, new))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "'set' object has no attribute '{method}'"
@@ -195,12 +269,12 @@ pub(crate) fn dispatch_set_method(
     }
 }
 
-/// Non-mutating `frozenset` methods — the set-algebra subset that returns a
-/// new value. Delegates to [`dispatch_set_method`] on a copy (so no mutation
+/// Non-mutating `frozenset` methods — the set-algebra subset that returns a new
+/// value. Delegates to [`dispatch_set_method`] on a clone (so no mutation
 /// escapes) and rewraps any `set` result as a `frozenset`. Mutating method
 /// names raise `AttributeError`, matching CPython's immutable `frozenset`.
 pub(crate) fn dispatch_frozenset_method(
-    items: &[Value],
+    body: &SetBody,
     method: &str,
     args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
@@ -221,13 +295,12 @@ pub(crate) fn dispatch_frozenset_method(
         ))
         .into());
     }
-    let mut scratch = items.to_vec();
-    let outcome = dispatch_set_method(&mut scratch, method, args, kwargs)?;
-    // The delegated methods above are all non-mutating, so `scratch` is
-    // untouched and only the returned value matters; a set result becomes a
-    // frozenset, a bool stays a bool.
+    // Delegate to the (non-mutating) set methods on a throwaway shared handle.
+    let scratch = crate::value::shared_set(body.clone());
+    let outcome = dispatch_set_method(&scratch, method, args, kwargs)?;
+    // A set result becomes a frozenset, a bool stays a bool.
     let value = match outcome.value {
-        Value::Set(v) => Value::Frozenset(v),
+        Value::Set(v) => Value::Frozenset(Arc::new(v.lock().clone())),
         other => other,
     };
     Ok(MethodOutcome::pure(value))

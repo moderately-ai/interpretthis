@@ -568,6 +568,11 @@ pub fn dispatch_eq(state: &InterpreterState, lhs: &Value, rhs: &Value) -> EvalRe
                 if let Some(class) = state.classes.get(&inst.class_name) {
                     if let Some(fields) = &class.dataclass_fields {
                         if !class.methods.contains_key("__eq__") {
+                            // `d == d` shares one `SharedFields` Arc — locking it
+                            // twice would deadlock, so short-circuit identity.
+                            if std::sync::Arc::ptr_eq(&inst.fields, &other_inst.fields) {
+                                return Ok(Value::Bool(true));
+                            }
                             let mut equal = true;
                             let af = inst.fields.lock();
                             let bf = other_inst.fields.lock();
@@ -1129,8 +1134,7 @@ fn dictview_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     let to_elems = |v: &Value| -> Option<Vec<Value>> {
         match v {
             Value::DictView { .. } => dictview_iter(v).ok(),
-            Value::Set(items) | Value::Frozenset(items) => Some(items.clone()),
-            _ => None,
+            _ => v.set_items(),
         }
     };
     let (a, b) = (to_elems(lhs)?, to_elems(rhs)?);
@@ -1144,8 +1148,7 @@ fn dictview_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let to_elems = |v: &Value| -> Option<Vec<Value>> {
         match v {
             Value::DictView { .. } => dictview_iter(v).ok(),
-            Value::Set(items) | Value::Frozenset(items) => Some(items.clone()),
-            _ => None,
+            _ => v.set_items(),
         }
     };
     let (a, b) = (to_elems(lhs)?, to_elems(rhs)?);
@@ -1653,8 +1656,8 @@ fn dict_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 }
 
 fn set_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
-    let (Value::Set(a) | Value::Frozenset(a)) = lhs else { return None };
-    let (Value::Set(b) | Value::Frozenset(b)) = rhs else { return None };
+    let a = lhs.set_items()?;
+    let b = rhs.set_items()?;
     if a.len() != b.len() {
         return Some(false);
     }
@@ -1669,8 +1672,8 @@ fn set_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 /// `compare_builtin` (`<=` = `<` or `==`, `>` = swapped `<`), giving the
 /// full subset/superset lattice.
 fn set_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
-    let (Value::Set(a) | Value::Frozenset(a)) = lhs else { return None };
-    let (Value::Set(b) | Value::Frozenset(b)) = rhs else { return None };
+    let a = lhs.set_items()?;
+    let b = rhs.set_items()?;
     // Proper subset: strictly smaller and every element contained.
     let is_proper = a.len() < b.len() && a.iter().all(|av| b.iter().any(|bv| recurse_eq(av, bv)));
     Some(Ok(is_proper))
@@ -1695,7 +1698,7 @@ fn elementwise_eq(a: &[Value], b: &[Value]) -> bool {
 
 /// Recurse into the type dispatch for an inner-element compare. Falls back
 /// to `false` when both sides return `NotImplemented`.
-fn recurse_eq(lhs: &Value, rhs: &Value) -> bool {
+pub(crate) fn recurse_eq(lhs: &Value, rhs: &Value) -> bool {
     let lhs_type = type_of(lhs);
     if let Some(result) = (lhs_type.eq_slot)(lhs, rhs) {
         return result;
@@ -1914,6 +1917,11 @@ fn bytes_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
 fn list_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
     let Value::List(a) = lhs else { return None };
     let Value::List(b) = rhs else { return None };
+    // `l < l` (and the `<=`/`>`/`>=` forms that derive from it) shares one Arc;
+    // locking it twice would deadlock. A list is never a proper `<` of itself.
+    if std::sync::Arc::ptr_eq(a, b) {
+        return Some(Ok(false));
+    }
     let a_guard = a.lock();
     let b_guard = b.lock();
     Some(lex_lt(&a_guard, &b_guard))
@@ -1964,7 +1972,13 @@ fn sequence_contains(container: &Value, item: &Value) -> Result<bool, EvalError>
         }
         return Ok(false);
     }
-    let (Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items)) = container else {
+    // Set/frozenset membership is an O(1) table probe.
+    match container {
+        Value::Set(b) => return Ok(b.lock().contains(item)),
+        Value::Frozenset(b) => return Ok(b.contains(item)),
+        _ => {}
+    }
+    let Value::Tuple(items) = container else {
         unreachable!("sequence_contains only attached to list/tuple/set TypeObjects")
     };
     for entry in items {
@@ -2182,20 +2196,20 @@ fn sequence_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
     if let Value::List(items) = value {
         return Ok(items.lock().clone());
     }
-    let (Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items)) = value else {
-        unreachable!("sequence_iter only attached to list/tuple/set TypeObjects")
+    let Value::Tuple(items) = value else {
+        unreachable!("sequence_iter only attached to list/tuple TypeObjects")
     };
     Ok(items.clone())
 }
 
-/// `iter(set)` / `iter(frozenset)` — yield elements in CPython's hash-table
-/// slot order (not our insertion order), falling back to insertion order when a
-/// non-reproducibly-hashable element is present.
+/// `iter(set)` / `iter(frozenset)` — yield elements in the set's stored CPython
+/// hash-table order.
 fn set_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
-    let (Value::Set(items) | Value::Frozenset(items)) = value else {
-        unreachable!("set_iter only attached to set/frozenset TypeObjects")
-    };
-    Ok(crate::pyhash::cpython_set_order(items).unwrap_or_else(|| items.clone()))
+    match value {
+        Value::Set(b) => Ok(b.lock().iter_ordered()),
+        Value::Frozenset(b) => Ok(b.iter_ordered()),
+        _ => unreachable!("set_iter only attached to set/frozenset TypeObjects"),
+    }
 }
 
 /// `iter(str)` — yield single-char strings, matching CPython's str iteration.
@@ -2721,7 +2735,10 @@ fn sequence_len(value: &Value) -> Result<usize, EvalError> {
     if let Value::List(items) = value {
         return Ok(items.lock().len());
     }
-    let (Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items)) = value else {
+    if let Some(n) = value.set_len() {
+        return Ok(n);
+    }
+    let Value::Tuple(items) = value else {
         unreachable!("sequence_len only on list/tuple/set TypeObjects")
     };
     Ok(items.len())

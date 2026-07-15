@@ -627,9 +627,18 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
                 + guard.len() * VALUE_SLOT_BYTES
                 + guard.iter().map(estimate_value_size).sum::<usize>()
         }
-        Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items) => {
+        Value::Tuple(items) => {
             STRING_HEADER_BYTES
                 + items.len() * VALUE_SLOT_BYTES
+                + items.iter().map(estimate_value_size).sum::<usize>()
+        }
+        // An open-addressing set table over-allocates (load factor ≤3/5, so
+        // ~2× capacity) with a Value slot + i64 hash per slot; approximate that
+        // plus the elements' own sizes.
+        Value::Set(_) | Value::Frozenset(_) => {
+            let items = value.set_items().unwrap_or_default();
+            STRING_HEADER_BYTES
+                + items.len() * 2 * (VALUE_SLOT_BYTES + std::mem::size_of::<i64>())
                 + items.iter().map(estimate_value_size).sum::<usize>()
         }
         Value::Dict(map) => {

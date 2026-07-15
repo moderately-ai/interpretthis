@@ -17,7 +17,7 @@
 //!   validated bit-exact against thousands of CPython-generated hashes (see the
 //!   unit tests, whose expected values come straight from CPython 3.12).
 //!
-//! * [`cpython_set_order`] — a port of CPython's `Objects/setobject.c` table
+//! * [`cpython_set_order_indices`] — a port of CPython's `Objects/setobject.c` table
 //!   (initial size 8, 9-slot linear probing then perturb, resize at 3/5 load,
 //!   clean-rehash in slot order), replaying a set's *insertion* order to yield
 //!   the elements in CPython's iteration order.
@@ -226,9 +226,10 @@ pub fn python_hash(value: &Value) -> Option<i64> {
             }
             Some(hash_tuple(&hashes))
         }
-        Value::Frozenset(items) => {
+        Value::Frozenset(body) => {
+            let items = body.iter_ordered();
             let mut hashes = Vec::with_capacity(items.len());
-            for item in items {
+            for item in &items {
                 hashes.push(python_hash(item)?);
             }
             Some(hash_frozenset(&hashes))
@@ -360,15 +361,6 @@ pub fn cpython_set_order_indices(items: &[Value]) -> Option<Vec<usize>> {
     Some(table.slots.iter().filter_map(|slot| *slot).collect())
 }
 
-/// Reorder `items` (in their true insertion order) into CPython's set iteration
-/// order. Returns `None` when any element's hash is not reproducible, so the
-/// caller keeps insertion order instead of emitting a wrong one.
-#[must_use]
-pub fn cpython_set_order(items: &[Value]) -> Option<Vec<Value>> {
-    let order = cpython_set_order_indices(items)?;
-    Some(order.into_iter().map(|idx| items[idx].clone()).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,38 +420,24 @@ mod tests {
 
     #[test]
     fn frozenset_hashes_match_cpython() {
-        let fs =
-            |xs: &[i64]| Value::Frozenset(xs.iter().map(|&n| Value::Int(n)).collect::<Vec<_>>());
+        let fs = |xs: &[i64]| {
+            Value::new_frozenset(xs.iter().map(|&n| Value::Int(n)).collect::<Vec<_>>())
+        };
         assert_eq!(python_hash(&fs(&[1, 2, 3])), Some(-272375401224217160));
         assert_eq!(python_hash(&fs(&[])), Some(133146708735736));
         // Order-independent: {1,2,3} and {3,2,1} hash identically.
         assert_eq!(python_hash(&fs(&[3, 2, 1])), python_hash(&fs(&[1, 2, 3])));
-        let fss = Value::Frozenset(vec![Value::String("a".into()), Value::String("b".into())]);
+        let fss = Value::new_frozenset(vec![Value::String("a".into()), Value::String("b".into())]);
         assert_eq!(python_hash(&fss), Some(1679668661828516449));
     }
 
     #[test]
-    fn set_order_matches_cpython() {
-        // list({'a','b','c'}) == ['c', 'a', 'b'] in CPython 3.12 (seed 0).
+    fn set_order_indices_match_cpython() {
+        // list({'a','b','c'}) == ['c','a','b'] in CPython 3.12 (seed 0), i.e.
+        // slot order picks source indices [2, 0, 1]. The full set-order
+        // machinery is exercised in `pyset`.
         let items =
             vec![Value::String("a".into()), Value::String("b".into()), Value::String("c".into())];
-        let order = cpython_set_order(&items).unwrap();
-        let names: Vec<&str> = order
-            .iter()
-            .map(|v| match v {
-                Value::String(s) => s.as_str(),
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(names, ["c", "a", "b"]);
-    }
-
-    #[test]
-    fn int_set_order_matches_cpython() {
-        // list({8, 1, 2}) with an initial size-8 table: 8 collides into slot 0,
-        // 1 -> slot 1, 2 -> slot 2, so order is [8, 1, 2].
-        let items = vec![Value::Int(8), Value::Int(1), Value::Int(2)];
-        let order = cpython_set_order(&items).unwrap();
-        assert_eq!(order, vec![Value::Int(8), Value::Int(1), Value::Int(2)]);
+        assert_eq!(cpython_set_order_indices(&items), Some(vec![2, 0, 1]));
     }
 }

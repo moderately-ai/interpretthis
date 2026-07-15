@@ -392,6 +392,12 @@ pub(super) fn object_id(v: &Value) -> i64 {
         Value::Function(a) => Arc::as_ptr(a).addr(),
         Value::Lambda(a) => Arc::as_ptr(a).addr(),
         Value::LruCache(a) => Arc::as_ptr(a).addr(),
+        // Sets/frozensets are Arc-backed reference types (`is` is pointer
+        // identity), so their id must be the shared address too — otherwise
+        // mutating a set would change its id, and an alias would report a
+        // different id than its source.
+        Value::Set(a) => Arc::as_ptr(a).addr(),
+        Value::Frozenset(a) => Arc::as_ptr(a).addr(),
         other => {
             use std::hash::{Hash as _, Hasher as _};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();

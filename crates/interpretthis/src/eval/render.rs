@@ -156,22 +156,20 @@ pub fn render<'a>(
                 let body = render_sequence(state, items, "(", "", tools).await?;
                 Ok(if single { format!("{body},)") } else { body + ")" })
             }
-            Value::Set(items) => {
-                if items.is_empty() {
+            Value::Set(body) => {
+                let seq = body.lock().iter_ordered();
+                if seq.is_empty() {
                     Ok("set()".to_string())
                 } else {
-                    let ordered = crate::pyhash::cpython_set_order(items);
-                    let seq = ordered.as_deref().unwrap_or(items);
-                    Ok(render_sequence(state, seq, "{", "}", tools).await?)
+                    Ok(render_sequence(state, &seq, "{", "}", tools).await?)
                 }
             }
-            Value::Frozenset(items) => {
-                if items.is_empty() {
+            Value::Frozenset(body) => {
+                let seq = body.iter_ordered();
+                if seq.is_empty() {
                     Ok("frozenset()".to_string())
                 } else {
-                    let ordered = crate::pyhash::cpython_set_order(items);
-                    let seq = ordered.as_deref().unwrap_or(items);
-                    let inner = render_sequence(state, seq, "{", "}", tools).await?;
+                    let inner = render_sequence(state, &seq, "{", "}", tools).await?;
                     Ok(format!("frozenset({inner})"))
                 }
             }

@@ -185,7 +185,7 @@ pub async fn eval_set_comp(
     // instances by __eq__. The old open-coded `value_to_key(x).ok()` dedup
     // silently dropped every element after the first unhashable one (all
     // compared equal as `None`), losing data instead of raising.
-    crate::eval::literals::build_set(state, results, tools).await
+    crate::eval::literals::build_set(state, results, false, tools).await
 }
 
 /// Per-call context for [`eval_list_generators`].

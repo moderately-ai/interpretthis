@@ -1188,27 +1188,28 @@ pub(super) async fn try_builtin(
         "set" => {
             check_arg_count(name, args, 0, 1)?;
             if args.is_empty() {
-                return Ok(Some(Value::Set(Vec::new())));
+                return Ok(Some(Value::new_set(Vec::new())));
             }
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
             // Shared set construction: raises on an unhashable element and
             // dedups instances by __eq__ (both of which the old open-coded
             // `value_to_key(x).ok()` dedup got wrong — it silently included
             // unhashables and collapsed every instance to one).
-            Ok(Some(crate::eval::literals::build_set(state, items, tools).await?))
+            Ok(Some(crate::eval::literals::build_set(state, items, false, tools).await?))
         }
         "frozenset" => {
             check_arg_count(name, args, 0, 1)?;
             if args.is_empty() {
-                return Ok(Some(Value::Frozenset(Vec::new())));
+                return Ok(Some(Value::new_frozenset(Vec::new())));
             }
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
-            // Reuse the set builder (dedup + unhashable rejection), then freeze.
-            let built = crate::eval::literals::build_set(state, items, tools).await?;
+            // Reuse the set builder (dedup + unhashable rejection), then freeze:
+            // the SetBody (table + order) carries straight over into the Arc.
+            let built = crate::eval::literals::build_set(state, items, false, tools).await?;
             let Value::Set(elements) = built else {
                 unreachable!("build_set always returns Value::Set")
             };
-            Ok(Some(Value::Frozenset(elements)))
+            Ok(Some(Value::Frozenset(std::sync::Arc::new(elements.lock().clone()))))
         }
         "iter" => {
             check_arg_count(name, args, 1, 2)?;

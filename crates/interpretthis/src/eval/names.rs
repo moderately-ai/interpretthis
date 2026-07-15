@@ -756,8 +756,8 @@ async fn invoke_factory(
                 "list" => Ok(Value::List(shared_list(Vec::new()))),
                 "tuple" => Ok(Value::Tuple(Vec::new())),
                 "dict" => Ok(Value::Dict(crate::value::shared_dict(indexmap::IndexMap::new()))),
-                "set" => Ok(Value::Set(Vec::new())),
-                "frozenset" => Ok(Value::Frozenset(Vec::new())),
+                "set" => Ok(Value::new_set(Vec::new())),
+                "frozenset" => Ok(Value::new_frozenset(Vec::new())),
                 _ => Err(InterpreterError::TypeError(format!(
                     "defaultdict factory builtin '{builtin}' is not zero-arg constructable"
                 ))

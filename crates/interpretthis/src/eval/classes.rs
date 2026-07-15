@@ -1184,8 +1184,8 @@ fn empty_for_builtin_factory(name: &str) -> EvalResult {
     match name {
         "list" => Ok(Value::List(shared_list(Vec::new()))),
         "dict" => Ok(Value::Dict(crate::value::shared_dict(IndexMap::new()))),
-        "set" => Ok(Value::Set(Vec::new())),
-        "frozenset" => Ok(Value::Frozenset(Vec::new())),
+        "set" => Ok(Value::new_set(Vec::new())),
+        "frozenset" => Ok(Value::new_frozenset(Vec::new())),
         "tuple" => Ok(Value::Tuple(Vec::new())),
         "str" => Ok(Value::String("".into())),
         other => {

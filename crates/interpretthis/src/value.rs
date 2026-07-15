@@ -37,6 +37,24 @@ pub fn shared_list(items: Vec<Value>) -> SharedList {
     Arc::new(Mutex::new(items))
 }
 
+/// Mutable, shared backing store for [`Value::Set`]. Same identity model as
+/// [`SharedList`]: a `set` clone shares storage, so `.add`/`.discard` through
+/// any alias (or a function argument) are visible everywhere — matching
+/// CPython's set reference semantics. The body carries CPython's hash-table so
+/// iteration order matches CPython (see [`crate::pyset`]).
+pub type SharedSet = Arc<Mutex<crate::pyset::SetBody>>;
+
+/// Shared backing store for [`Value::Frozenset`]. Immutable, so no `Mutex`;
+/// cloning is an `Arc` refcount bump and `is`-identity compares the pointer.
+pub type SharedFrozenset = Arc<crate::pyset::SetBody>;
+
+/// Construct a fresh [`SharedSet`] from a set body.
+#[inline]
+#[must_use]
+pub fn shared_set(body: crate::pyset::SetBody) -> SharedSet {
+    Arc::new(Mutex::new(body))
+}
+
 /// Shared backing store for [`Value::Dict`]. Same identity model as
 /// [`SharedList`]: cloning a `dict` Value is a refcount bump, so key
 /// writes / `del` / `.update` through any alias are visible on every
@@ -227,6 +245,49 @@ fn deserialize_shared_dict<'de, D: serde::Deserializer<'de>>(
     Ok(shared_dict(deserialize_dict(deserializer)?))
 }
 
+/// Serialize a `set` as its elements in iteration order (the table is rebuilt
+/// on load, keeping the wire format small and independent of table internals).
+fn serialize_shared_set<S: serde::Serializer>(
+    body: &SharedSet,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&body.lock().iter_ordered(), serializer)
+}
+
+/// Deserialize a set's elements and rebuild its table.
+fn deserialize_shared_set<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SharedSet, D::Error> {
+    let items = <Vec<Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(shared_set(crate::pyset::SetBody::from_items(items)))
+}
+
+/// Serialize a `frozenset` as its elements in iteration order.
+fn serialize_shared_frozenset<S: serde::Serializer>(
+    body: &SharedFrozenset,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&body.iter_ordered(), serializer)
+}
+
+/// Deserialize a frozenset's elements and rebuild its table.
+fn deserialize_shared_frozenset<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SharedFrozenset, D::Error> {
+    let items = <Vec<Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(Arc::new(crate::pyset::SetBody::from_items(items)))
+}
+
+/// Order-independent, cross-type `set`/`frozenset` equality: the element sets
+/// are equal (using `Value`'s structural `==`).
+fn set_bodies_equal(a: &crate::pyset::SetBody, b: &crate::pyset::SetBody) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (ai, bi) = (a.iter_ordered(), b.iter_ordered());
+    ai.iter().all(|x| bi.iter().any(|y| x == y))
+}
+
 /// The dynamic value type flowing through the interpreter.
 ///
 /// Which builtin lazy iterator a [`Value::BuiltinIter`] is, carried
@@ -366,12 +427,20 @@ pub enum Value {
         dict: SharedDict,
         kind: DictViewKind,
     },
-    /// Python `set` (stored as Vec since Value isn't Hash).
-    Set(Vec<Self>),
-    /// Python `frozenset` — an immutable, hashable set. Same Vec storage as
-    /// `Set`, but with no mutating methods and a `ValueKey::Frozenset`
-    /// projection so it can serve as a dict key or set member.
-    Frozenset(Vec<Self>),
+    /// Python `set` — a shared, mutable CPython-order hash table
+    /// ([`crate::pyset::SetBody`]). Reference-semantic like `list`. Serialized
+    /// as its elements (in iteration order); the table is rebuilt on load.
+    #[serde(serialize_with = "serialize_shared_set", deserialize_with = "deserialize_shared_set")]
+    Set(SharedSet),
+    /// Python `frozenset` — an immutable, hashable set. Shares the
+    /// [`crate::pyset::SetBody`] table (for iteration order) behind an `Arc`
+    /// (no `Mutex`), with a `ValueKey::Frozenset` projection so it can serve as
+    /// a dict key or set member.
+    #[serde(
+        serialize_with = "serialize_shared_frozenset",
+        deserialize_with = "deserialize_shared_frozenset"
+    )]
+    Frozenset(SharedFrozenset),
     /// User-defined function (`def`) — captures closure at definition time.
     ///
     /// Wrapped in `Arc` so closures that reference a function share the
@@ -983,8 +1052,9 @@ impl PartialEq for Value {
             | (Self::Class(a), Self::Class(b))
             | (Self::Module(a), Self::Module(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
-            // bytearray compares equal to bytes with the same contents.
-            (Self::ByteArray(a), Self::ByteArray(b)) => *a.lock() == *b.lock(),
+            // bytearray compares equal to bytes with the same contents. Guard
+            // the same-Arc case first so `ba == ba` doesn't lock twice (deadlock).
+            (Self::ByteArray(a), Self::ByteArray(b)) => Arc::ptr_eq(a, b) || *a.lock() == *b.lock(),
             (Self::ByteArray(a), Self::Bytes(b)) | (Self::Bytes(b), Self::ByteArray(a)) => {
                 *a.lock() == *b
             }
@@ -1012,14 +1082,16 @@ impl PartialEq for Value {
                 a_guard.len() == b_guard.len()
                     && a_guard.iter().zip(b_guard.iter()).all(|(x, y)| x == y)
             }
-            (Self::Tuple(a), Self::Tuple(b)) | (Self::Set(a), Self::Set(b)) => a == b,
+            (Self::Tuple(a), Self::Tuple(b)) => a == b,
             // set/frozenset equality is order-independent and cross-type, so
-            // `frozenset([1, 2])` keyed structurally still matches `{2, 1}`.
-            (Self::Frozenset(a), Self::Frozenset(b))
-            | (Self::Frozenset(a), Self::Set(b))
-            | (Self::Set(a), Self::Frozenset(b)) => {
-                a.len() == b.len() && a.iter().all(|x| b.contains(x))
+            // `frozenset([1, 2])` still matches `{2, 1}`. Guard the same-Arc case
+            // first so `s == s` doesn't lock the one mutex twice (deadlock).
+            (Self::Set(a), Self::Set(b)) => {
+                Arc::ptr_eq(a, b) || set_bodies_equal(&a.lock(), &b.lock())
             }
+            (Self::Frozenset(a), Self::Frozenset(b)) => set_bodies_equal(a, b),
+            (Self::Frozenset(a), Self::Set(b)) => set_bodies_equal(a, &b.lock()),
+            (Self::Set(a), Self::Frozenset(b)) => set_bodies_equal(&a.lock(), b),
             // Value-equality on contents; guard the same-Arc case first
             // so `d == d` doesn't lock the one mutex twice (deadlock).
             (Self::Dict(a), Self::Dict(b)) => Arc::ptr_eq(a, b) || *a.lock() == *b.lock(),
@@ -1713,6 +1785,40 @@ pub struct Param {
 }
 
 impl Value {
+    /// Elements of a `set`/`frozenset` in CPython iteration order, or `None` for
+    /// any other value. The single funnel for read sites (and the host bindings)
+    /// that used to match `Value::Set(items) | Value::Frozenset(items)`.
+    #[must_use]
+    pub fn set_items(&self) -> Option<Vec<Value>> {
+        match self {
+            Value::Set(b) => Some(b.lock().iter_ordered()),
+            Value::Frozenset(b) => Some(b.iter_ordered()),
+            _ => None,
+        }
+    }
+
+    /// Number of elements if this is a `set`/`frozenset`, else `None`.
+    #[must_use]
+    pub(crate) fn set_len(&self) -> Option<usize> {
+        match self {
+            Value::Set(b) => Some(b.lock().len()),
+            Value::Frozenset(b) => Some(b.len()),
+            _ => None,
+        }
+    }
+
+    /// A `set` value from `items` (deduped by the caller for instances).
+    #[must_use]
+    pub fn new_set(items: Vec<Value>) -> Value {
+        Value::Set(shared_set(crate::pyset::SetBody::from_items(items)))
+    }
+
+    /// A `frozenset` value from `items` (deduped by the caller for instances).
+    #[must_use]
+    pub fn new_frozenset(items: Vec<Value>) -> Value {
+        Value::Frozenset(Arc::new(crate::pyset::SetBody::from_items(items)))
+    }
+
     /// Check truthiness (Python semantics).
     #[inline]
     #[must_use]
@@ -1736,7 +1842,8 @@ impl Value {
             Self::Array { items, .. } => !items.lock().is_empty(),
             Self::Tuple(t) => !t.is_empty(),
             Self::Dict(d) => !d.lock().is_empty(),
-            Self::Set(s) | Self::Frozenset(s) => !s.is_empty(),
+            Self::Set(s) => !s.lock().is_empty(),
+            Self::Frozenset(s) => !s.is_empty(),
             // Always truthy: callables, exceptions, proxies, type/class/module
             // objects, dates, match objects. (An instance is truthy unless it
             // defines `__bool__`/`__len__`; those aren't consulted in this
@@ -2095,9 +2202,8 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
-            Self::Set(items) => {
-                let ordered = crate::pyhash::cpython_set_order(items);
-                let seq = ordered.as_deref().unwrap_or(items);
+            Self::Set(body) => {
+                let seq = body.lock().iter_ordered();
                 write!(f, "{{")?;
                 for (i, item) in seq.iter().enumerate() {
                     if i > 0 {
@@ -2109,12 +2215,11 @@ impl fmt::Display for Value {
             }
             // `frozenset({1, 2})`, or `frozenset()` when empty (CPython never
             // renders a bare `{}`, which is an empty dict).
-            Self::Frozenset(items) => {
-                if items.is_empty() {
+            Self::Frozenset(body) => {
+                if body.is_empty() {
                     return write!(f, "frozenset()");
                 }
-                let ordered = crate::pyhash::cpython_set_order(items);
-                let seq = ordered.as_deref().unwrap_or(items);
+                let seq = body.iter_ordered();
                 write!(f, "frozenset({{")?;
                 for (i, item) in seq.iter().enumerate() {
                     if i > 0 {
@@ -2785,12 +2890,8 @@ impl Value {
             // List / Tuple / Set / Deque all project to a JSON array.
             Self::List(items) => array(&items.lock())?,
             Self::Tuple(items) => array(items)?,
-            Self::Set(items) | Self::Frozenset(items) => {
-                match crate::pyhash::cpython_set_order(items) {
-                    Some(ordered) => array(&ordered)?,
-                    None => array(items)?,
-                }
-            }
+            Self::Set(body) => array(&body.lock().iter_ordered())?,
+            Self::Frozenset(body) => array(&body.iter_ordered())?,
             Self::Deque { items, .. } => {
                 J::Array(items.iter().map(Self::to_json).collect::<Result<_, _>>()?)
             }
@@ -2899,7 +3000,9 @@ impl ValueKey {
             ))),
             Self::String(s) => Value::String(s.clone()),
             Self::Tuple(items) => Value::Tuple(items.iter().map(Self::to_value).collect()),
-            Self::Frozenset(items) => Value::Frozenset(items.iter().map(Self::to_value).collect()),
+            Self::Frozenset(items) => Value::Frozenset(std::sync::Arc::new(
+                crate::pyset::SetBody::from_items(items.iter().map(Self::to_value).collect()),
+            )),
             Self::Instance { value, .. } => (**value).clone(),
             Self::Date(d) => Value::Date(*d),
             Self::Time(t) => Value::Time(*t),

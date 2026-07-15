@@ -33,8 +33,9 @@ use crate::{
 /// Later versions add `Counter`, datetime variants, `HashDigest`,
 /// `Deque` / `DefaultDict`, `EnumMember`, dataclass metadata, and
 /// `Decimal` / `Fraction` — each bump rejects older readers of newer
-/// blobs (one-directional incompatibility).
-pub const STATE_FORMAT_VERSION: u32 = 11;
+/// blobs (one-directional incompatibility). v12: `set`/`frozenset` moved to a
+/// shared CPython-order table, serialized as elements-only.
+pub const STATE_FORMAT_VERSION: u32 = 12;
 
 /// Bytes occupied by the little-endian `u32` version prefix before the
 /// JSON state body.

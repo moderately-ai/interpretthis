@@ -166,20 +166,20 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
         // JavaScript has no tuple to round-trip through.
         Value::Tuple(items) => array_to_js(env, items, true),
 
-        // A JS `Set` preserves insertion order, so project the elements in
-        // CPython's set iteration order to match what the interpreter shows.
-        Value::Set(items) => {
-            let ordered = interpretthis::pyhash::cpython_set_order(items);
-            let array = array_to_js(env, ordered.as_deref().unwrap_or(items), false)?;
+        // A JS `Set` preserves insertion order, so project the elements in the
+        // set's stored CPython iteration order to match what the interpreter shows.
+        Value::Set(_) => {
+            let items = value.set_items().unwrap_or_default();
+            let array = array_to_js(env, &items, false)?;
             construct_global(env, "Set", array)
         }
 
         // JavaScript has no frozenset; project it to a JS `Set` (the same shape
         // as a Python `set`). The immutability is lost across the boundary — a
         // documented, one-way projection, like tuple → array.
-        Value::Frozenset(items) => {
-            let ordered = interpretthis::pyhash::cpython_set_order(items);
-            let array = array_to_js(env, ordered.as_deref().unwrap_or(items), false)?;
+        Value::Frozenset(_) => {
+            let items = value.set_items().unwrap_or_default();
+            let array = array_to_js(env, &items, false)?;
             construct_global(env, "Set", array)
         }
 
@@ -461,7 +461,7 @@ fn set_to_value(env: &Env, value: &Unknown<'_>) -> Result<Value> {
     for item in &items {
         to_key(item)?;
     }
-    Ok(Value::Set(items))
+    Ok(Value::new_set(items))
 }
 
 fn map_to_value(env: &Env, value: &Unknown<'_>) -> Result<Value> {

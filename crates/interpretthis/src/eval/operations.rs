@@ -186,7 +186,7 @@ fn dictview_as_set(value: &Value) -> Option<Value> {
         }
         crate::value::DictViewKind::Values => return None,
     };
-    Some(Value::Set(items))
+    Some(Value::Set(crate::value::shared_set(crate::pyset::SetBody::from_items(items))))
 }
 
 /// Builtin-pair arithmetic kernel for the type-object slot table.
@@ -378,11 +378,13 @@ fn add_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     }
 }
 
-/// Elements of a `set` or `frozenset`; `None` for any other value. Lets the
-/// set-algebra operators accept either concrete type on both operands.
-fn set_like_items(v: &Value) -> Option<&[Value]> {
+/// The set body of a `set`/`frozenset` (a snapshot clone); `None` for anything
+/// else. Lets the set-algebra operators accept either concrete type and run the
+/// order-faithful table algebra (CPython presize/merge) rather than a rebuild.
+fn set_like_body(v: &Value) -> Option<crate::pyset::SetBody> {
     match v {
-        Value::Set(items) | Value::Frozenset(items) => Some(items),
+        Value::Set(s) => Some(s.lock().clone()),
+        Value::Frozenset(f) => Some((**f).clone()),
         _ => None,
     }
 }
@@ -390,29 +392,18 @@ fn set_like_items(v: &Value) -> Option<&[Value]> {
 /// Wrap set-algebra output in the LEFT operand's concrete type — CPython's
 /// `a OP b` returns `type(a)`, so `frozenset - set` is a frozenset while
 /// `set - frozenset` is a plain set.
-fn wrap_set_like(left: &Value, items: Vec<Value>) -> Value {
-    if matches!(left, Value::Frozenset(_)) { Value::Frozenset(items) } else { Value::Set(items) }
-}
-
-/// Whether `probe` equals any element of `items` under Python set membership.
-///
-/// Uses the sync structural comparator, so it handles the numeric tower
-/// (`1 == 1.0 == True`) and distinguishes distinct instances by structure —
-/// unlike the old `value_to_key(x).ok()` keying, which returned `None` for
-/// every instance and collapsed them all into one element. A custom async
-/// `__eq__`/`__hash__` on set elements is not consulted here (the sync set-op
-/// path has no eval context); that divergence is tracked by
-/// `gap-instance-dict-key-equality-dunder-parity`, and matches the structural
-/// fallback everywhere else set membership is computed synchronously.
-pub(crate) fn set_contains(items: &[Value], probe: &Value) -> bool {
-    items.iter().any(|item| values_equal_pub(item, probe))
+fn wrap_set_body(left: &Value, body: crate::pyset::SetBody) -> Value {
+    if matches!(left, Value::Frozenset(_)) {
+        Value::Frozenset(std::sync::Arc::new(body))
+    } else {
+        Value::Set(crate::value::shared_set(body))
+    }
 }
 
 fn sub_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     // Set difference
-    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
-        let result: Vec<Value> = a.iter().filter(|v| !set_contains(b, v)).cloned().collect();
-        return Ok(wrap_set_like(left, result));
+    if let (Some(a), Some(b)) = (set_like_body(left), set_like_body(right)) {
+        return Ok(wrap_set_body(left, a.difference_with(&b)));
     }
 
     if either_is_float(left, right) {
@@ -697,8 +688,10 @@ fn matmult_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         ))
         .into());
     };
-    let a_guard = a.lock();
-    let b_guard = b.lock();
+    // Snapshot both operands' outer rows first (releasing each lock) so `m @ m`
+    // — the same Arc on both sides — does not lock the one mutex twice (deadlock).
+    let a_guard = a.lock().clone();
+    let b_guard = b.lock().clone();
     if a_guard.is_empty() || b_guard.is_empty() {
         return Ok(Value::List(shared_list(Vec::new())));
     }
@@ -905,14 +898,8 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         return Ok(Value::Counter(crate::types::counter_combine_op(a, b, std::cmp::Ord::max)));
     }
     // Set union
-    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
-        let mut result = a.to_vec();
-        for item in b {
-            if !set_contains(&result, item) {
-                result.push(item.clone());
-            }
-        }
-        return Ok(wrap_set_like(left, result));
+    if let (Some(a), Some(b)) = (set_like_body(left), set_like_body(right)) {
+        return Ok(wrap_set_body(left, a.union_with(&b)));
     }
     // Dict merge (Python 3.9+)
     if let (Value::Dict(a), Value::Dict(b)) = (left, right) {
@@ -934,14 +921,8 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
 
 fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     // Set symmetric difference
-    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
-        let mut result: Vec<Value> = a.iter().filter(|v| !set_contains(b, v)).cloned().collect();
-        for item in b {
-            if !set_contains(a, item) && !set_contains(&result, item) {
-                result.push(item.clone());
-            }
-        }
-        return Ok(wrap_set_like(left, result));
+    if let (Some(a), Some(b)) = (set_like_body(left), set_like_body(right)) {
+        return Ok(wrap_set_body(left, a.symmetric_difference_with(&b)));
     }
     if let (Value::Bool(a), Value::Bool(b)) = (left, right) {
         return Ok(Value::Bool(*a ^ *b));
@@ -959,9 +940,8 @@ fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         return Ok(Value::Counter(crate::types::counter_combine_op(a, b, std::cmp::Ord::min)));
     }
     // Set intersection
-    if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
-        let result: Vec<Value> = a.iter().filter(|v| set_contains(b, v)).cloned().collect();
-        return Ok(wrap_set_like(left, result));
+    if let (Some(a), Some(b)) = (set_like_body(left), set_like_body(right)) {
+        return Ok(wrap_set_body(left, a.intersection_with(&b)));
     }
     if let (Value::Bool(a), Value::Bool(b)) = (left, right) {
         return Ok(Value::Bool(*a & *b));
@@ -1224,7 +1204,9 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Bytes(a), Value::Bytes(b)) => a == b,
-        (Value::ByteArray(a), Value::ByteArray(b)) => *a.lock() == *b.lock(),
+        (Value::ByteArray(a), Value::ByteArray(b)) => {
+            std::sync::Arc::ptr_eq(a, b) || *a.lock() == *b.lock()
+        }
         (Value::ByteArray(a), Value::Bytes(b)) | (Value::Bytes(b), Value::ByteArray(a)) => {
             *a.lock() == *b
         }
@@ -1276,7 +1258,10 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         }
         // set/frozenset equality is order-independent and cross-type:
         // CPython's `{1, 2} == frozenset([2, 1])` is True.
-        (Value::Set(a) | Value::Frozenset(a), Value::Set(b) | Value::Frozenset(b)) => {
+        (Value::Set(_) | Value::Frozenset(_), Value::Set(_) | Value::Frozenset(_)) => {
+            let (Some(a), Some(b)) = (left.set_items(), right.set_items()) else {
+                return false;
+            };
             if a.len() != b.len() {
                 return false;
             }
@@ -1394,6 +1379,10 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
         (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
         (Value::Lambda(a), Value::Lambda(b)) => Arc::ptr_eq(a, b),
         (Value::LruCache(a), Value::LruCache(b)) => Arc::ptr_eq(a, b),
+        // Sets/frozensets are reference types: `s is s` (and an alias) is True,
+        // but two separately-built equal sets are distinct objects.
+        (Value::Set(a), Value::Set(b)) => Arc::ptr_eq(a, b),
+        (Value::Frozenset(a), Value::Frozenset(b)) => Arc::ptr_eq(a, b),
         // Iterator objects are identified by the id/cursor keying their state
         // in the interpreter, so a generator/lazy/builtin iterator is identical
         // exactly to itself (`g is g`, `iter(g) is g`).
@@ -1409,7 +1398,9 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::LruCache(_)
             | Value::Generator { .. }
             | Value::Lazy { .. }
-            | Value::BuiltinIter { .. },
+            | Value::BuiltinIter { .. }
+            | Value::Set(_)
+            | Value::Frozenset(_),
             _,
         )
         | (
@@ -1421,7 +1412,9 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::LruCache(_)
             | Value::Generator { .. }
             | Value::Lazy { .. }
-            | Value::BuiltinIter { .. },
+            | Value::BuiltinIter { .. }
+            | Value::Set(_)
+            | Value::Frozenset(_),
         ) => false,
         // Immutable value types: equality fallback (see doc).
         _ => values_equal(left, right),

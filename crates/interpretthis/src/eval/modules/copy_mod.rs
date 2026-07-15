@@ -71,10 +71,10 @@ fn shallow_clone(value: &Value) -> Value {
         // Dict is Arc-shared, so a fresh backing store is needed (an
         // Arc clone would alias the source); its elements stay shared.
         Value::Dict(map) => Value::Dict(shared_dict(map.lock().clone())),
-        // Set / Frozenset / Tuple / Counter / DefaultDict / Deque store
-        // their contents by value, so a plain clone is already an
-        // independent outer container with shared elements.
-        Value::Set(items) => Value::Set(items.clone()),
+        // A shallow copy is a *distinct* mutable set with the same elements, so
+        // clone the body into a fresh handle (an Arc bump would alias mutation).
+        // A frozenset is immutable, so sharing the Arc is fine.
+        Value::Set(b) => Value::Set(crate::value::shared_set(b.lock().clone())),
         Value::Frozenset(items) => Value::Frozenset(items.clone()),
         Value::Tuple(items) => Value::Tuple(items.clone()),
         Value::Counter(map) => Value::Counter(map.clone()),
@@ -120,10 +120,12 @@ fn deep_clone_memo(value: &Value, memo: &mut HashMap<usize, Value>) -> Value {
         Value::Tuple(items) => {
             Value::Tuple(items.iter().map(|v| deep_clone_memo(v, memo)).collect())
         }
-        Value::Set(items) => Value::Set(items.iter().map(|v| deep_clone_memo(v, memo)).collect()),
-        Value::Frozenset(items) => {
-            Value::Frozenset(items.iter().map(|v| deep_clone_memo(v, memo)).collect())
-        }
+        Value::Set(b) => Value::new_set(
+            b.lock().iter_ordered().iter().map(|v| deep_clone_memo(v, memo)).collect(),
+        ),
+        Value::Frozenset(b) => Value::new_frozenset(
+            b.iter_ordered().iter().map(|v| deep_clone_memo(v, memo)).collect(),
+        ),
         Value::Dict(map) => {
             let snapshot = map.lock().clone();
             let mut out = IndexMap::with_capacity(snapshot.len());

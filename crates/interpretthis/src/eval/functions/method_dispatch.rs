@@ -2,13 +2,15 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::sync::Arc;
+
 use indexmap::IndexMap;
 
 use super::{methods, resolve_proxy};
 use crate::{
     error::{EvalError, InterpreterError},
     eval::place,
-    value::{Value, shared_list},
+    value::{Value, shared_dict, shared_list},
 };
 // EvalError used for BigInt method overflow path.
 
@@ -204,6 +206,24 @@ fn list_methods(
     let Value::List(items) = obj else {
         return Err(type_mismatch("list"));
     };
+    // If an argument IS this list (`l.extend(l)`), iterating it while the
+    // receiver lock is held would re-lock the same mutex (deadlock); snapshot
+    // any such aliasing argument to an independent copy first (no lock held).
+    let snapped;
+    let args = if args.iter().any(|a| matches!(a, Value::List(l) if Arc::ptr_eq(l, items))) {
+        snapped = args
+            .iter()
+            .map(|a| match a {
+                Value::List(l) if Arc::ptr_eq(l, items) => {
+                    Value::List(shared_list(l.lock().clone()))
+                }
+                other => other.clone(),
+            })
+            .collect::<Vec<_>>();
+        &snapped
+    } else {
+        args
+    };
     let mut guard = items.lock();
     methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
 }
@@ -395,9 +415,24 @@ fn dict_methods(
         }
         return Ok(MethodOutcome::pure(Value::DictView { dict: map.clone(), kind }));
     }
-    // The dict methods are sync and mutate through the guard, so
-    // holding the lock across the call is deadlock-free and the shared
-    // dict observes the mutation.
+    // If an argument IS this dict (`d.update(d)`), reading it under the receiver
+    // lock would re-lock the same mutex (deadlock); snapshot such an aliasing
+    // argument to an independent copy first (no lock held).
+    let snapped;
+    let args = if args.iter().any(|a| matches!(a, Value::Dict(d) if Arc::ptr_eq(d, map))) {
+        snapped = args
+            .iter()
+            .map(|a| match a {
+                Value::Dict(d) if Arc::ptr_eq(d, map) => Value::Dict(shared_dict(d.lock().clone())),
+                other => other.clone(),
+            })
+            .collect::<Vec<_>>();
+        &snapped
+    } else {
+        args
+    };
+    // The dict methods are sync and mutate through the guard, so holding the
+    // lock across the call is deadlock-free (the aliasing case is handled above).
     let mut guard = map.lock();
     methods::dict::dispatch_dict_method(&mut guard, method, args, kwargs)
 }
@@ -530,10 +565,13 @@ fn set_methods(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
-    let Value::Set(items) = obj else {
+    let Value::Set(body) = obj else {
         return Err(type_mismatch("set"));
     };
-    methods::set::dispatch_set_method(items, method, args, kwargs)
+    // Pass the shared handle, NOT a held guard: set methods lock narrowly so
+    // `s.update(s)` / `s.union(s)` (an arg that is the receiver) don't re-lock
+    // the one mutex while it is already held (deadlock).
+    methods::set::dispatch_set_method(body, method, args, kwargs)
 }
 
 fn frozenset_methods(
@@ -542,10 +580,10 @@ fn frozenset_methods(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
-    let Value::Frozenset(items) = obj else {
+    let Value::Frozenset(body) = obj else {
         return Err(type_mismatch("frozenset"));
     };
-    methods::set::dispatch_frozenset_method(items, method, args, kwargs)
+    methods::set::dispatch_frozenset_method(body, method, args, kwargs)
 }
 
 fn tuple_methods(

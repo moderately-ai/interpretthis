@@ -131,6 +131,10 @@ pub async fn eval_dict(
 pub(crate) async fn build_set(
     state: &mut InterpreterState,
     candidates: Vec<Value>,
+    // A constant set/frozenset literal (`{'a','b'}`, all-constant elements) is
+    // folded by CPython's compiler into a `frozenset` constant with a distinct
+    // iteration order; `constant` selects that fold over incremental order.
+    constant: bool,
     tools: &Tools,
 ) -> EvalResult {
     let mut items: Vec<Value> = Vec::with_capacity(candidates.len());
@@ -165,7 +169,12 @@ pub(crate) async fn build_set(
             items.push(candidate);
         }
     }
-    Ok(Value::Set(items))
+    let body = if constant {
+        crate::pyset::SetBody::from_constant_literal(items)
+    } else {
+        crate::pyset::SetBody::from_items(items)
+    };
+    Ok(Value::Set(crate::value::shared_set(body)))
 }
 
 /// Evaluate a set literal `{a, b, c}`.
@@ -175,7 +184,10 @@ pub async fn eval_set(
     tools: &Tools,
 ) -> EvalResult {
     let candidates = eval_display_elements(state, &node.elts, tools).await?;
-    build_set(state, candidates, tools).await
+    // CPython's compiler constant-folds an all-constant set literal.
+    let constant =
+        !node.elts.is_empty() && node.elts.iter().all(|e| matches!(e, ast::Expr::Constant(_)));
+    build_set(state, candidates, constant, tools).await
 }
 
 /// Convert a Value to a hashable dict key.
@@ -211,8 +223,9 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
             Ok(ValueKey::Tuple(keys?))
         }
         // A frozenset is hashable; its elements are already hashable.
-        Value::Frozenset(items) => {
-            let keys: Result<Vec<ValueKey>, _> = items.iter().map(value_to_key).collect();
+        Value::Frozenset(body) => {
+            let keys: Result<Vec<ValueKey>, _> =
+                body.iter_ordered().iter().map(value_to_key).collect();
             Ok(ValueKey::Frozenset(keys?))
         }
         // Temporal types are hashable in CPython (usable as dict keys / set

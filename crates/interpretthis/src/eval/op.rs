@@ -438,6 +438,49 @@ pub async fn aug_binop(
         items.lock().extend(extension);
         return Ok(left.clone());
     }
+    // `set |= / &= / -= / ^=` mutate the set in place through the shared handle
+    // and return it (CPython `set.__ior__`/`__iand__`/`__isub__`/`__ixor__`), so
+    // aliases observe the change and identity is preserved — and the order is
+    // the in-place `update`/`difference_update`/… order, not the copy-producing
+    // binary operator's. These slots accept only a set-like RHS; a non-set RHS
+    // falls through to `binop`, which raises just as CPython does. A `frozenset`
+    // lhs has no in-place slot, so it also falls through (rebinding to a new
+    // frozenset), which is correct.
+    {
+        use rustpython_parser::ast::Operator as Op;
+        if let Value::Set(s) = left {
+            if matches!(op, Op::BitOr | Op::BitAnd | Op::Sub | Op::BitXor) {
+                // Snapshot the RHS body with the receiver lock released, so
+                // `s |= s` (an aliasing RHS) cannot re-lock the one mutex.
+                let other = match right {
+                    Value::Set(o) => Some(o.lock().clone()),
+                    Value::Frozenset(o) => Some((**o).clone()),
+                    _ => None,
+                };
+                if let Some(other) = other {
+                    let mut body = s.lock();
+                    match op {
+                        Op::BitOr => body.merge_from(&other),
+                        Op::Sub => body.difference_from(&other),
+                        Op::BitAnd => {
+                            let intersected = body.intersection_with(&other);
+                            *body = intersected;
+                        }
+                        Op::BitXor => {
+                            for v in other.iter_ordered() {
+                                if !body.discard_value(&v) {
+                                    body.add_value(v);
+                                }
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                    drop(body);
+                    return Ok(left.clone());
+                }
+            }
+        }
+    }
     binop(state, op, left, right, tools).await
 }
 
@@ -1106,8 +1149,16 @@ pub async fn contains(
             }
             return Ok(false);
         }
-        if let Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items) = container {
+        if let Value::Tuple(items) = container {
             for stored in items {
+                if eq(state, stored, item, tools).await? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        if let Some(items) = container.set_items() {
+            for stored in &items {
                 if eq(state, stored, item, tools).await? {
                     return Ok(true);
                 }
