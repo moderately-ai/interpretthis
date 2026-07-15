@@ -402,6 +402,19 @@ pub(crate) fn set_slice(
     if let Value::ByteArray(ba) = container {
         return set_bytearray_slice(ba, spec, &value);
     }
+    // `array[i:j] = array` — CPython only accepts another array as the RHS.
+    if let Value::Array { items, .. } = container {
+        let Value::Array { items: rhs, .. } = &value else {
+            return Err(InterpreterError::TypeError(format!(
+                "can only assign array (not \"{}\") to array slice",
+                value.type_name()
+            ))
+            .into());
+        };
+        let rhs_items = Value::List(rhs.clone());
+        let mut list = Value::List(items.clone());
+        return set_slice(&mut list, spec, rhs_items);
+    }
     let Value::List(items) = container else {
         return Err(InterpreterError::TypeError(format!(
             "'{}' object does not support slice assignment",

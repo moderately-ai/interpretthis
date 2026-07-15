@@ -291,6 +291,12 @@ pub fn dispatch_setitem(
     index: &Value,
     value: Value,
 ) -> Result<isize, EvalError> {
+    // An array assigns exactly like a list over its shared handle (mirroring
+    // `dispatch_getitem`); the typecode is preserved by mutating in place.
+    if let Value::Array { items, .. } = container {
+        let mut list = Value::List(items.clone());
+        return dispatch_setitem(&mut list, index, value);
+    }
     let container_type = type_of(container);
     if let Some(slot) = container_type.set_item_slot {
         return slot(container, index, value);
@@ -464,6 +470,11 @@ fn unwrap_enum_for_compare(value: &Value) -> &Value {
 /// the container type has no slot — matches CPython's error surface for
 /// `1 in 2`.
 pub fn dispatch_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
+    // An array tests membership exactly like a list over its shared handle
+    // (mirroring `dispatch_getitem`/`dispatch_setitem`).
+    if let Value::Array { items, .. } = container {
+        return dispatch_contains(&Value::List(items.clone()), item);
+    }
     let container_type = type_of(container);
     container_type.contains_slot.map_or_else(
         || {
