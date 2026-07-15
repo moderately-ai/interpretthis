@@ -764,6 +764,23 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if either_is_float(left, right) {
         let l = to_float(left)?;
         let r = to_float(right)?;
+        // 0 to a negative power is a division by zero in CPython.
+        if l == 0.0 && r < 0.0 {
+            return Err(crate::value::ExceptionValue::zero_division_error(
+                "0.0 cannot be raised to a negative power",
+            )
+            .into());
+        }
+        // A negative base raised to a non-integer power yields a complex number
+        // (the principal branch), as CPython does — Rust's powf gives NaN. Use
+        // CPython's `_Py_c_pow` real-base formula (len*cos/sin via atan2) rather
+        // than num_complex's ln/exp so the last ULPs match CPython byte-for-byte.
+        if l < 0.0 && r.fract() != 0.0 {
+            let len = l.abs().powf(r);
+            let phase = 0.0f64.atan2(l) * r;
+            let c = num_complex::Complex64::new(len * phase.cos(), len * phase.sin());
+            return Ok(Value::Complex(Box::new(c)));
+        }
         Ok(Value::Float(l.powf(r)))
     } else {
         let l = crate::value::value_as_bigint(left).ok_or_else(|| {
@@ -782,6 +799,13 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         })?;
         use num_traits::{Pow, ToPrimitive as _, Zero as _};
         if r < num_bigint::BigInt::from(0) {
+            // `0 ** -n` is a division by zero (matches the float path above).
+            if l.is_zero() {
+                return Err(crate::value::ExceptionValue::zero_division_error(
+                    "0.0 cannot be raised to a negative power",
+                )
+                .into());
+            }
             let l_f = l.to_f64().unwrap_or(f64::INFINITY);
             let r_f = r.to_f64().unwrap_or(f64::NEG_INFINITY);
             Ok(Value::Float(l_f.powf(r_f)))
