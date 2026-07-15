@@ -699,6 +699,9 @@ pub(crate) fn dispatch_string_method(
             };
             translate(s, table)
         }
+        // `maketrans` is a staticmethod, so it is also reachable through an
+        // instance (`"x".maketrans(a, b)`); the receiver is ignored.
+        "maketrans" => crate::eval::functions::helpers::str_maketrans(args),
         _ => Err(InterpreterError::AttributeError(format!(
             "'str' object has no attribute '{method}'"
         ))
