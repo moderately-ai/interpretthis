@@ -1,0 +1,11 @@
+from decimal import Decimal
+print(Decimal("1E+10"))
+print(Decimal("1.5E+20"))
+print(Decimal("1E-10"))
+print(Decimal("123456789012345678901234567890"))
+print(Decimal("1E+100"))
+print(Decimal("0.00000001"))
+print(Decimal("1.23E-15"))
+print(str(Decimal("1E+2")))
+print(Decimal("9.999E+50"))
+print(repr(Decimal("1E+10")))

@@ -100,6 +100,16 @@ pub(crate) fn eval_place<'a>(
             }
             Expr::Attribute(attr) => {
                 crate::security::validator::validate_attribute(attr.attr.as_str())?;
+                // A class attribute (`Base.registry`) is not a navigable variable
+                // slot — its storage lives in `state.classes` and is a shared
+                // handle. Return None so the caller takes the non-place path
+                // (evaluate the attribute to its shared Dict/List and mutate it),
+                // which keeps `Base.registry[k] = v` visible on the class.
+                if let Expr::Name(base) = attr.value.as_ref() {
+                    if matches!(state.variables.get(base.id.as_str()), Some(Value::Class(_))) {
+                        return Ok(None);
+                    }
+                }
                 let Some(mut place) = eval_place(state, &attr.value, tools).await? else {
                     return Ok(None);
                 };
