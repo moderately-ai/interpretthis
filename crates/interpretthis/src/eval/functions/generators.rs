@@ -24,10 +24,13 @@ use crate::{
     value::{ExceptionValue, FunctionDef, Value},
 };
 
-/// True when `method` is a generator-iterator protocol name.
+/// True when `method` is a generator-iterator protocol name — the methods the
+/// generator/lazy/builtin-iter dispatchers own (rather than falling through to
+/// generic attribute lookup). `__iter__` is included because an iterator is its
+/// own iterator, so `g.__iter__()` must return the iterator itself.
 #[must_use]
 pub(crate) fn is_generator_method(method: &str) -> bool {
-    matches!(method, "send" | "throw" | "close" | "__next__")
+    matches!(method, "send" | "throw" | "close" | "__next__" | "__iter__")
 }
 
 /// Whether a generator body can use the suspend path: every top-level statement
@@ -337,6 +340,8 @@ async fn dispatch_suspended(
             mark_generator_closed(state, id);
             Ok(Value::None)
         }
+        // A generator is its own iterator.
+        "__iter__" => Ok(Value::Generator { id }),
         _ => Err(InterpreterError::AttributeError(format!(
             "'generator' object has no attribute '{method}'"
         ))
@@ -1342,6 +1347,8 @@ fn dispatch_lazy(
             state.lazy_cursors.insert(*cursor_id, items.len());
             Ok(Value::None)
         }
+        // A lazy iterator is its own iterator.
+        "__iter__" => Ok(receiver.clone()),
         _ => Err(InterpreterError::AttributeError(format!(
             "'generator' object has no attribute '{method}'"
         ))

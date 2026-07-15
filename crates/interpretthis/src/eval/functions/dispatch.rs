@@ -482,8 +482,10 @@ pub(crate) async fn call_value_as_function(
         Value::BoundMethod { receiver, method } => {
             match receiver {
                 crate::value::BoundMethodReceiver::Snapshot(value) => {
-                    if matches!(**value, Value::Lazy { .. } | Value::Generator { .. })
-                        && super::generators::is_generator_method(method)
+                    if matches!(
+                        **value,
+                        Value::Lazy { .. } | Value::Generator { .. } | Value::BuiltinIter { .. }
+                    ) && super::generators::is_generator_method(method)
                     {
                         return super::generators::dispatch_generator_method(
                             state, value, method, args, kwargs, tools,
@@ -540,8 +542,12 @@ pub(crate) async fn call_value_as_function(
                             EvalError::from(InterpreterError::name_not_defined(root))
                         })?;
                         with_navigate_mut(root_slot, &pl_steps, |target| {
-                            if matches!(target, Value::Lazy { .. } | Value::Generator { .. })
-                                && super::generators::is_generator_method(method)
+                            if matches!(
+                                target,
+                                Value::Lazy { .. }
+                                    | Value::Generator { .. }
+                                    | Value::BuiltinIter { .. }
+                            ) && super::generators::is_generator_method(method)
                             {
                                 Ok::<Option<Value>, EvalError>(Some(target.clone()))
                             } else {

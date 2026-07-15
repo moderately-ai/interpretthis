@@ -329,6 +329,18 @@ pub(crate) async fn getattr_on_value(
             });
         }
     }
+    // Iterator-protocol methods on generators, lazy iterators, and builtin
+    // iterators (`m = g.__next__`, `s = g.send`) bind as first-class callables,
+    // matching CPython's bound-method objects. The iteration state lives in
+    // `state` keyed by the value's id/cursor, so a Snapshot receiver shares it.
+    if matches!(obj, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. })
+        && crate::eval::functions::is_generator_method(attr_name)
+    {
+        return Ok(Value::BoundMethod {
+            receiver: crate::value::BoundMethodReceiver::Snapshot(Box::new(obj.clone())),
+            method: attr_name.to_string(),
+        });
+    }
     match legacy_attribute(state, &obj, attr_name) {
         Ok(v) => Ok(v),
         Err(err) => {

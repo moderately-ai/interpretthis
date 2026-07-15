@@ -1394,13 +1394,22 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
         (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
         (Value::Lambda(a), Value::Lambda(b)) => Arc::ptr_eq(a, b),
         (Value::LruCache(a), Value::LruCache(b)) => Arc::ptr_eq(a, b),
+        // Iterator objects are identified by the id/cursor keying their state
+        // in the interpreter, so a generator/lazy/builtin iterator is identical
+        // exactly to itself (`g is g`, `iter(g) is g`).
+        (Value::Generator { id: a }, Value::Generator { id: b }) => a == b,
+        (Value::Lazy { cursor_id: a, .. }, Value::Lazy { cursor_id: b, .. }) => a == b,
+        (Value::BuiltinIter { id: a, .. }, Value::BuiltinIter { id: b, .. }) => a == b,
         // A reference type is never identical to a value of any other type.
         (
             Value::List(_)
             | Value::Instance(_)
             | Value::Function(_)
             | Value::Lambda(_)
-            | Value::LruCache(_),
+            | Value::LruCache(_)
+            | Value::Generator { .. }
+            | Value::Lazy { .. }
+            | Value::BuiltinIter { .. },
             _,
         )
         | (
@@ -1409,7 +1418,10 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::Instance(_)
             | Value::Function(_)
             | Value::Lambda(_)
-            | Value::LruCache(_),
+            | Value::LruCache(_)
+            | Value::Generator { .. }
+            | Value::Lazy { .. }
+            | Value::BuiltinIter { .. },
         ) => false,
         // Immutable value types: equality fallback (see doc).
         _ => values_equal(left, right),
