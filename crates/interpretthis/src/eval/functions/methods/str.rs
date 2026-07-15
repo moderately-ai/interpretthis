@@ -467,7 +467,9 @@ pub(crate) fn dispatch_string_method(
             let mut result = String::new();
             let mut capitalize_next = true;
             for ch in s.chars() {
-                if ch.is_whitespace() || !ch.is_alphanumeric() {
+                // Only letters are word content; a digit or punctuation is a
+                // boundary, so the next letter is capitalised (`2nd` -> `2Nd`).
+                if !ch.is_alphabetic() {
                     result.push(ch);
                     capitalize_next = true;
                 } else if capitalize_next {
