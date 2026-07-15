@@ -1326,7 +1326,7 @@ static ENUMMEMBER_TYPE: TypeObject = TypeObject {
     eq_slot: object_eq,
     hash_slot: Some(fallback_hash_slot),
     lt_slot: noimpl_lt,
-    contains_slot: None,
+    contains_slot: Some(enummember_contains),
     arith_slot: noimpl_arith,
     iter_slot: None,
     get_item_slot: None,
@@ -3604,6 +3604,32 @@ fn hashdigest_get_attr(value: &Value, name: &str) -> EvalResult {
         unreachable!("hashdigest_get_attr only on HASHDIGEST_TYPE")
     };
     crate::eval::modules::hashlib::hash_attribute(algo, bytes, name)
+}
+
+/// `member in flag` — a Flag/IntFlag contains another flag when all the RHS's
+/// bits are set (`(self.value & item.value) == item.value`). Non-flag enum
+/// members are not containers, matching CPython's TypeError.
+fn enummember_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
+    let Value::EnumMember { kind, value: cv, .. } = container else {
+        unreachable!("enummember_contains only on ENUMMEMBER_TYPE")
+    };
+    if !kind.is_flag() {
+        return Err(
+            InterpreterError::TypeError("argument of type 'enum' is not iterable".into()).into()
+        );
+    }
+    let container_bits = crate::value::value_as_i64(cv).unwrap_or(0);
+    let item_bits = match item {
+        Value::EnumMember { value, .. } => crate::value::value_as_i64(value).unwrap_or(-1),
+        _ => {
+            return Err(InterpreterError::TypeError(format!(
+                "unsupported operand type(s) for 'in': '{}' and 'enum'",
+                item.type_name()
+            ))
+            .into());
+        }
+    };
+    Ok(item_bits >= 0 && container_bits & item_bits == item_bits)
 }
 
 fn enummember_get_attr(value: &Value, name: &str) -> EvalResult {

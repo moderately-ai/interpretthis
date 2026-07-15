@@ -384,6 +384,61 @@ const fn inplace_arith_slot(op: rustpython_parser::ast::Operator) -> &'static st
     }
 }
 
+/// Combine two `Flag`/`IntFlag` members of the same enum with a bitwise op,
+/// producing a member carrying the combined value. Returns `None` when the
+/// operands are not same-class flag members.
+fn flag_bitwise(
+    state: &InterpreterState,
+    op: rustpython_parser::ast::Operator,
+    left: &Value,
+    right: &Value,
+) -> Option<EvalResult> {
+    use rustpython_parser::ast::Operator;
+    let (
+        Value::EnumMember { class_name: c1, kind, value: v1, .. },
+        Value::EnumMember { class_name: c2, value: v2, .. },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if !kind.is_flag() || c1 != c2 {
+        return None;
+    }
+    let a = crate::value::value_as_i64(v1)?;
+    let b = crate::value::value_as_i64(v2)?;
+    let combined = match op {
+        Operator::BitOr => a | b,
+        Operator::BitAnd => a & b,
+        Operator::BitXor => a ^ b,
+        _ => return None,
+    };
+    Some(Ok(Value::EnumMember {
+        class_name: c1.clone(),
+        member_name: compose_flag_name(state, c1, combined),
+        value: Box::new(Value::Int(combined)),
+        kind: *kind,
+    }))
+}
+
+/// Build the pipe-joined member name for a (possibly composite) flag value,
+/// e.g. `R|W` for value 3. `0` renders as the value itself.
+fn compose_flag_name(state: &InterpreterState, class_name: &str, value: i64) -> String {
+    let Some(class) = state.classes.get(class_name) else {
+        return value.to_string();
+    };
+    let mut parts = Vec::new();
+    for member in &class.enum_members {
+        if let Some(Value::EnumMember { value: mv, .. }) = class.class_attrs.get(member) {
+            if let Some(bit) = crate::value::value_as_i64(mv) {
+                if bit != 0 && value & bit == bit {
+                    parts.push(member.clone());
+                }
+            }
+        }
+    }
+    if parts.is_empty() { value.to_string() } else { parts.join("|") }
+}
+
 /// Apply a binary operator. Dispatches the matching forward slot
 /// (`__add__` / `__sub__` / …) on a user-class lhs; falls back to the
 /// reflected slot (`__radd__` / `__rsub__` / …) on the rhs when the
@@ -396,6 +451,15 @@ pub async fn binop(
     right: &Value,
     tools: &Tools,
 ) -> EvalResult {
+    use rustpython_parser::ast::Operator;
+    // Flag / IntFlag members combine bitwise into a new (possibly composite)
+    // member of the same enum (`Perm.R | Perm.W`). Handled here so the class
+    // registry is available to compose the combined member's name.
+    if matches!(op, Operator::BitOr | Operator::BitAnd | Operator::BitXor) {
+        if let Some(result) = flag_bitwise(state, op, left, right) {
+            return result;
+        }
+    }
     if let Some(method) = instance_slot(state, left, arith_slot(op)) {
         let (returned, _self) =
             invoke_slot(state, left, &method, std::slice::from_ref(right), tools).await?;

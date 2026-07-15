@@ -909,6 +909,20 @@ pub enum EnumKind {
     Plain,
     Int,
     Str,
+    /// `enum.Flag` — members support bitwise `| & ^ ~` producing combined
+    /// members; `str` is `Name.MEMBER` (or `Name.A|B` for a combination).
+    Flag,
+    /// `enum.IntFlag` — like `Flag` but a member is also an int, so `str`
+    /// renders the integer value and it mixes with int arithmetic.
+    IntFlag,
+}
+
+impl EnumKind {
+    /// Whether members of this enum support bitwise flag combination.
+    #[must_use]
+    pub const fn is_flag(self) -> bool {
+        matches!(self, Self::Flag | Self::IntFlag)
+    }
 }
 
 /// A `@property` data descriptor.
@@ -2045,9 +2059,12 @@ impl fmt::Display for Value {
                 write!(f, ")")
             }
             // CPython: `Color.RED` for plain Enum members.
-            Self::EnumMember { class_name, member_name, .. } => {
-                write!(f, "{class_name}.{member_name}")
-            }
+            // CPython 3.11+: IntEnum / StrEnum / IntFlag render as their
+            // underlying value; plain Enum and Flag render as `Name.member`.
+            Self::EnumMember { class_name, member_name, value, kind } => match kind {
+                EnumKind::Int | EnumKind::Str | EnumKind::IntFlag => write!(f, "{value}"),
+                EnumKind::Plain | EnumKind::Flag => write!(f, "{class_name}.{member_name}"),
+            },
             // CPython: `defaultdict(<factory>, {'a': 1, 'b': 2})`.
             Self::DefaultDict(data) => {
                 write!(f, "defaultdict({}, {{", data.factory)?;

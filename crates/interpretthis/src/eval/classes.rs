@@ -126,10 +126,10 @@ pub async fn eval_class_def(
         // (`from enum import Enum as MyBase`) work too.
         if let Some(Value::Type(type_name)) = &resolved {
             match type_name.as_str() {
-                "enum.Enum" | "enum.Flag" => enum_kind = Some(crate::value::EnumKind::Plain),
-                "enum.IntEnum" | "enum.IntFlag" => {
-                    enum_kind = Some(crate::value::EnumKind::Int);
-                }
+                "enum.Enum" => enum_kind = Some(crate::value::EnumKind::Plain),
+                "enum.IntEnum" => enum_kind = Some(crate::value::EnumKind::Int),
+                "enum.Flag" => enum_kind = Some(crate::value::EnumKind::Flag),
+                "enum.IntFlag" => enum_kind = Some(crate::value::EnumKind::IntFlag),
                 "enum.StrEnum" => enum_kind = Some(crate::value::EnumKind::Str),
                 _ => {}
             }
@@ -780,12 +780,19 @@ fn wrap_enum_member(
     if matches!(value, Value::EnumMember { .. }) || member_name.starts_with('_') {
         return value;
     }
-    // Resolve `auto()`: StrEnum yields the lowercased member name, otherwise the
-    // next sequential integer. An explicit int advances the auto counter past
-    // itself so a following `auto()` continues from there (CPython semantics).
+    // Resolve `auto()`: StrEnum yields the lowercased member name; a Flag/IntFlag
+    // yields the next unused power of two (bit position); any other enum yields
+    // the next sequential integer. An explicit int advances the auto counter so
+    // a following `auto()` continues from there (CPython semantics).
     let value = if crate::eval::modules::enum_mod::is_auto_sentinel(&value) {
         if matches!(kind, crate::value::EnumKind::Str) {
             Value::String(member_name.to_lowercase().into())
+        } else if kind.is_flag() {
+            // The next power of two (bit position); auto_next starts at 1, so the
+            // flag members come out 1, 2, 4, 8, ….
+            let n = u64::try_from((*auto_next).max(1)).unwrap_or(1).next_power_of_two();
+            *auto_next = i64::try_from(n.saturating_mul(2)).unwrap_or(i64::MAX);
+            Value::Int(i64::try_from(n).unwrap_or(i64::MAX))
         } else {
             let n = *auto_next;
             *auto_next = n + 1;
