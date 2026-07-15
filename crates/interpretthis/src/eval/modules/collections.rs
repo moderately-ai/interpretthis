@@ -64,7 +64,8 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
                 None | Some(Value::None) => VecDeque::new(),
                 Some(arg) => iterate_value(arg)?.into_iter().collect(),
             };
-            let maxlen = match args.get(1) {
+            // `maxlen` is accepted positionally (arg 1) or by keyword.
+            let maxlen = match args.get(1).or_else(|| kwargs.get("maxlen")) {
                 None | Some(Value::None) => None,
                 Some(Value::Int(n)) => Some(usize::try_from(*n).map_err(|_| {
                     EvalError::from(InterpreterError::ValueError(

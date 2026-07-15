@@ -876,6 +876,23 @@ fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     Ok(Value::Int(l & r))
 }
 
+/// Build the `Counter` for a unary `+`/`-`: keep counts that are strictly
+/// positive after the sign is applied (`negate` for `-c`), dropping the rest.
+fn counter_unary(
+    c: &indexmap::IndexMap<crate::value::ValueKey, Value>,
+    negate: bool,
+) -> indexmap::IndexMap<crate::value::ValueKey, Value> {
+    let mut result = indexmap::IndexMap::new();
+    for (key, val) in c {
+        let n = crate::value::value_as_i64(val).unwrap_or(0);
+        let kept = if negate { -n } else { n };
+        if kept > 0 {
+            result.insert(key.clone(), Value::Int(kept));
+        }
+    }
+    result
+}
+
 /// Evaluate a unary operation (+x, -x, ~x, not x).
 pub async fn eval_unaryop(
     state: &mut InterpreterState,
@@ -907,6 +924,9 @@ pub async fn apply_unaryop(
             | Value::Decimal(_)
             | Value::Fraction(_) => Ok(operand.clone()),
             Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
+            // `+Counter` keeps only the strictly-positive counts (CPython's
+            // `Counter.__pos__`, used to strip zero/negative tallies).
+            Value::Counter(c) => Ok(Value::Counter(counter_unary(c, false))),
             _ => Err(InterpreterError::TypeError(format!(
                 "bad operand type for unary +: '{}'",
                 operand.type_name()
@@ -926,6 +946,9 @@ pub async fn apply_unaryop(
             Value::Bool(b) => Ok(Value::Int(if *b { -1 } else { 0 })),
             Value::Decimal(d) => Ok(Value::Decimal(Box::new(-(*d.clone())))),
             Value::Fraction(fr) => Ok(Value::Fraction(Box::new(-(*fr.clone())))),
+            // `-Counter` negates every count and keeps the now-positive ones
+            // (CPython's `Counter.__neg__`).
+            Value::Counter(c) => Ok(Value::Counter(counter_unary(c, true))),
             _ => Err(InterpreterError::TypeError(format!(
                 "bad operand type for unary -: '{}'",
                 operand.type_name()

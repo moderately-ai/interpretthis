@@ -980,7 +980,7 @@ static DICTVIEW_TYPE: TypeObject = TypeObject {
     name: "dict_view",
     eq_slot: dictview_eq,
     hash_slot: None,
-    lt_slot: noimpl_lt,
+    lt_slot: dictview_lt,
     contains_slot: Some(dictview_contains),
     arith_slot: noimpl_arith,
     iter_slot: Some(dictview_iter),
@@ -1054,6 +1054,22 @@ fn dictview_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     };
     let (a, b) = (to_elems(lhs)?, to_elems(rhs)?);
     Some(a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| recurse_eq(x, y))))
+}
+
+/// Proper-subset `<` for a set-like dict view against another view / set /
+/// frozenset (CPython: keys/items views support the set ordering operators).
+/// `<=`/`>`/`>=` derive from this plus `dictview_eq` in `compare_builtin`.
+fn dictview_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    let to_elems = |v: &Value| -> Option<Vec<Value>> {
+        match v {
+            Value::DictView { .. } => dictview_iter(v).ok(),
+            Value::Set(items) | Value::Frozenset(items) => Some(items.clone()),
+            _ => None,
+        }
+    };
+    let (a, b) = (to_elems(lhs)?, to_elems(rhs)?);
+    let is_proper = a.len() < b.len() && a.iter().all(|av| b.iter().any(|bv| recurse_eq(av, bv)));
+    Some(Ok(is_proper))
 }
 
 /// `collections.ChainMap` TypeObject. Lookups/iteration/len search the
@@ -3169,6 +3185,13 @@ fn deque_get_attr(value: &Value, name: &str) -> EvalResult {
     ];
     if DEQUE_METHODS.contains(&name) {
         return Ok(bound_method(value, name));
+    }
+    // `.maxlen` is the bound (or None) capacity, read-only in CPython.
+    if name == "maxlen" {
+        let Value::Deque { maxlen, .. } = value else {
+            unreachable!("deque_get_attr only on DEQUE_TYPE")
+        };
+        return Ok(maxlen.map_or(Value::None, |n| Value::Int(i64::try_from(n).unwrap_or(i64::MAX))));
     }
     Err(attribute_error("deque", name))
 }
