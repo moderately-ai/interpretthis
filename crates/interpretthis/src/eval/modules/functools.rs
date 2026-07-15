@@ -251,13 +251,19 @@ pub async fn call(
                 )
                 .into());
             };
-            let wrapped_name = match wrapped {
+            // An lru_cache/cache wrapper forwards introspection to the function
+            // it memoizes, so `@wraps(cached_fn)` copies the real name/doc.
+            let intro = match wrapped {
+                Value::LruCache(data) => &data.func,
+                other => other,
+            };
+            let wrapped_name = match intro {
                 Value::Function(fd) => fd.wraps_name.clone().unwrap_or_else(|| fd.name.clone()),
                 Value::Lambda(_) => "<lambda>".to_string(),
                 other => other.type_name().to_string(),
             };
             // wraps also copies __doc__ from the wrapped function.
-            let wrapped_doc = match wrapped {
+            let wrapped_doc = match intro {
                 Value::Function(fd) => fd.docstring.clone(),
                 _ => None,
             };

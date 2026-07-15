@@ -540,6 +540,16 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
             }
             _ => Err(attribute_error("builtin_function_or_method", attr_name)),
         },
+        // `@lru_cache`/`@cache` wrapper: introspection delegates to the wrapped
+        // function (so `fib.__name__` is "fib" and `functools.wraps(fib)` copies
+        // the right name); `__wrapped__` exposes the original callable.
+        Value::LruCache(data) => match attr_name {
+            "__name__" | "__qualname__" | "__doc__" => {
+                legacy_attribute(state, &data.func, attr_name)
+            }
+            "__wrapped__" => Ok(data.func.clone()),
+            _ => Err(attribute_error("functools._lru_cache_wrapper", attr_name)),
+        },
         // An unbound builtin-type method (`str.upper`) is a method descriptor:
         // `__name__` is the method, `__qualname__` is `<type>.<method>`; it has
         // no `__self__`.
