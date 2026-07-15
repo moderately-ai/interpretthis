@@ -77,6 +77,8 @@ fn make_lru_cache(func: Value, maxsize: Option<usize>) -> Value {
         func,
         maxsize,
         cache: parking_lot::Mutex::new(IndexMap::new()),
+        hits: std::sync::atomic::AtomicU64::new(0),
+        misses: std::sync::atomic::AtomicU64::new(0),
     }))
 }
 

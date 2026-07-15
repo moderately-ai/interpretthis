@@ -748,9 +748,11 @@ pub(crate) async fn call_value_as_function(
                     let hit = hit.clone();
                     cache.shift_remove(&key);
                     cache.insert(key.clone(), hit.clone());
+                    data.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Ok(hit);
                 }
             }
+            data.misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let result =
                 Box::pin(call_value_as_function(state, &data.func, args, kwargs, tools)).await?;
             let mut cache = data.cache.lock();

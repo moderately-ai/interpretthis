@@ -711,8 +711,11 @@ pub struct LruCacheData {
     pub func: Value,
     /// Max entries; `None` = unbounded (CPython `maxsize=None`).
     pub maxsize: Option<usize>,
-    /// Insertion-ordered memo: key = positional ValueKeys (kwargs unsupported).
+    /// Insertion-ordered memo: key = positional ValueKeys + sorted kwargs.
     pub cache: Mutex<IndexMap<Vec<ValueKey>, Value>>,
+    /// `cache_info()` counters — a cache hit / miss respectively.
+    pub hits: std::sync::atomic::AtomicU64,
+    pub misses: std::sync::atomic::AtomicU64,
 }
 
 // LruCache is process-local memo state — not restored from checkpoints.
@@ -734,7 +737,13 @@ impl<'de> Deserialize<'de> for LruCacheData {
             maxsize: Option<usize>,
         }
         let w = Wire::deserialize(deserializer)?;
-        Ok(Self { func: w.func, maxsize: w.maxsize, cache: Mutex::new(IndexMap::new()) })
+        Ok(Self {
+            func: w.func,
+            maxsize: w.maxsize,
+            cache: Mutex::new(IndexMap::new()),
+            hits: std::sync::atomic::AtomicU64::new(0),
+            misses: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 }
 

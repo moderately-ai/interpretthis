@@ -208,6 +208,46 @@ fn list_methods(
     methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
 }
 
+fn lru_methods(
+    obj: &mut Value,
+    method: &str,
+    _args: &[Value],
+    _kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Value::LruCache(data) = obj else {
+        return Err(type_mismatch("lru_cache"));
+    };
+    match method {
+        // `CacheInfo(hits, misses, maxsize, currsize)` (the class is seeded in
+        // InterpreterState::new so it reprs and attribute-accesses like CPython).
+        "cache_info" => {
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("hits".to_string(), Value::Int(data.hits.load(Relaxed) as i64));
+            fields.insert("misses".to_string(), Value::Int(data.misses.load(Relaxed) as i64));
+            fields.insert(
+                "maxsize".to_string(),
+                data.maxsize.map_or(Value::None, |m| Value::Int(m as i64)),
+            );
+            fields.insert("currsize".to_string(), Value::Int(data.cache.lock().len() as i64));
+            Ok(MethodOutcome::pure(Value::Instance(crate::value::InstanceValue {
+                class_name: "CacheInfo".to_string(),
+                fields: crate::value::shared_fields(fields),
+            })))
+        }
+        "cache_clear" => {
+            data.cache.lock().clear();
+            data.hits.store(0, Relaxed);
+            data.misses.store(0, Relaxed);
+            Ok(MethodOutcome::pure(Value::None))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'functools._lru_cache_wrapper' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 fn array_methods(
     obj: &mut Value,
     method: &str,
@@ -801,6 +841,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::String(_) => Some(str_methods),
         Value::List(_) => Some(list_methods),
         Value::Array { .. } => Some(array_methods),
+        Value::LruCache(_) => Some(lru_methods),
         Value::Dict(_) => Some(dict_methods),
         Value::Counter(_) => Some(counter_methods),
         Value::Deque { .. } => Some(deque_methods),

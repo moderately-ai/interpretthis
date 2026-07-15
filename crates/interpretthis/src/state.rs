@@ -308,6 +308,18 @@ impl InterpreterState {
             ),
         );
         classes.insert("datetime.IsoCalendarDate".to_string(), iso);
+        // `functools.CacheInfo` for `lru_cache().cache_info()`.
+        let mut cache_info = crate::value::ClassValue::new("CacheInfo");
+        cache_info.class_attrs.insert(
+            "_fields".to_string(),
+            Value::Tuple(
+                ["hits", "misses", "maxsize", "currsize"]
+                    .into_iter()
+                    .map(|f| Value::String(f.into()))
+                    .collect(),
+            ),
+        );
+        classes.insert("CacheInfo".to_string(), cache_info);
         Self {
             variables,
             classes,
