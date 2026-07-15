@@ -1,0 +1,31 @@
+lst = [3, 1, 4, 1, 5]
+lst.sort()
+print(lst)
+lst.append(9)
+print(lst)
+lst.insert(0, 0)
+print(lst)
+print(lst.pop(), lst.pop(0))
+lst.remove(1)
+print(lst)
+print(lst.index(4))
+print(lst.count(1))
+lst.reverse()
+print(lst)
+lst.extend([10, 11])
+print(lst)
+print([1,2,3] + [4,5])
+print([0] * 5)
+l2 = [1, 2, 3]
+l3 = l2.copy()
+l3.append(4)
+print(l2, l3)
+lst.clear()
+print(lst)
+print(sorted([3,1,2], reverse=True))
+data = [5, 2, 8, 1]
+data.sort(key=lambda x: -x)
+print(data)
+nums = [1, 2, 3]
+nums[1:1] = [10, 11]
+print(nums)
