@@ -2,12 +2,10 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Emulation of Python's `string` module — constants only.
+//! Emulation of Python's `string` module.
 //!
-//! Exposes the standard character-class constants. `string.Template`
-//! is not modelled (string interpolation in this interpreter uses
-//! f-strings and `.format()`, which cover every observed extraction-
-//! script case).
+//! Exposes the standard character-class constants, the `Template` class
+//! constructor, and `capwords`.
 
 use crate::{
     error::{EvalResult, InterpreterError},
@@ -45,7 +43,7 @@ impl crate::eval::modules::Module for StringModule {
         constant(name)
     }
     fn has_function(&self, name: &str) -> bool {
-        name == "Template"
+        matches!(name, "Template" | "capwords")
     }
     async fn call(
         &self,
@@ -69,10 +67,50 @@ impl crate::eval::modules::Module for StringModule {
                 )
                 .into()),
             },
+            // `string.capwords(s, sep=None)` — split on `sep` (whitespace when
+            // None), capitalize each word, and rejoin with `sep` (a single
+            // space when None). Equivalent to
+            // `(sep or ' ').join(w.capitalize() for w in s.split(sep))`.
+            "capwords" => {
+                let Some(Value::String(s)) = args.first() else {
+                    return Err(InterpreterError::TypeError(
+                        "capwords() requires a string argument".into(),
+                    )
+                    .into());
+                };
+                let sep = match args.get(1) {
+                    None | Some(Value::None) => None,
+                    Some(Value::String(sp)) => Some(sp.as_str()),
+                    Some(other) => {
+                        return Err(InterpreterError::TypeError(format!(
+                            "capwords() sep must be str or None, not {}",
+                            other.type_name()
+                        ))
+                        .into());
+                    }
+                };
+                let words: Vec<String> = match sep {
+                    None => s.split_whitespace().map(py_capitalize).collect(),
+                    Some("") => {
+                        return Err(InterpreterError::ValueError("empty separator".into()).into());
+                    }
+                    Some(sp) => s.split(sp).map(py_capitalize).collect(),
+                };
+                Ok(Value::String(words.join(sep.unwrap_or(" ")).into()))
+            }
             _ => Err(InterpreterError::AttributeError(format!(
                 "module 'string' has no callable '{func}'"
             ))
             .into()),
         }
+    }
+}
+
+/// Python `str.capitalize`: first character upper-cased, the rest lower-cased.
+fn py_capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect(),
     }
 }
