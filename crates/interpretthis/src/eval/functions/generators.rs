@@ -139,6 +139,7 @@ pub(crate) fn create_generator(
             stmt_index: 0,
             for_stack: Vec::new(),
             while_resume: None,
+            try_resume: None,
         },
     );
     Value::Generator { id }
@@ -204,17 +205,54 @@ async fn dispatch_suspended(
         }
         "throw" => throw_into_generator(state, id, args, tools).await,
         "close" => {
-            if let Some(frame) = state.generators.get_mut(&id) {
-                frame.finished = true;
-                frame.closed = true;
-                frame.for_stack.clear();
+            // A live suspended generator is closed by throwing
+            // `GeneratorExit` at its yield, so any pending `finally`
+            // (and `with`) cleanup runs. A not-started / finished
+            // generator has nothing to run.
+            let live = state
+                .generators
+                .get(&id)
+                .is_some_and(|f| f.started && !f.finished && !f.closed && f.resume_at_yield);
+            if live {
+                let gexit = Value::Exception(Box::new(crate::value::ExceptionValue::new(
+                    "GeneratorExit",
+                    "",
+                )));
+                let result =
+                    throw_into_generator(state, id, std::slice::from_ref(&gexit), tools).await;
+                mark_generator_closed(state, id);
+                return match result {
+                    // Exited cleanly (GeneratorExit / StopIteration propagated).
+                    Err(EvalError::Exception(e))
+                        if e.type_name == "GeneratorExit" || e.type_name == "StopIteration" =>
+                    {
+                        Ok(Value::None)
+                    }
+                    // Yielded again → ignored GeneratorExit (CPython: RuntimeError).
+                    Ok(_) => {
+                        Err(InterpreterError::Runtime("generator ignored GeneratorExit".into())
+                            .into())
+                    }
+                    Err(e) => Err(e),
+                };
             }
+            mark_generator_closed(state, id);
             Ok(Value::None)
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "'generator' object has no attribute '{method}'"
         ))
         .into()),
+    }
+}
+
+/// Mark a generator as finished/closed and drop its loop-resume state.
+fn mark_generator_closed(state: &mut InterpreterState, id: u64) {
+    if let Some(frame) = state.generators.get_mut(&id) {
+        frame.finished = true;
+        frame.closed = true;
+        frame.for_stack.clear();
+        frame.try_resume = None;
     }
 }
 
@@ -402,6 +440,22 @@ async fn run_generator_body(
         // suspend path only when this holds).
         if let Stmt::While(while_node) = stmt {
             match run_while_suspendable(state, while_node, tools).await {
+                Ok(()) => {
+                    *stmt_index += 1;
+                    continue;
+                }
+                Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                    return Err(EvalError::Signal(ControlFlow::Yield(v)));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // Top-level try: step the body statement-by-statement so multiple
+        // yields each resume at their own statement and `finally` runs on
+        // the real exit — not the eager `eval_try` path, which would
+        // re-run the whole body and run finally on suspend.
+        if let Stmt::Try(try_node) = stmt {
+            match run_try_suspendable(state, try_node, tools).await {
                 Ok(()) => {
                     *stmt_index += 1;
                     continue;
@@ -645,6 +699,227 @@ async fn run_while_suspendable(
     }
     clear_resume(state);
     Ok(())
+}
+
+/// Run a top-level `try` inside a generator, stepping the body
+/// statement-by-statement so a `yield` suspends at its own statement
+/// (tracked by `try_resume`) instead of re-running the whole body.
+/// `else`/`except`/`finally` run once the body actually completes or
+/// raises — never on a suspend. Direct-statement yields in the body are
+/// the resumable case; a yield nested in the body's own compound
+/// statements resumes at the enclosing body statement (the same
+/// granularity `for`/`while` use).
+async fn run_try_suspendable(
+    state: &mut InterpreterState,
+    node: &rustpython_parser::ast::StmtTry,
+    tools: &crate::tools::Tools,
+) -> Result<(), EvalError> {
+    use crate::state::{TryPhase, TryResume};
+
+    let resume = state
+        .active_generator_stack
+        .last()
+        .copied()
+        .and_then(|id| state.generators.get(&id))
+        .and_then(|f| f.try_resume);
+
+    // Phase 1 — BODY (skip when resuming inside a later phase).
+    if resume.is_none_or(|r| matches!(r.phase, TryPhase::Body)) {
+        let start = resume.map_or(0, |r| r.index);
+        match step_try_phase(state, &node.body, start, TryPhase::Body, tools).await {
+            TryStep::Yielded(v) => return Err(EvalError::Signal(ControlFlow::Yield(v))),
+            TryStep::Completed => {
+                // try succeeded → run `else`, then fall to finally.
+                match step_try_phase(state, &node.orelse, 0, TryPhase::Orelse, tools).await {
+                    TryStep::Yielded(v) => {
+                        return Err(EvalError::Signal(ControlFlow::Yield(v)));
+                    }
+                    TryStep::Completed => {
+                        return finish_try(state, &node.finalbody, None, tools).await;
+                    }
+                    TryStep::Errored(e) => {
+                        return finish_try(state, &node.finalbody, Some(e), tools).await;
+                    }
+                }
+            }
+            TryStep::Errored(err) => {
+                // Body raised: match a handler and enter it, else propagate.
+                return enter_or_propagate(state, node, err, tools).await;
+            }
+        }
+    }
+
+    // Phase 2 — resume inside a matched HANDLER.
+    if let Some(TryResume { phase: TryPhase::Handler(h), index }) = resume {
+        let handler = &node.handlers[h];
+        let rustpython_parser::ast::ExceptHandler::ExceptHandler(h_node) = handler;
+        match step_try_phase(state, &h_node.body, index, TryPhase::Handler(h), tools).await {
+            TryStep::Yielded(v) => return Err(EvalError::Signal(ControlFlow::Yield(v))),
+            TryStep::Completed => {
+                cleanup_handler(state, h_node);
+                return finish_try(state, &node.finalbody, None, tools).await;
+            }
+            TryStep::Errored(e) => {
+                cleanup_handler(state, h_node);
+                return finish_try(state, &node.finalbody, Some(e), tools).await;
+            }
+        }
+    }
+
+    // Phase 3 — resume inside ORELSE or FINALLY.
+    match resume {
+        Some(TryResume { phase: TryPhase::Orelse, index }) => {
+            match step_try_phase(state, &node.orelse, index, TryPhase::Orelse, tools).await {
+                TryStep::Yielded(v) => Err(EvalError::Signal(ControlFlow::Yield(v))),
+                TryStep::Completed => finish_try(state, &node.finalbody, None, tools).await,
+                TryStep::Errored(e) => finish_try(state, &node.finalbody, Some(e), tools).await,
+            }
+        }
+        Some(TryResume { phase: TryPhase::Finally, index }) => {
+            match step_try_phase(state, &node.finalbody, index, TryPhase::Finally, tools).await {
+                TryStep::Yielded(v) => Err(EvalError::Signal(ControlFlow::Yield(v))),
+                TryStep::Completed => {
+                    set_try_resume(state, None);
+                    Ok(())
+                }
+                TryStep::Errored(e) => {
+                    set_try_resume(state, None);
+                    Err(e)
+                }
+            }
+        }
+        // Body/Handler already handled by the earlier phases.
+        _ => Ok(()),
+    }
+}
+
+/// Outcome of stepping one phase of a suspendable `try`.
+enum TryStep {
+    Completed,
+    Yielded(Box<Value>),
+    Errored(EvalError),
+}
+
+/// Step the statements of one `try` phase from `start`; on a `yield`,
+/// record the resume position `(phase, index)` and return `Yielded`.
+async fn step_try_phase(
+    state: &mut InterpreterState,
+    stmts: &[Stmt],
+    start: usize,
+    phase: crate::state::TryPhase,
+    tools: &crate::tools::Tools,
+) -> TryStep {
+    let mut i = start;
+    while i < stmts.len() {
+        match eval_stmt(state, &stmts[i], tools).await {
+            Ok(_) => {
+                i += 1;
+                if let Some(&id) = state.active_generator_stack.last() {
+                    if let Some(frame) = state.generators.get_mut(&id) {
+                        frame.resume_at_yield = false;
+                    }
+                }
+            }
+            Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                if let Some(&id) = state.active_generator_stack.last() {
+                    if let Some(frame) = state.generators.get_mut(&id) {
+                        frame.resume_at_yield = true;
+                        frame.try_resume = Some(crate::state::TryResume { phase, index: i });
+                    }
+                }
+                return TryStep::Yielded(v);
+            }
+            Err(other) => return TryStep::Errored(other),
+        }
+    }
+    TryStep::Completed
+}
+
+/// A body exception: bind + enter the first matching handler (stepping
+/// it so a yield inside suspends), or propagate after finally.
+async fn enter_or_propagate(
+    state: &mut InterpreterState,
+    node: &rustpython_parser::ast::StmtTry,
+    err: EvalError,
+    tools: &crate::tools::Tools,
+) -> Result<(), EvalError> {
+    use crate::eval::exceptions::{interpreter_error_to_exception_pub, matches_handler};
+    // Signals (break/continue/return) are not caught by `except`.
+    let exc = match &err {
+        EvalError::Exception(e) => e.clone(),
+        EvalError::Interpreter(ie) => interpreter_error_to_exception_pub(ie),
+        EvalError::Signal(_) => return finish_try(state, &node.finalbody, Some(err), tools).await,
+    };
+    for (h, handler) in node.handlers.iter().enumerate() {
+        let rustpython_parser::ast::ExceptHandler::ExceptHandler(h_node) = handler;
+        if !matches_handler(state, &exc, h_node, tools).await? {
+            continue;
+        }
+        // Bind the exception name and push it so a bare `raise` re-raises.
+        if let Some(name) = &h_node.name {
+            state
+                .set_variable(name.as_str(), Value::Exception(Box::new(exc.clone())))
+                .map_err(EvalError::Interpreter)?;
+        }
+        state.active_exception_stack.push(exc.clone());
+        return match step_try_phase(state, &h_node.body, 0, TryPhase::Handler(h), tools).await {
+            TryStep::Yielded(v) => Err(EvalError::Signal(ControlFlow::Yield(v))),
+            TryStep::Completed => {
+                cleanup_handler(state, h_node);
+                finish_try(state, &node.finalbody, None, tools).await
+            }
+            TryStep::Errored(e) => {
+                cleanup_handler(state, h_node);
+                finish_try(state, &node.finalbody, Some(e), tools).await
+            }
+        };
+    }
+    // No handler matched — run finally then re-raise.
+    finish_try(state, &node.finalbody, Some(err), tools).await
+}
+
+/// Unbind an except handler's variable and pop the active-exception
+/// stack, once the handler body has finished (matches CPython teardown).
+fn cleanup_handler(
+    state: &mut InterpreterState,
+    h_node: &rustpython_parser::ast::ExceptHandlerExceptHandler,
+) {
+    state.active_exception_stack.pop();
+    if let Some(name) = &h_node.name {
+        let _ = state.delete_variable(name.as_str());
+    }
+}
+
+use crate::state::TryPhase;
+
+/// Run the `finally` block and produce the try's final result: a fresh
+/// error in `finally` overrides `pending`; a `yield` in `finally`
+/// suspends. Clears the suspend marker on real completion.
+async fn finish_try(
+    state: &mut InterpreterState,
+    finalbody: &[Stmt],
+    pending: Option<EvalError>,
+    tools: &crate::tools::Tools,
+) -> Result<(), EvalError> {
+    match step_try_phase(state, finalbody, 0, TryPhase::Finally, tools).await {
+        TryStep::Yielded(v) => Err(EvalError::Signal(ControlFlow::Yield(v))),
+        TryStep::Completed => {
+            set_try_resume(state, None);
+            pending.map_or(Ok(()), Err)
+        }
+        TryStep::Errored(e) => {
+            set_try_resume(state, None);
+            Err(e)
+        }
+    }
+}
+
+fn set_try_resume(state: &mut InterpreterState, v: Option<crate::state::TryResume>) {
+    if let Some(&id) = state.active_generator_stack.last() {
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.try_resume = v;
+        }
+    }
 }
 
 async fn resume_for(

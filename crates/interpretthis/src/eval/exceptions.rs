@@ -265,7 +265,7 @@ pub async fn eval_try(
 /// `None` when no handler matches (so the caller propagates the original
 /// error), or `Some((value, new_error))` when a handler ran: `new_error`
 /// carries a signal or fresh exception raised inside the handler body.
-async fn try_match_handlers(
+pub(crate) async fn try_match_handlers(
     state: &mut InterpreterState,
     exc: &ExceptionValue,
     handlers: &[ast::ExceptHandler],
@@ -311,7 +311,7 @@ async fn try_match_handlers(
 }
 
 /// Check if an exception matches an except handler.
-async fn matches_handler(
+pub(crate) async fn matches_handler(
     state: &mut InterpreterState,
     exc: &ExceptionValue,
     handler: &ast::ExceptHandlerExceptHandler,
