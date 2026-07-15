@@ -198,8 +198,22 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
         "sin" => Ok(Value::Float(arg_f64(func, args, 0)?.sin())),
         "cos" => Ok(Value::Float(arg_f64(func, args, 0)?.cos())),
         "tan" => Ok(Value::Float(arg_f64(func, args, 0)?.tan())),
-        "asin" => Ok(Value::Float(arg_f64(func, args, 0)?.asin())),
-        "acos" => Ok(Value::Float(arg_f64(func, args, 0)?.acos())),
+        // asin/acos are defined only on [-1, 1]; outside it CPython raises
+        // (Rust's f64 would silently return NaN).
+        "asin" => {
+            let x = arg_f64(func, args, 0)?;
+            if !(-1.0..=1.0).contains(&x) {
+                return Err(value_error("math domain error"));
+            }
+            Ok(Value::Float(x.asin()))
+        }
+        "acos" => {
+            let x = arg_f64(func, args, 0)?;
+            if !(-1.0..=1.0).contains(&x) {
+                return Err(value_error("math domain error"));
+            }
+            Ok(Value::Float(x.acos()))
+        }
         "atan" => Ok(Value::Float(arg_f64(func, args, 0)?.atan())),
         "atan2" => Ok(Value::Float(arg_f64(func, args, 0)?.atan2(arg_f64(func, args, 1)?))),
         "hypot" => {
