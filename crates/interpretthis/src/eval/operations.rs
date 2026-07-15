@@ -884,7 +884,9 @@ pub async fn eval_unaryop(
 ) -> EvalResult {
     let operand = eval_expr(state, &node.operand, tools).await?;
     let operand = resolve_proxy(&operand).await?;
-    apply_unaryop(state, node.op, &operand, tools).await
+    // Route through op::unaryop so a user-class operand's __neg__/__pos__/
+    // __invert__ dispatches; builtin operands fall through to apply_unaryop.
+    crate::eval::op::unaryop(state, node.op, &operand, tools).await
 }
 
 /// Apply a unary operator to an already-evaluated operand. Shared by the eval

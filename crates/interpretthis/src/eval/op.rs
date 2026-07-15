@@ -406,6 +406,32 @@ pub async fn binop(
     )
 }
 
+/// Apply a unary operator (`-x`, `+x`, `~x`). Dispatches the matching dunder
+/// (`__neg__` / `__pos__` / `__invert__`) on a user-class operand; every other
+/// operand routes through the sync `apply_unaryop` kernel. `not x` has no
+/// dedicated slot (it derives from `__bool__`), so it always goes to the kernel.
+pub async fn unaryop(
+    state: &mut InterpreterState,
+    op: rustpython_parser::ast::UnaryOp,
+    operand: &Value,
+    tools: &Tools,
+) -> EvalResult {
+    use rustpython_parser::ast::UnaryOp;
+    let slot = match op {
+        UnaryOp::UAdd => Some("__pos__"),
+        UnaryOp::USub => Some("__neg__"),
+        UnaryOp::Invert => Some("__invert__"),
+        UnaryOp::Not => None,
+    };
+    if let Some(slot) = slot {
+        if let Some(method) = instance_slot(state, operand, slot) {
+            let (returned, _self) = invoke_slot(state, operand, &method, &[], tools).await?;
+            return Ok(returned);
+        }
+    }
+    crate::eval::operations::apply_unaryop(state, op, operand, tools).await
+}
+
 const fn arith_slot(op: rustpython_parser::ast::Operator) -> &'static str {
     use rustpython_parser::ast::Operator;
     match op {
@@ -739,6 +765,19 @@ pub async fn dict_insert_instance_key_pub(
 // ---------------------------------------------------------------------------
 // Predicate protocols — len / contains / truthy.
 // ---------------------------------------------------------------------------
+
+/// Dispatch a no-argument unary dunder (`__abs__`, `__int__`, `__index__`, …)
+/// on a user-class instance. Returns `None` when `value` is not an instance or
+/// its class does not define `slot`, so the caller keeps its builtin handling.
+pub async fn instance_unary_dunder(
+    state: &mut InterpreterState,
+    value: &Value,
+    slot: &str,
+    tools: &Tools,
+) -> Option<Result<Value, EvalError>> {
+    let method = instance_slot(state, value, slot)?;
+    Some(invoke_slot(state, value, &method, &[], tools).await.map(|(returned, _self)| returned))
+}
 
 /// `len(value)` — dispatches `__len__` on user-class instances (must
 /// return an int; non-int returns raise TypeError matching CPython's

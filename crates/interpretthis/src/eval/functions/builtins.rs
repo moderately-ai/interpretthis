@@ -154,6 +154,17 @@ pub(super) async fn try_builtin(
                     .into()),
                 };
             }
+            // A user class converts via __int__ (falling back to __index__ /
+            // __trunc__), so int(instance) dispatches before the numeric arms.
+            if matches!(&args[0], Value::Instance(_)) {
+                for slot in ["__int__", "__index__", "__trunc__"] {
+                    if let Some(result) =
+                        crate::eval::op::instance_unary_dunder(state, &args[0], slot, tools).await
+                    {
+                        return Ok(Some(result?));
+                    }
+                }
+            }
             match &args[0] {
                 Value::Int(i) => Ok(Some(Value::Int(*i))),
                 // Was missing: `int(2**70)` fell to the catch-all and raised
@@ -670,6 +681,11 @@ pub(super) async fn try_builtin(
         }
         "abs" => {
             check_arg_count(name, args, 1, 1)?;
+            if let Some(result) =
+                crate::eval::op::instance_unary_dunder(state, &args[0], "__abs__", tools).await
+            {
+                return Ok(Some(result?));
+            }
             match &args[0] {
                 // `checked_abs` handles i64::MIN, whose abs overflows i64:
                 // promote to BigInt instead of panicking (debug) / wrapping.
