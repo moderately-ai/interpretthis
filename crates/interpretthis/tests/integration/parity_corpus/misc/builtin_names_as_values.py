@@ -1,0 +1,13 @@
+print(setattr, delattr, getattr)
+print(len, print, abs, sorted, hasattr, vars, callable)
+print(callable(setattr), callable(getattr), callable(delattr))
+obj = type("D", (), {})()
+setattr(obj, "x", 5)
+print(getattr(obj, "x"))
+delattr(obj, "x")
+print(getattr(obj, "x", "gone"))
+print([f.__name__ for f in [len, str, int, abs, getattr]])
+print(list(map(abs, [-1, -2, 3])))
+apply = getattr
+print(apply("hello", "upper")())
+print(repr(len), repr(min), repr(setattr))
