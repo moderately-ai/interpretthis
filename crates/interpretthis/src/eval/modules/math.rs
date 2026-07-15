@@ -56,6 +56,8 @@ pub fn has_function(name: &str) -> bool {
             | "isinf"
             | "isfinite"
             | "copysign"
+            | "nextafter"
+            | "ulp"
             | "fmod"
             | "comb"
             | "perm"
@@ -236,6 +238,22 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
         "radians" => Ok(Value::Float(arg_f64(func, args, 0)?.to_radians())),
         "degrees" => Ok(Value::Float(arg_f64(func, args, 0)?.to_degrees())),
         "copysign" => Ok(Value::Float(arg_f64(func, args, 0)?.copysign(arg_f64(func, args, 1)?))),
+        // `nextafter(x, y)` — the next representable double after x toward y.
+        "nextafter" => {
+            Ok(Value::Float(next_after(arg_f64(func, args, 0)?, arg_f64(func, args, 1)?)))
+        }
+        // `ulp(x)` — the value of the least significant bit of x.
+        "ulp" => {
+            let x = arg_f64(func, args, 0)?.abs();
+            let out = if x.is_nan() || x.is_infinite() {
+                x
+            } else if x == 0.0 {
+                f64::from_bits(1)
+            } else {
+                next_after(x, f64::INFINITY) - x
+            };
+            Ok(Value::Float(out))
+        }
         "fmod" => {
             let divisor = arg_f64(func, args, 1)?;
             if divisor == 0.0 {
@@ -410,6 +428,27 @@ fn math_fsum(args: &[Value]) -> EvalResult {
 
 /// `math.dist(p, q)` — Euclidean distance between two equal-length point
 /// sequences.
+/// `nextafter(x, y)` via IEEE-754 bit stepping (avoids the MSRV-gated
+/// `f64::next_up`/`next_down`). Moves one representable step from `x` toward
+/// `y`.
+fn next_after(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    if x == y {
+        return y;
+    }
+    if x == 0.0 {
+        // The smallest subnormal, with the sign of the target direction.
+        return f64::from_bits(1).copysign(y);
+    }
+    let bits = x.to_bits();
+    // Incrementing the raw bit pattern increases magnitude; whether that heads
+    // toward `y` depends on `x`'s sign.
+    let next = if (x < y) == (x > 0.0) { bits + 1 } else { bits - 1 };
+    f64::from_bits(next)
+}
+
 fn math_dist(args: &[Value]) -> EvalResult {
     let p = crate::eval::control_flow::iterate_value(need_arg("dist", args, 0)?)?;
     let q = crate::eval::control_flow::iterate_value(need_arg("dist", args, 1)?)?;

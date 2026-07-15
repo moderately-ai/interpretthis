@@ -1,0 +1,16 @@
+import math
+
+print(math.nextafter(1.0, 2.0))
+print(math.nextafter(1.0, 0.0))
+print(math.nextafter(2.0, 2.0))
+print(math.nextafter(-1.0, 0.0))
+print(math.nextafter(-1.0, -2.0))
+print(math.nextafter(0.0, 1.0))
+print(math.nextafter(0.0, -1.0))
+print(math.nextafter(1e308, math.inf))
+print(math.ulp(1.0))
+print(math.ulp(2.0))
+print(math.ulp(0.0))
+print(math.ulp(1e10) > 0)
+print(math.nextafter(1.0, 2.0) > 1.0)
+print(math.nextafter(1.0, 2.0) - 1.0 == math.ulp(1.0))
