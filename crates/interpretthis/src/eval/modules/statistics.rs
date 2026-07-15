@@ -43,6 +43,8 @@ pub fn has_function(name: &str) -> bool {
             | "median_low"
             | "median_high"
             | "geometric_mean"
+            | "harmonic_mean"
+            | "multimode"
     )
 }
 
@@ -88,6 +90,11 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
         }
         "pstdev" => Ok(Value::Float(variance(&numbers("pstdev", &data, 1)?, false).sqrt())),
         "mode" => mode(&data),
+        "multimode" => multimode(&data),
+        "harmonic_mean" => {
+            let nums = numbers(func, &data, 1)?;
+            harmonic_mean(&nums)
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'statistics' has no attribute '{func}'"
         ))
@@ -301,6 +308,37 @@ fn mode(data: &[Value]) -> EvalResult {
         .find(|(count, _)| *count == max_count)
         .map_or(Value::None, |(_, value)| value.clone());
     Ok(best)
+}
+
+/// `statistics.multimode` — every value tied for the highest count, in
+/// first-appearance order (CPython returns `[]` for empty input, not an error).
+fn multimode(data: &[Value]) -> EvalResult {
+    let mut counts: indexmap::IndexMap<String, (usize, Value)> = indexmap::IndexMap::new();
+    for value in data {
+        counts.entry(value.repr()).or_insert((0, value.clone())).0 += 1;
+    }
+    let max_count = counts.values().map(|(count, _)| *count).max().unwrap_or(0);
+    let modes = counts
+        .values()
+        .filter(|(count, _)| *count == max_count)
+        .map(|(_, value)| value.clone())
+        .collect();
+    Ok(Value::List(crate::value::shared_list(modes)))
+}
+
+/// `statistics.harmonic_mean` — n / sum(1/x). A zero collapses the mean to 0
+/// (CPython); a negative value raises StatisticsError.
+fn harmonic_mean(nums: &[f64]) -> EvalResult {
+    if nums.iter().any(|&x| x < 0.0) {
+        return Err(crate::eval::modules::statistics_error(
+            "harmonic mean does not support negative values",
+        ));
+    }
+    if nums.contains(&0.0) {
+        return Ok(Value::Float(0.0));
+    }
+    let sum_recip: f64 = nums.iter().map(|x| 1.0 / x).sum();
+    Ok(Value::Float(nums.len() as f64 / sum_recip))
 }
 
 /// `statistics` module registration.
