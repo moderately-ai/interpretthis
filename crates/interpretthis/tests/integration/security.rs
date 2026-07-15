@@ -471,6 +471,46 @@ async fn security_vars_non_instance_rejected() {
 }
 
 #[tokio::test]
+async fn security_super_setattr_blocked_dunder() {
+    // The `object.__setattr__` path (via super()) must gate blocked dunders
+    // the same way the `setattr` builtin and `self.x =` assignment do.
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r"
+class C:
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+o = C()
+o.__class__ = 1
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_some());
+}
+
+#[tokio::test]
+async fn security_fstring_attr_blocked_dunder() {
+    // Attribute access inside an f-string field must reject blocked dunders.
+    let interp = interpreter();
+    let resp = interp
+        .execute(
+            r"
+class C:
+    pass
+o = C()
+x = f'{o.__class__}'
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_some());
+}
+
+#[tokio::test]
 async fn security_locals_globals_still_blocked() {
     // Removing `vars` from the denylist must not have loosened locals/globals.
     let interp = interpreter();

@@ -1691,6 +1691,11 @@ pub async fn super_method_call(
                         "object.__setattr__: missing value argument".into(),
                     ))
                 })?;
+                // Gate the same names the `setattr` builtin and direct `self.x =`
+                // path gate — otherwise `super().__setattr__('__class__', x)`
+                // plants a blocked-dunder field, an inconsistency that would
+                // become load-bearing if any read carve-out is ever added.
+                crate::security::validator::validate_attribute(&attr_name)?;
                 let inst = instance;
                 inst.fields.lock().insert(attr_name.into(), value);
                 let updated = Value::Instance(inst);
@@ -1711,6 +1716,7 @@ pub async fn super_method_call(
                             "object.__delattr__: argument must be str".into(),
                         ))
                     })?;
+                crate::security::validator::validate_attribute(&attr_name)?;
                 let inst = instance;
                 let class_name = inst.class_name.clone();
                 if inst.fields.lock().remove(attr_name.as_str()).is_none() {

@@ -1023,6 +1023,12 @@ fn resolve_format_arg(
 /// `{name.attr}` — attribute access in a format field. Only dict-keyed access
 /// is meaningful for the interpreter's value model.
 fn format_get_attr(value: &Value, attr: &str) -> EvalResult {
+    // Gate blocked dunders here too: `{x.__class__}` in an f-string reaches
+    // attribute access without passing through `eval_attribute`'s validator.
+    // (Today `dispatch_getattr_opt` resolves only builtin type-slots so no
+    // blocked name is reachable, but this keeps the format path consistent with
+    // every other attribute path.)
+    crate::security::validator::validate_attribute(attr)?;
     // A dict field selector reads a string key (the interpreter's value model
     // exposes `{d.key}` as key access rather than CPython's getattr).
     if let Value::Dict(map) = value {
