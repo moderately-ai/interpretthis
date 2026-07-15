@@ -459,6 +459,19 @@ pub enum Value {
         )]
         SharedDict,
     ),
+    /// `collections.OrderedDict` — behaves like `Dict` (insertion-ordered,
+    /// reference-semantic over its `SharedDict`) but is a distinct type:
+    /// `repr` is `OrderedDict({...})`, `type().__name__` is `OrderedDict`,
+    /// and `==` between two OrderedDicts is order-sensitive (vs a plain dict
+    /// it stays order-insensitive). Shares the `SharedDict` accessors so most
+    /// dict read/write logic treats the two uniformly.
+    OrderedDict(
+        #[serde(
+            serialize_with = "serialize_shared_dict",
+            deserialize_with = "deserialize_shared_dict"
+        )]
+        SharedDict,
+    ),
     /// A live `dict_keys` / `dict_values` / `dict_items` view over a
     /// shared dict (`d.keys()` etc.). Reads the dict on each use so it
     /// reflects later mutations; keys/items are set-like (`& | - ^`).
@@ -1894,7 +1907,7 @@ impl Value {
             Self::List(l) => !l.lock().is_empty(),
             Self::Array { items, .. } => !items.lock().is_empty(),
             Self::Tuple(t) => !t.is_empty(),
-            Self::Dict(d) => !d.lock().is_empty(),
+            Self::Dict(d) | Self::OrderedDict(d) => !d.lock().is_empty(),
             Self::Set(s) => !s.lock().is_empty(),
             Self::Frozenset(s) => !s.is_empty(),
             // Always truthy: callables, exceptions, proxies, type/class/module
@@ -1986,6 +1999,7 @@ impl Value {
             Self::List(_) => "list",
             Self::Tuple(_) => "tuple",
             Self::Dict(_) => "dict",
+            Self::OrderedDict(_) => "OrderedDict",
             Self::Set(_) => "set",
             Self::Frozenset(_) => "frozenset",
             // Both Function (named def) and Lambda (anonymous) are "function"
@@ -2333,6 +2347,22 @@ impl fmt::Display for Value {
                     write!(f, "{}: {}", k, v.repr())?;
                 }
                 write!(f, "}}")
+            }
+            // CPython 3.12 renders `OrderedDict({'a': 1})`, and `OrderedDict()`
+            // when empty (never a bare `OrderedDict({})`).
+            Self::OrderedDict(map) => {
+                let guard = map.lock();
+                if guard.is_empty() {
+                    return write!(f, "OrderedDict()");
+                }
+                write!(f, "OrderedDict({{")?;
+                for (i, (k, v)) in guard.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", k, v.repr())?;
+                }
+                write!(f, "}})")
             }
             Self::Set(body) => {
                 let seq = body.lock().iter_ordered();
@@ -2867,7 +2897,7 @@ impl Value {
     #[must_use]
     pub const fn as_dict(&self) -> Option<&SharedDict> {
         match self {
-            Self::Dict(map) => Some(map),
+            Self::Dict(map) | Self::OrderedDict(map) => Some(map),
             _ => None,
         }
     }
@@ -2909,7 +2939,7 @@ impl Value {
     /// Returns `Err(self)` when the value isn't a `Value::Dict`.
     pub fn try_into_dict(self) -> Result<IndexMap<ValueKey, Self>, Self> {
         match self {
-            Self::Dict(map) => Ok(map.lock().clone()),
+            Self::Dict(map) | Self::OrderedDict(map) => Ok(map.lock().clone()),
             other => Err(other),
         }
     }
@@ -3062,6 +3092,14 @@ impl Value {
             }
             // Dict / Counter / defaultdict project to a JSON object.
             Self::Dict(map) => {
+                let Some(_cycle) = crate::cycle::json_enter(Arc::as_ptr(map) as usize) else {
+                    return Err(crate::error::InterpreterError::ValueError(
+                        "Circular reference detected".into(),
+                    ));
+                };
+                json_object(map.lock().iter())?
+            }
+            Self::OrderedDict(map) => {
                 let Some(_cycle) = crate::cycle::json_enter(Arc::as_ptr(map) as usize) else {
                     return Err(crate::error::InterpreterError::ValueError(
                         "Circular reference detected".into(),

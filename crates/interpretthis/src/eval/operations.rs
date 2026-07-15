@@ -915,13 +915,23 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let (Some(a), Some(b)) = (set_like_body(left), set_like_body(right)) {
         return Ok(wrap_set_body(left, a.union_with(&b)));
     }
-    // Dict merge (Python 3.9+)
-    if let (Value::Dict(a), Value::Dict(b)) = (left, right) {
+    // Dict merge (Python 3.9+). Accepts dict/OrderedDict on either side. The
+    // result is an OrderedDict when either operand is one: `od | d` goes
+    // through OrderedDict.__or__, and `d | od` through OrderedDict.__ror__
+    // (the right operand is a dict subclass), both yielding OrderedDict.
+    if let (Some(a), Some(b)) = (left.as_dict(), right.as_dict()) {
         let mut result = a.lock().clone();
         for (k, v) in b.lock().iter() {
             result.insert(k.clone(), v.clone());
         }
-        return Ok(Value::Dict(crate::value::shared_dict(result)));
+        let merged = crate::value::shared_dict(result);
+        return Ok(
+            if matches!(left, Value::OrderedDict(_)) || matches!(right, Value::OrderedDict(_)) {
+                Value::OrderedDict(merged)
+            } else {
+                Value::Dict(merged)
+            },
+        );
     }
     // `bool | bool` stays a bool in CPython; a mixed bool/int is an int.
     if let (Value::Bool(a), Value::Bool(b)) = (left, right) {
@@ -1303,7 +1313,20 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Tuple(a), Value::Tuple(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
         }
-        (Value::Dict(a), Value::Dict(b)) => {
+        // Two OrderedDicts compare order-sensitively (CPython OrderedDict.__eq__).
+        (Value::OrderedDict(a), Value::OrderedDict(b)) => {
+            if std::sync::Arc::ptr_eq(a, b) {
+                return true;
+            }
+            let a = a.lock().clone();
+            let b = b.lock().clone();
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((ka, va), (kb, vb))| ka == kb && values_equal(va, vb))
+        }
+        // Plain dict, or a mixed dict/OrderedDict pair — unordered comparison.
+        (Value::Dict(a) | Value::OrderedDict(a), Value::Dict(b) | Value::OrderedDict(b)) => {
             if std::sync::Arc::ptr_eq(a, b) {
                 return true;
             }
@@ -1461,6 +1484,7 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
         // dict/bytearray/array are Arc-backed mutable reference types too: an
         // alias `is` its source, two separately-built equal objects are not.
         (Value::Dict(a), Value::Dict(b)) => Arc::ptr_eq(a, b),
+        (Value::OrderedDict(a), Value::OrderedDict(b)) => Arc::ptr_eq(a, b),
         (Value::ByteArray(a), Value::ByteArray(b)) => Arc::ptr_eq(a, b),
         (Value::Array { items: a, .. }, Value::Array { items: b, .. }) => Arc::ptr_eq(a, b),
         // Iterator objects are identified by the id/cursor keying their state
@@ -1482,6 +1506,7 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::Set(_)
             | Value::Frozenset(_)
             | Value::Dict(_)
+            | Value::OrderedDict(_)
             | Value::ByteArray(_)
             | Value::Array { .. },
             _,
@@ -1499,6 +1524,7 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::Set(_)
             | Value::Frozenset(_)
             | Value::Dict(_)
+            | Value::OrderedDict(_)
             | Value::ByteArray(_)
             | Value::Array { .. },
         ) => false,

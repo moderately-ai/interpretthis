@@ -397,7 +397,7 @@ fn dict_methods(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
-    let Value::Dict(map) = obj else {
+    let Some(map) = obj.as_dict() else {
         return Err(type_mismatch("dict"));
     };
     // `keys`/`values`/`items` return a LIVE view over the shared dict
@@ -425,13 +425,13 @@ fn dict_methods(
     // it (`d.setdefault(k, d)` must keep the self-reference).
     let snapped;
     let args = if method == "update"
-        && args.iter().any(|a| matches!(a, Value::Dict(d) if Arc::ptr_eq(d, map)))
+        && args.iter().any(|a| a.as_dict().is_some_and(|d| Arc::ptr_eq(d, map)))
     {
         snapped = args
             .iter()
-            .map(|a| match a {
-                Value::Dict(d) if Arc::ptr_eq(d, map) => Value::Dict(shared_dict(d.lock().clone())),
-                other => other.clone(),
+            .map(|a| match a.as_dict() {
+                Some(d) if Arc::ptr_eq(d, map) => Value::Dict(shared_dict(d.lock().clone())),
+                _ => a.clone(),
             })
             .collect::<Vec<_>>();
         &snapped
@@ -1010,7 +1010,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::List(_) => Some(list_methods),
         Value::Array { .. } => Some(array_methods),
         Value::LruCache(_) => Some(lru_methods),
-        Value::Dict(_) => Some(dict_methods),
+        Value::Dict(_) | Value::OrderedDict(_) => Some(dict_methods),
         Value::Counter(_) => Some(counter_methods),
         Value::Deque { .. } => Some(deque_methods),
         Value::DefaultDict(_) => Some(defaultdict_methods),

@@ -698,7 +698,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
                 + items.len() * 2 * (VALUE_SLOT_BYTES + std::mem::size_of::<i64>())
                 + items.iter().map(estimate_value_size).sum::<usize>()
         }
-        Value::Dict(map) => {
+        Value::Dict(map) | Value::OrderedDict(map) => {
             let Some(map) = map.try_lock() else {
                 return 0;
             };

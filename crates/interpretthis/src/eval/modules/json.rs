@@ -138,7 +138,7 @@ fn write_json(
         Value::Tuple(items) => {
             write_seq_json(items, fmt, depth, out)?;
         }
-        Value::Dict(map) => {
+        Value::Dict(map) | Value::OrderedDict(map) => {
             let Some(_cycle) = crate::cycle::json_enter(std::sync::Arc::as_ptr(map) as usize)
             else {
                 return Err(

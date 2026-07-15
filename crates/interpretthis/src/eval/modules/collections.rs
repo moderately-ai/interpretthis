@@ -163,7 +163,7 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
             for (k, v) in kwargs {
                 entries.insert(ValueKey::String(k.as_str().into()), v.clone());
             }
-            Ok(Value::Dict(crate::value::shared_dict(entries)))
+            Ok(Value::OrderedDict(crate::value::shared_dict(entries)))
         }
         // `ChainMap(*maps)` — search the maps left-to-right; writes hit
         // the first. Each map must be a dict (our mapping model); no

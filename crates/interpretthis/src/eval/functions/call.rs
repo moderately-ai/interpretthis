@@ -62,9 +62,9 @@ async fn eval_call_inner(
             let val = eval_expr(state, &kw.value, tools).await?;
             kwargs.insert(arg_name.as_str().to_string(), val);
         } else {
-            // **kwargs unpacking
+            // **kwargs unpacking (dict or OrderedDict)
             let val = eval_expr(state, &kw.value, tools).await?;
-            if let Value::Dict(map) = val {
+            if let Some(map) = val.as_dict() {
                 let snapshot = map.lock().clone();
                 for (k, v) in snapshot {
                     // A non-string key raises `TypeError: keywords must be

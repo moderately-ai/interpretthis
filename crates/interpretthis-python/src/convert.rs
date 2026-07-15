@@ -126,7 +126,7 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
                 items.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
             PyList::new(py, converted)?.into_any()
         }
-        Value::Dict(map) => {
+        Value::Dict(map) | Value::OrderedDict(map) => {
             let dict = PyDict::new(py);
             let snapshot = map.lock().clone();
             for (key, val) in &snapshot {

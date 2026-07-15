@@ -604,10 +604,10 @@ pub(super) fn check_isinstance(state: &InterpreterState, obj: &Value, type_name:
     }
     obj.type_name() == type_name
         || match (obj, type_name) {
-            // Python: bool is a subclass of int. Counter is a dict
-            // subclass (Track B3); isinstance honours that even though
-            // our Value::Counter is a distinct variant.
-            (Value::Bool(_), "int") | (Value::Counter(_), "dict") => true,
+            // Python: bool is a subclass of int. Counter and OrderedDict are
+            // dict subclasses; isinstance honours that even though our
+            // Value::Counter / Value::OrderedDict are distinct variants.
+            (Value::Bool(_), "int") | (Value::Counter(_) | Value::OrderedDict(_), "dict") => true,
             // Walk the builtin exception hierarchy, so
             // `isinstance(KeyError(), LookupError)` is True (was flat: it only
             // matched the exact type or "Exception"). A *user-defined* exception

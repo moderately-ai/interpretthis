@@ -183,7 +183,7 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
             construct_global(env, "Set", array)
         }
 
-        Value::Dict(map) => dict_to_js(env, &map.lock()),
+        Value::Dict(map) | Value::OrderedDict(map) => dict_to_js(env, &map.lock()),
 
         // A Python `range` is a lazy sequence; JS has no counterpart, so it
         // materialises as an array. The alternative — an opaque handle — would

@@ -94,6 +94,7 @@ fn shallow_clone_structural(value: &Value) -> Value {
             Value::ByteArray(crate::value::shared_bytes(bytes.lock().clone()))
         }
         Value::Dict(map) => Value::Dict(shared_dict(map.lock().clone())),
+        Value::OrderedDict(map) => Value::OrderedDict(shared_dict(map.lock().clone())),
         Value::Set(b) => Value::Set(crate::value::shared_set(b.lock().clone())),
         Value::Frozenset(items) => Value::Frozenset(items.clone()),
         Value::Tuple(items) => Value::Tuple(items.clone()),
@@ -171,20 +172,29 @@ fn deep_clone_memo<'a>(
                 *out_fields.lock() = fields;
                 Ok(out)
             }
-            Value::Dict(map) => {
+            Value::Dict(map) | Value::OrderedDict(map) => {
                 let key = Arc::as_ptr(map) as usize;
                 if let Some(existing) = memo.get(&key) {
                     return Ok(existing.clone());
                 }
                 let out = shared_dict(IndexMap::new());
-                memo.insert(key, Value::Dict(out.clone()));
+                // Preserve the concrete type so a deep-copied OrderedDict stays
+                // an OrderedDict.
+                let wrap = |d| {
+                    if matches!(value, Value::OrderedDict(_)) {
+                        Value::OrderedDict(d)
+                    } else {
+                        Value::Dict(d)
+                    }
+                };
+                memo.insert(key, wrap(out.clone()));
                 let snapshot = map.lock().clone();
                 let mut cloned = IndexMap::with_capacity(snapshot.len());
                 for (k, v) in &snapshot {
                     cloned.insert(k.clone(), deep_clone_memo(state, v, memo, tools).await?);
                 }
                 *out.lock() = cloned;
-                Ok(Value::Dict(out))
+                Ok(wrap(out))
             }
             Value::Tuple(items) => {
                 let mut cloned = Vec::with_capacity(items.len());

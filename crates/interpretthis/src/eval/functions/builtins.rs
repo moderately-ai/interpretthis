@@ -1290,7 +1290,7 @@ pub(super) async fn try_builtin(
             // source's contents (Dict is behind a lock; Counter/DefaultDict
             // store an IndexMap by value).
             let mapping_src: Option<IndexMap<ValueKey, Value>> = match args.first() {
-                Some(Value::Dict(src)) => Some(src.lock().clone()),
+                Some(Value::Dict(src) | Value::OrderedDict(src)) => Some(src.lock().clone()),
                 Some(Value::Counter(src)) => Some(src.clone()),
                 Some(Value::DefaultDict(data)) => Some(data.items.clone()),
                 Some(Value::ChainMap(maps)) => Some(crate::types::chainmap_contents(maps)),

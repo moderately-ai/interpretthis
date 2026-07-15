@@ -711,6 +711,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::List(_) => &LIST_TYPE,
         Value::Tuple(_) => &TUPLE_TYPE,
         Value::Dict(_) => &DICT_TYPE,
+        Value::OrderedDict(_) => &ORDEREDDICT_TYPE,
         Value::Set(_) => &SET_TYPE,
         Value::Frozenset(_) => &FROZENSET_TYPE,
         Value::Range { .. } => &RANGE_TYPE,
@@ -967,6 +968,26 @@ static DICT_TYPE: TypeObject = TypeObject {
     // CPython: `d.foo = 1` raises `AttributeError("'dict' object has
     // no attribute 'foo'")`. A6 closes the pre-existing divergence
     // where dict accepted attribute writes as string-key inserts.
+    set_attr_slot: None,
+    has_methods_table: true,
+};
+// `collections.OrderedDict` reuses every dict slot (all now variant-agnostic
+// via `Value::as_dict`); only the name and the order-sensitive `eq_slot`
+// differ from `DICT_TYPE`.
+static ORDEREDDICT_TYPE: TypeObject = TypeObject {
+    name: "OrderedDict",
+    eq_slot: ordered_dict_eq,
+    hash_slot: None,
+    lt_slot: noimpl_lt,
+    contains_slot: Some(dict_contains),
+    arith_slot: noimpl_arith,
+    iter_slot: Some(dict_iter),
+    get_item_slot: Some(dict_get_item),
+    set_item_slot: Some(dict_set_item),
+    del_item_slot: Some(dict_del_item),
+    missing_slot: None,
+    len_slot: Some(dict_len),
+    get_attr_slot: Some(dict_get_attr),
     set_attr_slot: None,
     has_methods_table: true,
 };
@@ -1685,8 +1706,11 @@ fn tuple_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 }
 
 fn dict_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
-    let Value::Dict(a) = lhs else { return None };
-    let Value::Dict(b) = rhs else { return None };
+    // Accepts dict or OrderedDict on either side; comparison is unordered
+    // (CPython `dict.__eq__`). Order-sensitive OrderedDict/OrderedDict
+    // comparison is handled by `ordered_dict_eq`.
+    let a = lhs.as_dict()?;
+    let b = rhs.as_dict()?;
     if std::sync::Arc::ptr_eq(a, b) {
         return Some(true);
     }
@@ -1699,6 +1723,26 @@ fn dict_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     }
     let equal = a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| recurse_eq(v, bv)));
     Some(equal)
+}
+
+/// `OrderedDict.__eq__`: order-sensitive when the other operand is also an
+/// OrderedDict (CPython compares key/value pairs pairwise in sequence);
+/// against a plain dict it falls back to unordered `dict_eq`.
+fn ordered_dict_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
+    if let (Value::OrderedDict(a), Value::OrderedDict(b)) = (lhs, rhs) {
+        if std::sync::Arc::ptr_eq(a, b) {
+            return Some(true);
+        }
+        let a = a.lock().clone();
+        let b = b.lock().clone();
+        if a.len() != b.len() {
+            return Some(false);
+        }
+        let equal =
+            a.iter().zip(b.iter()).all(|((ka, va), (kb, vb))| ka == kb && recurse_eq(va, vb));
+        return Some(equal);
+    }
+    dict_eq(lhs, rhs)
 }
 
 fn set_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
@@ -2044,8 +2088,8 @@ fn sequence_contains(container: &Value, item: &Value) -> Result<bool, EvalError>
 
 /// `key in dict`: hash-based lookup against the dict's keys.
 fn dict_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
-    let Value::Dict(map) = container else {
-        unreachable!("dict_contains only attached to DICT_TYPE")
+    let Some(map) = container.as_dict() else {
+        unreachable!("dict_contains only on dict/OrderedDict types")
     };
     // An unhashable probe raises `TypeError: unhashable type`, it does not answer
     // False — propagate the value_to_key error instead of swallowing it.
@@ -2319,7 +2363,9 @@ fn bytes_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
 /// `iter(dict)` — yield the keys, matching CPython's dict iteration.
 #[expect(clippy::unnecessary_wraps, reason = "IterSlot protocol; dict iteration cannot fail")]
 fn dict_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
-    let Value::Dict(map) = value else { unreachable!("dict_iter only on DICT_TYPE") };
+    let Some(map) = value.as_dict() else {
+        unreachable!("dict_iter only on dict/OrderedDict types")
+    };
     Ok(map.lock().keys().map(crate::value::ValueKey::to_value).collect())
 }
 
@@ -2693,7 +2739,9 @@ fn bytes_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> 
 /// `missing_slot` (Counter sets it; plain dict leaves it None) before
 /// raising `KeyError`.
 fn dict_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
-    let Value::Dict(map) = container else { unreachable!("dict_get_item only on DICT_TYPE") };
+    let Some(map) = container.as_dict() else {
+        unreachable!("dict_get_item only on dict/OrderedDict types")
+    };
     let key = crate::eval::literals::value_to_key(index)?;
     if let Some(value) = map.lock().get(&key).cloned() {
         return Ok(value);
@@ -2737,7 +2785,9 @@ fn list_set_item(container: &mut Value, index: &Value, value: Value) -> Result<i
 /// `dict[key] = value`: insert or overwrite. Returns the signed byte
 /// delta (overwrite = value-size delta; insert = key + value).
 fn dict_set_item(container: &mut Value, index: &Value, value: Value) -> Result<isize, EvalError> {
-    let Value::Dict(map) = container else { unreachable!("dict_set_item only on DICT_TYPE") };
+    let Some(map) = container.as_dict() else {
+        unreachable!("dict_set_item only on dict/OrderedDict types")
+    };
     let key = crate::eval::literals::value_to_key(index)?;
     let new_size = crate::state::estimate_value_size(&value);
     let delta = map.lock().insert(key.clone(), value).map_or_else(
@@ -2795,7 +2845,9 @@ fn list_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalErro
 
 /// `del dict[key]`: hash-keyed remove. Raises `KeyError` on miss.
 fn dict_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalError> {
-    let Value::Dict(map) = container else { unreachable!("dict_del_item only on DICT_TYPE") };
+    let Some(map) = container.as_dict() else {
+        unreachable!("dict_del_item only on dict/OrderedDict types")
+    };
     let key = crate::eval::literals::value_to_key(index)?;
     // shift_remove preserves insertion order (CPython `del d[k]`), unlike
     // swap_remove which moves the last entry into the hole.
@@ -2961,7 +3013,9 @@ fn bytes_len(value: &Value) -> Result<usize, EvalError> {
 
 #[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]
 fn dict_len(value: &Value) -> Result<usize, EvalError> {
-    let Value::Dict(map) = value else { unreachable!("dict_len only on DICT_TYPE") };
+    let Some(map) = value.as_dict() else {
+        unreachable!("dict_len only on dict/OrderedDict types")
+    };
     let len = map.lock().len();
     Ok(len)
 }

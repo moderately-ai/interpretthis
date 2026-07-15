@@ -100,20 +100,17 @@ pub async fn eval_dict(
                 map.insert(crate::eval::op::key(state, &key, tools).await?, val);
             }
         } else {
-            // **dict unpacking
+            // **dict unpacking (dict or OrderedDict)
             let unpacked = eval_expr(state, value_expr, tools).await?;
-            match unpacked {
-                Value::Dict(d) => {
-                    for (k, v) in d.lock().iter() {
-                        map.insert(k.clone(), v.clone());
-                    }
+            if let Some(d) = unpacked.as_dict() {
+                for (k, v) in d.lock().iter() {
+                    map.insert(k.clone(), v.clone());
                 }
-                _ => {
-                    return Err(crate::error::InterpreterError::TypeError(
-                        "cannot unpack non-dict in dict literal".into(),
-                    )
-                    .into());
-                }
+            } else {
+                return Err(crate::error::InterpreterError::TypeError(
+                    "cannot unpack non-dict in dict literal".into(),
+                )
+                .into());
             }
         }
     }

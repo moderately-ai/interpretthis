@@ -89,7 +89,7 @@ pub async fn getitem(
             invoke_slot(state, container, &method, std::slice::from_ref(index), tools).await?;
         return Ok(returned);
     }
-    if let (Value::Dict(map), Value::Instance(_)) = (container, index) {
+    if let (Some(map), Value::Instance(_)) = (container.as_dict(), index) {
         return match dict_get_instance_key(state, map, index, tools).await? {
             Some(v) => Ok(v),
             None => {
@@ -675,7 +675,9 @@ fn percent_arg_has_instance(arg: &Value) -> bool {
     match arg {
         Value::Instance(_) => true,
         Value::Tuple(items) => items.iter().any(|v| matches!(v, Value::Instance(_))),
-        Value::Dict(d) => d.lock().values().any(|v| matches!(v, Value::Instance(_))),
+        Value::Dict(d) | Value::OrderedDict(d) => {
+            d.lock().values().any(|v| matches!(v, Value::Instance(_)))
+        }
         _ => false,
     }
 }
@@ -1204,7 +1206,7 @@ pub async fn contains(
         return Ok(false);
     }
     if matches!(item, Value::Instance(_)) {
-        if let Value::Dict(map) = container {
+        if let Some(map) = container.as_dict() {
             return Ok(dict_get_instance_key(state, map, item, tools).await?.is_some());
         }
         // list / tuple / set: scan with async `__eq__` (structural
