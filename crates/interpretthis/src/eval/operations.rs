@@ -871,6 +871,10 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         }
         return Ok(Value::Dict(crate::value::shared_dict(result)));
     }
+    // `bool | bool` stays a bool in CPython; a mixed bool/int is an int.
+    if let (Value::Bool(a), Value::Bool(b)) = (left, right) {
+        return Ok(Value::Bool(*a | *b));
+    }
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         return Ok(Value::Int(a | b));
     }
@@ -888,6 +892,9 @@ fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         }
         return Ok(wrap_set_like(left, result));
     }
+    if let (Value::Bool(a), Value::Bool(b)) = (left, right) {
+        return Ok(Value::Bool(*a ^ *b));
+    }
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         return Ok(Value::Int(a ^ b));
     }
@@ -904,6 +911,9 @@ fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let (Some(a), Some(b)) = (set_like_items(left), set_like_items(right)) {
         let result: Vec<Value> = a.iter().filter(|v| set_contains(b, v)).cloned().collect();
         return Ok(wrap_set_like(left, result));
+    }
+    if let (Value::Bool(a), Value::Bool(b)) = (left, right) {
+        return Ok(Value::Bool(*a & *b));
     }
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         return Ok(Value::Int(a & b));
