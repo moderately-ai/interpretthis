@@ -262,6 +262,15 @@ pub fn dispatch_setattr(value: &mut Value, name: &str, new_val: Value) -> Result
 /// a `get_item_slot`. Slice handling is in the dispatcher's caller; the
 /// slot signature only takes a single index value.
 pub fn dispatch_getitem(container: &Value, index: &Value) -> Result<Value, EvalError> {
+    // An array indexes exactly like a list (int index → element, slice → a new
+    // array of the same typecode); reuse the list path over the shared handle.
+    if let Value::Array { typecode, items } = container {
+        let result = dispatch_getitem(&Value::List(items.clone()), index)?;
+        return Ok(match result {
+            Value::List(l) => Value::Array { typecode: *typecode, items: l },
+            elem => elem,
+        });
+    }
     let container_type = type_of(container);
     container_type.get_item_slot.map_or_else(
         || {
@@ -311,6 +320,9 @@ pub fn dispatch_delitem(container: &mut Value, index: &Value) -> Result<isize, E
 /// `TypeError("object of type '<name>' has no len()")` for types without
 /// a `len_slot`.
 pub fn dispatch_len(value: &Value) -> Result<usize, EvalError> {
+    if let Value::Array { items, .. } = value {
+        return Ok(items.lock().len());
+    }
     let type_obj = type_of(value);
     type_obj.len_slot.map_or_else(
         || {
@@ -337,6 +349,9 @@ pub fn dispatch_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
     // re-yields from the start here, a rare, documented divergence.
     if let Value::Lazy { items, .. } = value {
         return Ok(items.clone());
+    }
+    if let Value::Array { items, .. } = value {
+        return Ok(items.lock().clone());
     }
     let type_obj = type_of(value);
     type_obj.iter_slot.map_or_else(

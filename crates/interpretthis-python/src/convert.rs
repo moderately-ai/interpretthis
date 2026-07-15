@@ -90,7 +90,9 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
             PyBytes::new(py, &interpretthis::memoryview_bytes(value)).into_any()
         }
 
-        Value::List(items) => {
+        // `array.array` crosses the boundary as a plain Python list (its exact
+        // element values), which is the natural lossy-but-usable form.
+        Value::List(items) | Value::Array { items, .. } => {
             // Lock scope ends before the list is built, so a tool callback that
             // re-enters the interpreter cannot deadlock against this guard.
             let snapshot: Vec<Value> = items.lock().clone();

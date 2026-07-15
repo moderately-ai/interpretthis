@@ -150,7 +150,8 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
             Buffer::from(interpretthis::memoryview_bytes(value)).into_unknown(env)
         }
 
-        Value::List(items) => {
+        // `array.array` crosses as a plain JS array of its element values.
+        Value::List(items) | Value::Array { items, .. } => {
             // The lock is released before any JS object is built, so a tool
             // callback cannot deadlock against this guard.
             let snapshot: Vec<Value> = items.lock().clone();

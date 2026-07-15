@@ -332,6 +332,16 @@ pub enum Value {
         #[serde(deserialize_with = "deserialize_shared_list")]
         SharedList,
     ),
+    /// `array.array(typecode, initializer)` — a typed, homogeneous, mutable
+    /// sequence. Backed by a shared `Vec` (like `List`, so aliases see
+    /// mutations); the `typecode` (`'i'`, `'d'`, `'b'`, …) drives `repr`,
+    /// `.itemsize`, and element coercion at the method boundary.
+    Array {
+        typecode: char,
+        #[serde(serialize_with = "serialize_shared_list")]
+        #[serde(deserialize_with = "deserialize_shared_list")]
+        items: SharedList,
+    },
     /// Python `tuple`.
     Tuple(Vec<Self>),
     /// Python `dict` (ordered, hashable keys only). Shared storage so
@@ -974,6 +984,17 @@ impl PartialEq for Value {
             // same backing storage (the common `a = b = []` case).
             // Otherwise lock both and compare element-wise.
             (Self::List(a), Self::List(b)) => {
+                if Arc::ptr_eq(a, b) {
+                    return true;
+                }
+                let a_guard = a.lock();
+                let b_guard = b.lock();
+                a_guard.len() == b_guard.len()
+                    && a_guard.iter().zip(b_guard.iter()).all(|(x, y)| x == y)
+            }
+            // Two arrays compare equal element-wise (the typecode is not
+            // part of equality: `array('i',[1,2]) == array('d',[1.0,2.0])`).
+            (Self::Array { items: a, .. }, Self::Array { items: b, .. }) => {
                 if Arc::ptr_eq(a, b) {
                     return true;
                 }
@@ -1642,6 +1663,7 @@ impl Value {
             Self::ByteArray(b) => !b.lock().is_empty(),
             Self::MemoryView(inner) => inner.is_truthy(),
             Self::List(l) => !l.lock().is_empty(),
+            Self::Array { items, .. } => !items.lock().is_empty(),
             Self::Tuple(t) => !t.is_empty(),
             Self::Dict(d) => !d.lock().is_empty(),
             Self::Set(s) | Self::Frozenset(s) => !s.is_empty(),
@@ -1730,6 +1752,7 @@ impl Value {
             Self::Bytes(_) => "bytes",
             Self::ByteArray(_) => "bytearray",
             Self::MemoryView(_) => "memoryview",
+            Self::Array { .. } => "array",
             Self::List(_) => "list",
             Self::Tuple(_) => "tuple",
             Self::Dict(_) => "dict",
@@ -1962,6 +1985,22 @@ impl fmt::Display for Value {
                     write!(f, "{}", item.repr())?;
                 }
                 write!(f, "]")
+            }
+            // `array('i', [1, 2, 3])`; an empty array omits the list:
+            // `array('i')`.
+            Self::Array { typecode, items } => {
+                let snapshot = items.lock().clone();
+                if snapshot.is_empty() {
+                    return write!(f, "array('{typecode}')");
+                }
+                write!(f, "array('{typecode}', [")?;
+                for (i, item) in snapshot.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item.repr())?;
+                }
+                write!(f, "])")
             }
             Self::Tuple(items) => {
                 write!(f, "(")?;

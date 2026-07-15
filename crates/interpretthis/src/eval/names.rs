@@ -408,6 +408,14 @@ fn upgrade_bound_method_place(
 fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> EvalResult {
     match obj {
         Value::Exception(exc) => exception_attribute(exc, attr_name),
+        // `array.array` exposes `.typecode` and `.itemsize`.
+        Value::Array { typecode, .. } => match attr_name {
+            "typecode" => Ok(Value::String(typecode.to_string().into())),
+            "itemsize" => {
+                Ok(Value::Int(crate::eval::modules::array_mod::itemsize(*typecode) as i64))
+            }
+            _ => Err(attribute_error("array.array", attr_name)),
+        },
         Value::Instance(inst) => crate::eval::classes::instance_attribute(state, inst, attr_name),
         Value::Class(class_name) => {
             crate::eval::classes::class_attribute(state, class_name, attr_name)
@@ -809,6 +817,12 @@ pub(crate) fn apply_value_slice(
             let snapshot = items.lock().clone();
             let sliced = slice_sequence(&snapshot, lower, upper, stride)?;
             Ok(Value::List(shared_list(sliced)))
+        }
+        // Slicing an array yields a new array of the same typecode.
+        Value::Array { typecode, items } => {
+            let snapshot = items.lock().clone();
+            let sliced = slice_sequence(&snapshot, lower, upper, stride)?;
+            Ok(Value::Array { typecode: *typecode, items: shared_list(sliced) })
         }
         Value::Tuple(items) => {
             let sliced = slice_sequence(items, lower, upper, stride)?;

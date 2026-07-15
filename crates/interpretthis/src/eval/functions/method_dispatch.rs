@@ -208,6 +208,80 @@ fn list_methods(
     methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
 }
 
+fn array_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    use crate::eval::modules::array_mod::{coerce_element, itemsize};
+    let Value::Array { typecode, items } = obj else {
+        return Err(type_mismatch("array.array"));
+    };
+    let typecode = *typecode;
+    match method {
+        // Mutators that add elements coerce each to the array's element kind.
+        "append" => {
+            let coerced = coerce_element(typecode, arg1(method, args)?)?;
+            let size = crate::state::estimate_value_size(&coerced);
+            items.lock().push(coerced);
+            Ok(MethodOutcome::grew(Value::None, size))
+        }
+        "extend" | "fromlist" => {
+            let elems = crate::eval::control_flow::iterate_value(arg1(method, args)?)?;
+            let mut guard = items.lock();
+            let mut added = 0;
+            for e in elems {
+                let c = coerce_element(typecode, &e)?;
+                added += crate::state::estimate_value_size(&c);
+                guard.push(c);
+            }
+            Ok(MethodOutcome::grew(Value::None, added))
+        }
+        "insert" => {
+            let idx = crate::eval::functions::value_to_i64(arg1(method, args)?)?;
+            let value = coerce_element(
+                typecode,
+                args.get(1).ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(
+                        "insert() takes exactly 2 arguments".into(),
+                    ))
+                })?,
+            )?;
+            let size = crate::state::estimate_value_size(&value);
+            let mut guard = items.lock();
+            // Clamp the index into `[0, len]` the way list.insert does.
+            let len = guard.len() as i64;
+            let pos = if idx < 0 { (len + idx).max(0) } else { idx.min(len) } as usize;
+            guard.insert(pos, value);
+            Ok(MethodOutcome::grew(Value::None, size))
+        }
+        // A typed list copy.
+        "tolist" => {
+            let guard = items.lock();
+            Ok(MethodOutcome::pure(Value::List(crate::value::shared_list(guard.clone()))))
+        }
+        // `(address, length)` — no real buffer, so the address is 0.
+        "buffer_info" => {
+            let len = items.lock().len() as i64;
+            Ok(MethodOutcome::pure(Value::Tuple(vec![Value::Int(0), Value::Int(len)])))
+        }
+        "__len__" => Ok(MethodOutcome::pure(Value::Int(crate::eval::functions::to_len_i64(
+            items.lock().len(),
+        )?))),
+        // pop/remove/index/count/reverse behave exactly as on the element list.
+        "pop" | "remove" | "index" | "count" | "reverse" => {
+            let _ = itemsize; // itemsize is exposed as an attribute, not a method
+            let mut guard = items.lock();
+            methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'array.array' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 fn dict_methods(
     obj: &mut Value,
     method: &str,
@@ -726,6 +800,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
     match obj {
         Value::String(_) => Some(str_methods),
         Value::List(_) => Some(list_methods),
+        Value::Array { .. } => Some(array_methods),
         Value::Dict(_) => Some(dict_methods),
         Value::Counter(_) => Some(counter_methods),
         Value::Deque { .. } => Some(deque_methods),

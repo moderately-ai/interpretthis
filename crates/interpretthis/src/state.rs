@@ -583,7 +583,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::MemoryView(inner) => 16 + estimate_value_size(inner),
         // List is shared via Arc<Mutex<Vec>>; lock to walk under the
         // guard. Tuple/Set wrap plain Vec<Value> and walk directly.
-        Value::List(items) => {
+        Value::List(items) | Value::Array { items, .. } => {
             let guard = items.lock();
             STRING_HEADER_BYTES
                 + guard.len() * VALUE_SLOT_BYTES
