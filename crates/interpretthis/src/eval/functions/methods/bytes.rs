@@ -265,44 +265,43 @@ pub(crate) fn dispatch_bytes_method(
     args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
-    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    // `decode` accepts `encoding`/`errors` by keyword (`b.decode(errors="replace")`),
+    // so it manages its own kwargs; every other method rejects them.
+    if method != "decode" {
+        crate::eval::functions::reject_kwargs(method, kwargs)?;
+    }
     match method {
         "decode" => {
-            // CPython: bytes.decode(encoding="utf-8", errors="strict")
-            let encoding = match args.first() {
-                Some(Value::String(name)) => name.as_str(),
-                None => "utf-8",
-                _ => {
-                    return Err(InterpreterError::TypeError(
-                        "decode() argument must be str".into(),
-                    )
-                    .into());
-                }
-            };
-            match encoding.to_ascii_lowercase().as_str() {
-                "utf-8" | "utf_8" | "u8" => {
-                    let s = std::str::from_utf8(b).map_err(|e| {
-                        EvalError::from(InterpreterError::ValueError(format!("invalid utf-8: {e}")))
-                    })?;
-                    Ok(Value::String(s.into()))
-                }
-                "ascii" | "us-ascii" => {
-                    if b.is_ascii() {
-                        // SAFETY-of-logic: all bytes < 128, so this is valid
-                        // UTF-8 too; from_utf8 cannot fail here.
-                        let s = std::str::from_utf8(b).map_err(|e| {
-                            EvalError::from(InterpreterError::ValueError(format!(
-                                "invalid ascii: {e}"
-                            )))
-                        })?;
-                        Ok(Value::String(s.into()))
-                    } else {
-                        Err(EvalError::Exception(ExceptionValue::new(
-                            "UnicodeDecodeError",
-                            "'ascii' codec can't decode byte",
-                        )))
+            // CPython: bytes.decode(encoding="utf-8", errors="strict"). Both
+            // arguments are accepted positionally or by keyword.
+            let str_arg = |v: &Value, which: &str| -> Result<String, EvalError> {
+                match v {
+                    Value::String(name) => Ok(name.to_string()),
+                    _ => {
+                        Err(InterpreterError::TypeError(format!("decode() {which} must be str"))
+                            .into())
                     }
                 }
+            };
+            for key in kwargs.keys() {
+                if key != "encoding" && key != "errors" {
+                    return Err(InterpreterError::TypeError(format!(
+                        "'{key}' is an invalid keyword argument for decode()"
+                    ))
+                    .into());
+                }
+            }
+            let encoding = match (args.first(), kwargs.get("encoding")) {
+                (Some(v), _) | (None, Some(v)) => str_arg(v, "argument 'encoding'")?,
+                (None, None) => "utf-8".to_string(),
+            };
+            let errors = match (args.get(1), kwargs.get("errors")) {
+                (Some(v), _) | (None, Some(v)) => str_arg(v, "argument 'errors'")?,
+                (None, None) => "strict".to_string(),
+            };
+            match encoding.to_ascii_lowercase().as_str() {
+                "utf-8" | "utf_8" | "u8" => decode_utf8_with_errors(b, &errors),
+                "ascii" | "us-ascii" => decode_ascii_with_errors(b, &errors),
                 // latin-1 maps each byte 1:1 to U+00..U+FF, so it never fails.
                 "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" => {
                     Ok(Value::String(b.iter().map(|&byte| byte as char).collect::<String>().into()))
@@ -868,4 +867,81 @@ fn bytes_affix(b: &[u8], method: &str, args: &[Value], is_start: bool) -> EvalRe
         }
     };
     Ok(Value::Bool(matched))
+}
+
+/// `LookupError` for an unrecognised `errors=` handler name. CPython only
+/// raises this when a decode error actually occurs (a clean byte string
+/// decodes fine regardless of the handler name), so callers reach here only
+/// on the failure path.
+fn unknown_error_handler(errors: &str) -> EvalError {
+    EvalError::Exception(ExceptionValue::new(
+        "LookupError",
+        format!("unknown error handler name '{errors}'"),
+    ))
+}
+
+/// Decode UTF-8 honouring the `errors=` handler: `strict` raises on the first
+/// invalid byte, `replace` substitutes U+FFFD (per maximal invalid subpart,
+/// matching CPython), `ignore` drops invalid bytes. Unknown handler names raise
+/// `LookupError`, but only when the data is actually malformed.
+fn decode_utf8_with_errors(b: &[u8], errors: &str) -> EvalResult {
+    match errors {
+        "replace" => Ok(Value::String(String::from_utf8_lossy(b).into_owned().into())),
+        "ignore" => {
+            let mut out = String::new();
+            let mut rest = b;
+            loop {
+                match std::str::from_utf8(rest) {
+                    Ok(s) => {
+                        out.push_str(s);
+                        break;
+                    }
+                    Err(e) => {
+                        let valid = e.valid_up_to();
+                        out.push_str(std::str::from_utf8(&rest[..valid]).unwrap_or(""));
+                        match e.error_len() {
+                            // Skip the invalid subsequence and keep decoding.
+                            Some(len) => rest = &rest[valid + len..],
+                            // An incomplete trailing sequence: drop the remainder.
+                            None => break,
+                        }
+                    }
+                }
+            }
+            Ok(Value::String(out.into()))
+        }
+        // "strict" and any other handler name: valid data decodes; on a genuine
+        // error, "strict" raises, an unknown handler name raises LookupError.
+        _ => match std::str::from_utf8(b) {
+            Ok(s) => Ok(Value::String(s.into())),
+            Err(e) if errors == "strict" => {
+                Err(InterpreterError::ValueError(format!("invalid utf-8: {e}")).into())
+            }
+            Err(_) => Err(unknown_error_handler(errors)),
+        },
+    }
+}
+
+/// Decode ASCII honouring the `errors=` handler. Bytes ≥ 128 are the error
+/// positions: `strict` raises, `replace` emits U+FFFD, `ignore` drops them.
+fn decode_ascii_with_errors(b: &[u8], errors: &str) -> EvalResult {
+    if b.is_ascii() {
+        return Ok(Value::String(std::str::from_utf8(b).unwrap_or("").into()));
+    }
+    match errors {
+        "replace" => Ok(Value::String(
+            b.iter()
+                .map(|&c| if c < 128 { c as char } else { '\u{FFFD}' })
+                .collect::<String>()
+                .into(),
+        )),
+        "ignore" => Ok(Value::String(
+            b.iter().filter(|&&c| c < 128).map(|&c| c as char).collect::<String>().into(),
+        )),
+        "strict" => Err(EvalError::Exception(ExceptionValue::new(
+            "UnicodeDecodeError",
+            "'ascii' codec can't decode byte",
+        ))),
+        other => Err(unknown_error_handler(other)),
+    }
 }
