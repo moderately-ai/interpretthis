@@ -1244,6 +1244,10 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             a_guard.len() == b_guard.len()
                 && a_guard.iter().zip(b_guard.iter()).all(|(x, y)| values_equal(x, y))
         }
+        // Deques compare element-wise in order; `maxlen` is not part of equality.
+        (Value::Deque { items: a, .. }, Value::Deque { items: b, .. }) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+        }
         (Value::Tuple(a), Value::Tuple(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
         }

@@ -992,7 +992,7 @@ static COUNTER_TYPE: TypeObject = TypeObject {
 /// dispatch in eval/functions.rs (which carries the &mut backing).
 static DEQUE_TYPE: TypeObject = TypeObject {
     name: "deque",
-    eq_slot: noimpl_eq,
+    eq_slot: deque_eq,
     hash_slot: None,
     lt_slot: noimpl_lt,
     contains_slot: Some(deque_contains),
@@ -3277,6 +3277,17 @@ const fn noimpl_eq(_lhs: &Value, _rhs: &Value) -> Option<bool> {
     None
 }
 
+/// `deque == deque` — element-wise in order (a deque never equals a list).
+fn deque_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
+    let (Value::Deque { items: a, .. }, Value::Deque { items: b, .. }) = (lhs, rhs) else {
+        return None;
+    };
+    Some(
+        a.len() == b.len()
+            && a.iter().zip(b.iter()).all(|(x, y)| crate::eval::operations::values_equal_pub(x, y)),
+    )
+}
+
 /// `x in deque` — linear scan with eq_dispatch.
 #[expect(clippy::unnecessary_wraps, reason = "ContainsSlot protocol")]
 fn deque_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
@@ -3572,7 +3583,9 @@ fn fraction_arith(
                     InterpreterError::Runtime("Fraction division by zero".into()).into()
                 ));
             }
-            (a / b).floor()
+            // CPython: `Fraction // Fraction` yields an int, not a Fraction.
+            let floored = (a / b).floor();
+            return Some(Ok(crate::value::int_from_bigint(floored.to_integer())));
         }
         BinOp::Mod => {
             if b.numer().sign() == num_bigint::Sign::NoSign {
