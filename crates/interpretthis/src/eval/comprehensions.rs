@@ -56,6 +56,100 @@ fn collect_target_names(target: &ast::Expr, out: &mut Vec<String>) {
     }
 }
 
+/// Collect the target names of every walrus (`:=`) that binds directly in
+/// this comprehension's scope, i.e. appears in the element/key/value or a
+/// filter `if` clause. Nested comprehensions and lambdas open their own
+/// scopes, so the walk stops at them (their walruses are validated when they
+/// are evaluated). The `iter` of a generator is deliberately excluded — it is
+/// evaluated in the enclosing scope, where a walrus is legal.
+fn collect_scope_walrus_targets(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::NamedExpr(n) => {
+            if let Expr::Name(name) = n.target.as_ref() {
+                let s = name.id.as_str().to_string();
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            collect_scope_walrus_targets(&n.value, out);
+        }
+        Expr::BoolOp(b) => b.values.iter().for_each(|e| collect_scope_walrus_targets(e, out)),
+        Expr::BinOp(b) => {
+            collect_scope_walrus_targets(&b.left, out);
+            collect_scope_walrus_targets(&b.right, out);
+        }
+        Expr::UnaryOp(u) => collect_scope_walrus_targets(&u.operand, out),
+        Expr::Compare(c) => {
+            collect_scope_walrus_targets(&c.left, out);
+            c.comparators.iter().for_each(|e| collect_scope_walrus_targets(e, out));
+        }
+        Expr::IfExp(i) => {
+            collect_scope_walrus_targets(&i.test, out);
+            collect_scope_walrus_targets(&i.body, out);
+            collect_scope_walrus_targets(&i.orelse, out);
+        }
+        Expr::Call(c) => {
+            collect_scope_walrus_targets(&c.func, out);
+            c.args.iter().for_each(|e| collect_scope_walrus_targets(e, out));
+            c.keywords.iter().for_each(|k| collect_scope_walrus_targets(&k.value, out));
+        }
+        Expr::Subscript(s) => {
+            collect_scope_walrus_targets(&s.value, out);
+            collect_scope_walrus_targets(&s.slice, out);
+        }
+        Expr::Slice(s) => {
+            for part in [&s.lower, &s.upper, &s.step].into_iter().flatten() {
+                collect_scope_walrus_targets(part, out);
+            }
+        }
+        Expr::Attribute(a) => collect_scope_walrus_targets(&a.value, out),
+        Expr::Starred(s) => collect_scope_walrus_targets(&s.value, out),
+        Expr::Await(a) => collect_scope_walrus_targets(&a.value, out),
+        Expr::Tuple(t) => t.elts.iter().for_each(|e| collect_scope_walrus_targets(e, out)),
+        Expr::List(l) => l.elts.iter().for_each(|e| collect_scope_walrus_targets(e, out)),
+        Expr::Set(s) => s.elts.iter().for_each(|e| collect_scope_walrus_targets(e, out)),
+        Expr::Dict(d) => {
+            d.keys.iter().flatten().for_each(|e| collect_scope_walrus_targets(e, out));
+            d.values.iter().for_each(|e| collect_scope_walrus_targets(e, out));
+        }
+        Expr::FormattedValue(f) => collect_scope_walrus_targets(&f.value, out),
+        Expr::JoinedStr(j) => j.values.iter().for_each(|e| collect_scope_walrus_targets(e, out)),
+        // A nested comprehension or lambda opens a new scope: its walruses are
+        // validated when it is evaluated, so do not descend.
+        _ => {}
+    }
+}
+
+/// PEP 572 / CPython symtable: a walrus target inside a comprehension may not
+/// rebind one of that comprehension's `for` iteration variables. CPython
+/// rejects this at compile time with a SyntaxError; we raise the same error
+/// when the comprehension is evaluated.
+fn check_walrus_rebind(
+    generators: &[ast::Comprehension],
+    body_exprs: &[&Expr],
+) -> Result<(), EvalError> {
+    let iter_vars = collect_generator_target_names(generators);
+    if iter_vars.is_empty() {
+        return Ok(());
+    }
+    let mut walrus_targets = Vec::new();
+    for e in body_exprs {
+        collect_scope_walrus_targets(e, &mut walrus_targets);
+    }
+    for g in generators {
+        for cond in &g.ifs {
+            collect_scope_walrus_targets(cond, &mut walrus_targets);
+        }
+    }
+    if let Some(clash) = walrus_targets.iter().find(|t| iter_vars.contains(t)) {
+        return Err(InterpreterError::Syntax(format!(
+            "assignment expression cannot rebind comprehension iteration variable '{clash}'"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Evaluate a list comprehension [expr for x in iterable if cond].
 ///
 /// The comprehension target names are scoped to the comprehension —
@@ -67,6 +161,7 @@ pub async fn eval_list_comp(
     node: &ast::ExprListComp,
     tools: &Tools,
 ) -> EvalResult {
+    check_walrus_rebind(&node.generators, &[&node.elt])?;
     let checkpoint =
         VariableCheckpoint::capture(state, collect_generator_target_names(&node.generators));
     let mut results = Vec::new();
@@ -103,6 +198,7 @@ pub async fn eval_generator_exp(
     node: &ast::ExprGeneratorExp,
     tools: &Tools,
 ) -> EvalResult {
+    check_walrus_rebind(&node.generators, &[&node.elt])?;
     let checkpoint =
         VariableCheckpoint::capture(state, collect_generator_target_names(&node.generators));
     let mut results = Vec::new();
@@ -137,6 +233,7 @@ pub async fn eval_dict_comp(
     node: &ast::ExprDictComp,
     tools: &Tools,
 ) -> EvalResult {
+    check_walrus_rebind(&node.generators, &[&node.key, &node.value])?;
     let checkpoint =
         VariableCheckpoint::capture(state, collect_generator_target_names(&node.generators));
     let mut result_map = indexmap::IndexMap::new();
@@ -164,6 +261,7 @@ pub async fn eval_set_comp(
     node: &ast::ExprSetComp,
     tools: &Tools,
 ) -> EvalResult {
+    check_walrus_rebind(&node.generators, &[&node.elt])?;
     let checkpoint =
         VariableCheckpoint::capture(state, collect_generator_target_names(&node.generators));
     let mut results = Vec::new();

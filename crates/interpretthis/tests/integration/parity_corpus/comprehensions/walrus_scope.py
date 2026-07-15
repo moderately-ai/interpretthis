@@ -1,0 +1,5 @@
+print([y for x in range(5) if (y := x * x) > 4])
+print({k: (v := k * 2) for k in range(3)})
+print({(s := n + 1) for n in range(3)})
+print(list((t := i) + 1 for i in range(3)))
+print(y, v, s, t)
