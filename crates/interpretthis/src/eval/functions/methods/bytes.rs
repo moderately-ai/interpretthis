@@ -359,14 +359,29 @@ pub(crate) fn dispatch_bytes_method(
             if sep.is_empty() {
                 return Err(InterpreterError::ValueError("empty separator".into()).into());
             }
+            // Optional maxsplit (default -1 = unlimited): after `maxsplit`
+            // splits the remainder stays intact (`b"a\nb\nc".split(b"\n", 1)`).
+            let maxsplit = match args.get(1) {
+                None | Some(Value::None) => -1i64,
+                Some(Value::Int(n)) => *n,
+                Some(Value::Bool(bo)) => i64::from(*bo),
+                Some(_) => {
+                    return Err(InterpreterError::TypeError(
+                        "split() maxsplit must be an integer".into(),
+                    )
+                    .into());
+                }
+            };
             let mut parts = Vec::new();
             let mut start = 0usize;
             let mut i = 0usize;
+            let mut count = 0i64;
             while i + sep.len() <= b.len() {
-                if &b[i..i + sep.len()] == sep {
+                if (maxsplit < 0 || count < maxsplit) && &b[i..i + sep.len()] == sep {
                     parts.push(Value::Bytes(b[start..i].to_vec()));
                     i += sep.len();
                     start = i;
+                    count += 1;
                 } else {
                     i += 1;
                 }
@@ -464,6 +479,33 @@ pub(crate) fn dispatch_bytes_method(
         "islower" => Ok(Value::Bool(
             b.iter().any(u8::is_ascii_lowercase) && !b.iter().any(u8::is_ascii_uppercase),
         )),
+        // Titlecased: every run of cased letters starts upper then lower, with
+        // at least one cased byte (same rule as str.istitle, ASCII-only).
+        "istitle" => {
+            let mut cased = false;
+            let mut prev_cased = false;
+            let mut ok = true;
+            for &c in b {
+                if c.is_ascii_uppercase() {
+                    if prev_cased {
+                        ok = false;
+                        break;
+                    }
+                    prev_cased = true;
+                    cased = true;
+                } else if c.is_ascii_lowercase() {
+                    if !prev_cased {
+                        ok = false;
+                        break;
+                    }
+                    prev_cased = true;
+                    cased = true;
+                } else {
+                    prev_cased = false;
+                }
+            }
+            Ok(Value::Bool(ok && cased))
+        }
         "strip" | "lstrip" | "rstrip" => {
             let set = match args.first() {
                 None | Some(Value::None) => None,
