@@ -823,10 +823,15 @@ fn value_to_iterable(val: &Value) -> Result<Vec<Value>, EvalError> {
             }
             Ok(items)
         }
-        _ => Err(InterpreterError::TypeError(format!(
-            "cannot unpack non-iterable {} object",
-            val.type_name()
-        ))
-        .into()),
+        // Everything else iterable — dict views (`a, b = d.items()`), dicts
+        // (yielding keys), deque, bytes/bytearray, etc. — routes through the
+        // shared type-layer iterator; only a genuinely non-iterable value
+        // raises the unpack-specific TypeError.
+        _ => crate::types::dispatch_iter(val).map_err(|_| {
+            EvalError::from(InterpreterError::TypeError(format!(
+                "cannot unpack non-iterable {} object",
+                val.type_name()
+            )))
+        }),
     }
 }
