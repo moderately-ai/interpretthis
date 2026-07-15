@@ -579,6 +579,35 @@ pub async fn binop(
             return result;
         }
     }
+    // `str % args` / `bytes % args` is printf-style formatting handled by
+    // `str.__mod__`, which CPython tries before the right operand's `__rmod__`.
+    // When an operand is a user-class instance, format on the async path so its
+    // numeric/text dunder (`__index__`/`__int__`/`__float__`/`__str__`/…) is
+    // dispatched per conversion; builtin-only args stay on the sync fast path.
+    if matches!(op, Operator::Mod) {
+        match left {
+            Value::String(t) if percent_arg_has_instance(right) => {
+                return crate::eval::strings::str_percent_format_async(state, t, right, tools)
+                    .await;
+            }
+            Value::Bytes(t) if percent_arg_has_instance(right) => {
+                return crate::eval::strings::bytes_percent_format_async(state, t, right, tools)
+                    .await;
+            }
+            Value::ByteArray(t) if percent_arg_has_instance(right) => {
+                let snapshot = t.lock().clone();
+                return crate::eval::strings::bytes_percent_format_async(
+                    state, &snapshot, right, tools,
+                )
+                .await
+                .map(|v| match v {
+                    Value::Bytes(b) => Value::ByteArray(crate::value::shared_bytes(b)),
+                    other => other,
+                });
+            }
+            _ => {}
+        }
+    }
     if let Some(method) = instance_slot(state, left, arith_slot(op)) {
         let (returned, _self) =
             invoke_slot(state, left, &method, std::slice::from_ref(right), tools).await?;
@@ -627,6 +656,18 @@ pub async fn unaryop(
         }
     }
     crate::eval::operations::apply_unaryop(state, op, operand, tools).await
+}
+
+/// Whether a `%`-format operand contains a user-class instance (as the whole
+/// value, a positional-tuple element, or a mapping value) — the trigger for the
+/// async percent-format path that dispatches per-conversion coercion dunders.
+fn percent_arg_has_instance(arg: &Value) -> bool {
+    match arg {
+        Value::Instance(_) => true,
+        Value::Tuple(items) => items.iter().any(|v| matches!(v, Value::Instance(_))),
+        Value::Dict(d) => d.lock().values().any(|v| matches!(v, Value::Instance(_))),
+        _ => false,
+    }
 }
 
 const fn arith_slot(op: rustpython_parser::ast::Operator) -> &'static str {

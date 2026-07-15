@@ -1108,6 +1108,24 @@ pub fn bytes_percent_format(template: &[u8], arg: &Value) -> EvalResult {
     Ok(Value::Bytes(result.chars().map(|c| c as u8).collect()))
 }
 
+/// Async `bytes % args` for when an operand is a user-class instance: identical
+/// to [`bytes_percent_format`] but routes through [`str_percent_format_async`]
+/// so instance operands are coerced via their numeric/text dunders.
+pub async fn bytes_percent_format_async(
+    state: &mut InterpreterState,
+    template: &[u8],
+    arg: &Value,
+    tools: &Tools,
+) -> EvalResult {
+    let tmpl = decode_and_normalize_bytes_template(template);
+    let converted = latin1_bytes_args(arg);
+    let Value::String(result) = str_percent_format_async(state, &tmpl, &converted, tools).await?
+    else {
+        return Err(InterpreterError::Runtime("bytes format produced non-string".into()).into());
+    };
+    Ok(Value::Bytes(result.chars().map(|c| c as u8).collect()))
+}
+
 /// Decode a bytes format template as latin-1 and rewrite each `%b` conversion to
 /// `%s` (equivalent for bytes formatting) so the shared str formatter accepts it.
 fn decode_and_normalize_bytes_template(template: &[u8]) -> String {
@@ -1192,7 +1210,21 @@ fn percent_star_arg(positional: &[Value], next_arg: &mut usize) -> Result<i64, E
     }
 }
 
-pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
+/// One rendered segment of a `%`-template: a literal run, or a conversion
+/// paired with the (already arg-consumed) operand it formats. Splitting the
+/// walk from the render lets the sync and async formatters share one source of
+/// truth for argument consumption (including `*` width/precision args).
+enum PercentPiece {
+    Literal(String),
+    Conv { spec: PercentSpec, value: Value },
+}
+
+/// Walk a `%`-template, parsing each conversion's spec and resolving the
+/// operand it consumes (positional or `(name)` mapping). The `*` width and
+/// precision arguments are consumed here too, so this is the single point that
+/// advances the positional cursor. The trailing "not all arguments converted"
+/// check runs at the end.
+fn parse_percent_pieces(template: &str, arg: &Value) -> Result<Vec<PercentPiece>, EvalError> {
     let chars: Vec<char> = template.chars().collect();
     let positional: Vec<Value> = match arg {
         Value::Tuple(items) => items.clone(),
@@ -1203,18 +1235,19 @@ pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
     // each re-lock, and the shape stays `Option<IndexMap>`.
     let mapping = arg.as_dict().map(|m| m.lock().clone());
 
-    let mut out = String::new();
+    let mut pieces: Vec<PercentPiece> = Vec::new();
+    let mut lit = String::new();
     let mut next_arg = 0usize;
     let mut i = 0;
     while i < chars.len() {
         if chars[i] != '%' {
-            out.push(chars[i]);
+            lit.push(chars[i]);
             i += 1;
             continue;
         }
         i += 1; // consume '%'
         if chars.get(i) == Some(&'%') {
-            out.push('%');
+            lit.push('%');
             i += 1;
             continue;
         }
@@ -1347,7 +1380,13 @@ pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
             precision: precision.as_ref().map(|p| parse_opt_i64(p).unwrap_or(0)),
             conv,
         };
-        out.push_str(&value_text(format_percent_conversion(&value, &spec)?));
+        if !lit.is_empty() {
+            pieces.push(PercentPiece::Literal(std::mem::take(&mut lit)));
+        }
+        pieces.push(PercentPiece::Conv { spec, value });
+    }
+    if !lit.is_empty() {
+        pieces.push(PercentPiece::Literal(lit));
     }
 
     // Positional over-supply is a TypeError in CPython ("not all arguments
@@ -1359,10 +1398,155 @@ pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
         .into());
     }
 
+    Ok(pieces)
+}
+
+/// Printf-style `%`-formatting for builtin operands (`"%d" % 5`). Instance
+/// operands with numeric/text dunders are handled by the async variant
+/// [`str_percent_format_async`]; on this path they fall through to
+/// [`format_percent_conversion`]'s type error, matching a plain builtin.
+pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
+    let pieces = parse_percent_pieces(template, arg)?;
+    let mut out = String::new();
+    for piece in &pieces {
+        match piece {
+            PercentPiece::Literal(s) => out.push_str(s),
+            PercentPiece::Conv { spec, value } => {
+                out.push_str(&value_text(format_percent_conversion(value, spec)?));
+            }
+        }
+    }
     Ok(Value::String(out.into()))
 }
 
+/// Printf-style `%`-formatting where an operand may be a user-class instance:
+/// each conversion coerces its instance operand through the dunder CPython uses
+/// (`%d`→`__index__`/`__int__`, `%x`/`%o`/`%c`→`__index__`, `%f`/`%e`/`%g`→
+/// `__float__`, `%s`→`__str__`, `%r`/`%a`→`__repr__`) before rendering. Builtin
+/// operands render exactly as on the sync path.
+pub async fn str_percent_format_async(
+    state: &mut InterpreterState,
+    template: &str,
+    arg: &Value,
+    tools: &Tools,
+) -> EvalResult {
+    let pieces = parse_percent_pieces(template, arg)?;
+    let mut out = String::new();
+    for piece in &pieces {
+        match piece {
+            PercentPiece::Literal(s) => out.push_str(s),
+            PercentPiece::Conv { spec, value } => {
+                let coerced = coerce_percent_operand(state, value, spec.conv, tools).await?;
+                // For an instance under `%s`/`%r`/`%a` the coercion already
+                // produced the final str()/repr()/ascii() text, so format it as
+                // plain text — otherwise `%r` would re-quote the rendered string.
+                let eff = if matches!(value, Value::Instance(_))
+                    && matches!(spec.conv, 's' | 'r' | 'a')
+                {
+                    PercentSpec { conv: 's', ..*spec }
+                } else {
+                    *spec
+                };
+                out.push_str(&value_text(format_percent_conversion(&coerced, &eff)?));
+            }
+        }
+    }
+    Ok(Value::String(out.into()))
+}
+
+/// Coerce a single `%`-conversion operand when it is a user-class instance,
+/// dispatching the dunder CPython's C-level formatter would use for that
+/// conversion. A non-instance operand — or an instance lacking the relevant
+/// dunder — is returned unchanged so [`format_percent_conversion`] applies the
+/// builtin path (and its canonical TypeError for the missing-dunder case).
+async fn coerce_percent_operand(
+    state: &mut InterpreterState,
+    value: &Value,
+    conv: char,
+    tools: &Tools,
+) -> Result<Value, EvalError> {
+    if !matches!(value, Value::Instance(_)) {
+        return Ok(value.clone());
+    }
+    match conv {
+        // `%s` uses str(), `%r`/`%a` use repr()/ascii().
+        's' => Ok(Value::String(
+            crate::eval::render::render(
+                state,
+                value,
+                crate::eval::render::RenderMode::Display,
+                tools,
+            )
+            .await?
+            .into(),
+        )),
+        'r' | 'a' => {
+            let mode = if conv == 'a' {
+                crate::eval::render::RenderMode::Ascii
+            } else {
+                crate::eval::render::RenderMode::Repr
+            };
+            Ok(Value::String(crate::eval::render::render(state, value, mode, tools).await?.into()))
+        }
+        // `%d`/`%i`/`%u` accept `__index__` or `__int__`; `%x`/`%X`/`%o`/`%c`
+        // require `__index__` specifically (matching CPython's PyNumber_Index).
+        'd' | 'i' | 'u' => {
+            coerce_via_int_dunders(state, value, &["__index__", "__int__"], tools).await
+        }
+        'x' | 'X' | 'o' | 'c' => coerce_via_int_dunders(state, value, &["__index__"], tools).await,
+        // Float conversions use `__float__`, falling back to `__index__`.
+        'e' | 'E' | 'f' | 'F' | 'g' | 'G' => {
+            for slot in ["__float__", "__index__"] {
+                if let Some(res) =
+                    crate::eval::op::instance_unary_dunder(state, value, slot, tools).await
+                {
+                    let r = res?;
+                    return match r {
+                        Value::Float(_) | Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => {
+                            Ok(r)
+                        }
+                        other => Err(InterpreterError::TypeError(format!(
+                            "{slot} returned non-float (type {})",
+                            other.type_name()
+                        ))
+                        .into()),
+                    };
+                }
+            }
+            Ok(value.clone())
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
+/// Resolve an instance to the integer one of `slots` (`__index__`/`__int__`)
+/// returns, in order. Returns the original value unchanged when the instance
+/// defines none of them, so the caller's builtin path raises the canonical
+/// "a number is required" error.
+async fn coerce_via_int_dunders(
+    state: &mut InterpreterState,
+    value: &Value,
+    slots: &[&str],
+    tools: &Tools,
+) -> Result<Value, EvalError> {
+    for slot in slots {
+        if let Some(res) = crate::eval::op::instance_unary_dunder(state, value, slot, tools).await {
+            let r = res?;
+            return match r {
+                Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => Ok(r),
+                other => Err(InterpreterError::TypeError(format!(
+                    "{slot} returned non-int (type {})",
+                    other.type_name()
+                ))
+                .into()),
+            };
+        }
+    }
+    Ok(value.clone())
+}
+
 /// Parsed `%`-conversion specifier.
+#[derive(Clone, Copy)]
 struct PercentSpec {
     /// `-` flag: left-justify.
     minus: bool,
