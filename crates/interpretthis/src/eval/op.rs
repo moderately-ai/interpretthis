@@ -616,11 +616,21 @@ pub async fn binop(
             return Ok(returned);
         }
     }
-    if let Some(method) = instance_slot(state, right, reflected_arith_slot(op)) {
-        let (returned, _self) =
-            invoke_slot(state, right, &method, std::slice::from_ref(left), tools).await?;
-        if !matches!(returned, Value::NotImplemented) {
-            return Ok(returned);
+    // CPython does not try the right operand's reflected slot when both operands
+    // are the *same* type: the reflected method resolves to the same slot that
+    // already returned NotImplemented, so `a + b` raises rather than looping back
+    // into `a.__radd__(a)`.
+    let same_class = matches!(
+        (left, right),
+        (Value::Instance(a), Value::Instance(b)) if a.class_name == b.class_name
+    );
+    if !same_class {
+        if let Some(method) = instance_slot(state, right, reflected_arith_slot(op)) {
+            let (returned, _self) =
+                invoke_slot(state, right, &method, std::slice::from_ref(left), tools).await?;
+            if !matches!(returned, Value::NotImplemented) {
+                return Ok(returned);
+            }
         }
     }
     crate::eval::operations::apply_binop(
