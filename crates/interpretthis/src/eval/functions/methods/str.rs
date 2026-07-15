@@ -244,6 +244,29 @@ pub(crate) fn dispatch_string_method(
                     }
                     Ok(Value::Bytes(out))
                 }
+                // UTF-16: the plain name prepends a little-endian BOM (matching
+                // CPython's native default); the explicit -le/-be forms omit it.
+                "utf-16" | "utf16" => {
+                    let mut out = vec![0xFF, 0xFE];
+                    for u in s.encode_utf16() {
+                        out.extend_from_slice(&u.to_le_bytes());
+                    }
+                    Ok(Value::Bytes(out))
+                }
+                "utf-16-le" | "utf-16le" | "utf_16_le" => {
+                    let mut out = Vec::with_capacity(s.len() * 2);
+                    for u in s.encode_utf16() {
+                        out.extend_from_slice(&u.to_le_bytes());
+                    }
+                    Ok(Value::Bytes(out))
+                }
+                "utf-16-be" | "utf-16be" | "utf_16_be" => {
+                    let mut out = Vec::with_capacity(s.len() * 2);
+                    for u in s.encode_utf16() {
+                        out.extend_from_slice(&u.to_be_bytes());
+                    }
+                    Ok(Value::Bytes(out))
+                }
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
                 }

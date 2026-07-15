@@ -307,6 +307,36 @@ pub(crate) fn dispatch_bytes_method(
                 "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" => {
                     Ok(Value::String(b.iter().map(|&byte| byte as char).collect::<String>().into()))
                 }
+                // UTF-16: the plain name reads (and strips) a leading BOM to pick
+                // byte order, defaulting to little-endian; -le/-be force it.
+                "utf-16" | "utf16" | "utf-16-le" | "utf-16le" | "utf_16_le" | "utf-16-be"
+                | "utf-16be" | "utf_16_be" => {
+                    let lname = encoding.to_ascii_lowercase();
+                    let (little_endian, body): (bool, &[u8]) = if lname.contains("be") {
+                        (false, b)
+                    } else if lname.contains("le") {
+                        (true, b)
+                    } else {
+                        match b {
+                            [0xFF, 0xFE, rest @ ..] => (true, rest),
+                            [0xFE, 0xFF, rest @ ..] => (false, rest),
+                            _ => (true, b),
+                        }
+                    };
+                    let units: Vec<u16> = body
+                        .chunks_exact(2)
+                        .map(|c| {
+                            if little_endian {
+                                u16::from_le_bytes([c[0], c[1]])
+                            } else {
+                                u16::from_be_bytes([c[0], c[1]])
+                            }
+                        })
+                        .collect();
+                    String::from_utf16(&units).map(|s| Value::String(s.into())).map_err(|_| {
+                        EvalError::from(InterpreterError::ValueError("invalid utf-16 data".into()))
+                    })
+                }
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
                 }
