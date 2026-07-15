@@ -817,7 +817,7 @@ impl crate::eval::modules::Module for ItertoolsModule {
         kwargs: &indexmap::IndexMap<String, Value>,
         tools: &crate::tools::Tools,
     ) -> EvalResult {
-        match func {
+        let result = match func {
             "takewhile" => takewhile_impl(state, args, tools).await,
             "dropwhile" => dropwhile_impl(state, args, tools).await,
             "accumulate" => accumulate_impl(state, args, kwargs, tools).await,
@@ -837,6 +837,28 @@ impl crate::eval::modules::Module for ItertoolsModule {
                 },
             )),
             _ => call(func, args, kwargs),
-        }
+        }?;
+        Ok(lazy_wrap(state, func, result))
+    }
+}
+
+/// itertools producers are single-use iterators, not lists. Wrap the eagerly
+/// built `List` result in the `Lazy` cursor type so `next()`, single-pass
+/// iteration, and non-subscriptability match CPython. `tee` returns a tuple of
+/// independent iterators, so each element is wrapped. Results that are already
+/// iterators (`count`/`cycle`/`repeat`'s `BuiltinIter`) pass through unchanged.
+fn lazy_wrap(state: &mut crate::state::InterpreterState, func: &str, value: Value) -> Value {
+    match value {
+        Value::List(items) => state.alloc_lazy(items.lock().clone()),
+        Value::Tuple(copies) if func == "tee" => Value::Tuple(
+            copies
+                .into_iter()
+                .map(|c| match c {
+                    Value::List(items) => state.alloc_lazy(items.lock().clone()),
+                    other => other,
+                })
+                .collect(),
+        ),
+        other => other,
     }
 }

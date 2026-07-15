@@ -91,10 +91,7 @@ pub fn is_exception_type_name(name: &str) -> bool {
 /// still compute the items up front (the sandbox caps iteration) but expose the
 /// iterator protocol so those observable behaviours match.
 fn into_iter_value(state: &mut InterpreterState, items: Vec<Value>) -> Value {
-    let cursor_id = state.next_cursor_id;
-    state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
-    state.lazy_cursors.insert(cursor_id, 0);
-    Value::Lazy { items, cursor_id }
+    state.alloc_lazy(items)
 }
 
 /// Try to dispatch a builtin function. Returns Ok(Some(val)) if handled, Ok(None) if not a builtin.

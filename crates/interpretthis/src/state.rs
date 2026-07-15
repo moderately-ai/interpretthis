@@ -441,6 +441,17 @@ impl InterpreterState {
         Value::BuiltinIter { id, kind }
     }
 
+    /// Wrap eagerly-computed `items` in a one-shot `Lazy` iterator with a fresh
+    /// cursor. Used by the builtins and itertools producers that CPython
+    /// exposes as single-use iterators (`next()` advances them, a second pass
+    /// sees only the remainder, they are neither subscriptable nor sized).
+    pub fn alloc_lazy(&mut self, items: Vec<Value>) -> Value {
+        let cursor_id = self.next_cursor_id;
+        self.next_cursor_id = self.next_cursor_id.wrapping_add(1);
+        self.lazy_cursors.insert(cursor_id, 0);
+        Value::Lazy { items, cursor_id }
+    }
+
     /// Advance a builtin lazy iterator by one. Returns `None` only when
     /// exhausted (an empty `cycle`) or the id is unknown.
     pub fn step_builtin_iter(&mut self, id: u64) -> Option<Value> {
