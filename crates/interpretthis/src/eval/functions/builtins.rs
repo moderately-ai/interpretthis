@@ -98,6 +98,106 @@ fn into_iter_value(state: &mut InterpreterState, items: Vec<Value>) -> Value {
     state.alloc_lazy(items)
 }
 
+/// `int(x=0, base=…)` — extracted from `try_builtin` so that hot funnel's
+/// future stays small on the recursion path. The value is positional-only;
+/// only `base` is a valid keyword.
+async fn builtin_int(
+    state: &mut InterpreterState,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> Result<Option<Value>, EvalError> {
+    check_arg_count("int", args, 0, 2)?;
+    if let Some(bad) = kwargs.keys().find(|k| k.as_str() != "base") {
+        return Err(InterpreterError::TypeError(format!(
+            "'{bad}' is an invalid keyword argument for int()"
+        ))
+        .into());
+    }
+    if args.is_empty() && kwargs.is_empty() {
+        return Ok(Some(Value::Int(0)));
+    }
+    // The base is `args[1]` or the `base` keyword (`int("101", base=2)`).
+    let base_arg = args.get(1).cloned().or_else(|| kwargs.get("base").cloned());
+    // An explicit base only applies to a string. CPython: `int(255, 16)`
+    // raises TypeError, and any base outside {0} ∪ [2, 36] raises ValueError.
+    if let Some(base_val) = base_arg {
+        if args.is_empty() {
+            return Err(InterpreterError::TypeError("int() missing string argument".into()).into());
+        }
+        let base = value_to_i64(&base_val)?;
+        return match &args[0] {
+            Value::String(s) => Ok(Some(parse_int_str(s, base)?)),
+            Value::Bytes(b) => {
+                let s = std::str::from_utf8(b).map_err(|_| {
+                    EvalError::from(InterpreterError::ValueError(
+                        "int() bytes argument is not valid UTF-8".into(),
+                    ))
+                })?;
+                Ok(Some(parse_int_str(s, base)?))
+            }
+            _ => Err(InterpreterError::TypeError(
+                "int() can't convert non-string with explicit base".into(),
+            )
+            .into()),
+        };
+    }
+    // A user class converts via __int__ (falling back to __index__ / __trunc__).
+    if matches!(&args[0], Value::Instance(_)) {
+        for slot in ["__int__", "__index__", "__trunc__"] {
+            if let Some(result) =
+                crate::eval::op::instance_unary_dunder(state, &args[0], slot, tools).await
+            {
+                return Ok(Some(result?));
+            }
+        }
+    }
+    match &args[0] {
+        Value::Int(i) => Ok(Some(Value::Int(*i))),
+        Value::BigInt(b) => Ok(Some(Value::BigInt(b.clone()))),
+        Value::Float(f) => Ok(Some(float_to_int_exact(*f)?)),
+        Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
+        Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
+        // Decimal / Fraction truncate toward zero, as CPython's int() does.
+        Value::Decimal(d, _) => {
+            let (int_val, _) = d.with_scale(0).as_bigint_and_exponent();
+            Ok(Some(crate::value::int_from_bigint(int_val)))
+        }
+        Value::Fraction(fr) => Ok(Some(crate::value::int_from_bigint(fr.to_integer()))),
+        // IntEnum/IntFlag → underlying int; StrEnum → parse the underlying str.
+        // A plain Enum/Flag is not a number (CPython raises TypeError).
+        Value::EnumMember { value: inner, kind, .. } => match kind {
+            crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag => {
+                crate::value::value_as_bigint(inner)
+                    .map(crate::value::int_from_bigint)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        InterpreterError::TypeError(
+                            "int() argument must be a string or a number".into(),
+                        )
+                        .into()
+                    })
+            }
+            crate::value::EnumKind::Str => match &**inner {
+                Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
+                _ => Err(InterpreterError::TypeError(
+                    "int() argument must be a string or a number".into(),
+                )
+                .into()),
+            },
+            crate::value::EnumKind::Plain | crate::value::EnumKind::Flag => Err(
+                InterpreterError::TypeError("int() argument must be a string or a number".into())
+                    .into(),
+            ),
+        },
+        _ => Err(InterpreterError::TypeError(format!(
+            "int() argument must be a string or a number, not '{}'",
+            args[0].type_name()
+        ))
+        .into()),
+    }
+}
+
 /// `ord()` over a bytes-like: a length-1 buffer yields its single byte as an
 /// int; any other length raises CPython's "expected a character" TypeError.
 fn ord_single_byte(bytes: &[u8]) -> Result<Option<Value>, EvalError> {
@@ -248,94 +348,10 @@ pub(super) async fn try_builtin(
                 Ok(Some(Value::String(rendered.into())))
             }
         }
-        "int" => {
-            check_arg_count(name, args, 0, 2)?;
-            if args.is_empty() {
-                return Ok(Some(Value::Int(0)));
-            }
-            // An explicit base only applies to a string. CPython: `int(255, 16)`
-            // raises TypeError, and any base outside {0} ∪ [2, 36] raises
-            // ValueError (the old code passed the base straight to
-            // `from_str_radix`, which PANICS on 0 or > 36).
-            if args.len() >= 2 {
-                let base = value_to_i64(&args[1])?;
-                return match &args[0] {
-                    Value::String(s) => Ok(Some(parse_int_str(s, base)?)),
-                    Value::Bytes(b) => {
-                        let s = std::str::from_utf8(b).map_err(|_| {
-                            EvalError::from(InterpreterError::ValueError(
-                                "int() bytes argument is not valid UTF-8".into(),
-                            ))
-                        })?;
-                        Ok(Some(parse_int_str(s, base)?))
-                    }
-                    _ => Err(InterpreterError::TypeError(
-                        "int() can't convert non-string with explicit base".into(),
-                    )
-                    .into()),
-                };
-            }
-            // A user class converts via __int__ (falling back to __index__ /
-            // __trunc__), so int(instance) dispatches before the numeric arms.
-            if matches!(&args[0], Value::Instance(_)) {
-                for slot in ["__int__", "__index__", "__trunc__"] {
-                    if let Some(result) =
-                        crate::eval::op::instance_unary_dunder(state, &args[0], slot, tools).await
-                    {
-                        return Ok(Some(result?));
-                    }
-                }
-            }
-            match &args[0] {
-                Value::Int(i) => Ok(Some(Value::Int(*i))),
-                // Was missing: `int(2**70)` fell to the catch-all and raised
-                // "int() argument must be a string or a number, not 'int'".
-                Value::BigInt(b) => Ok(Some(Value::BigInt(b.clone()))),
-                Value::Float(f) => Ok(Some(float_to_int_exact(*f)?)),
-                Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
-                Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
-                // Decimal / Fraction truncate toward zero, as CPython's int()
-                // does for the numeric tower.
-                Value::Decimal(d, _) => {
-                    let (int_val, _) = d.with_scale(0).as_bigint_and_exponent();
-                    Ok(Some(crate::value::int_from_bigint(int_val)))
-                }
-                Value::Fraction(fr) => Ok(Some(crate::value::int_from_bigint(fr.to_integer()))),
-                // IntEnum/IntFlag → underlying int; StrEnum → parse the underlying
-                // str. A plain Enum/Flag is not a number (CPython raises TypeError).
-                Value::EnumMember { value: inner, kind, .. } => match kind {
-                    crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag => {
-                        crate::value::value_as_bigint(inner)
-                            .map(crate::value::int_from_bigint)
-                            .map(Some)
-                            .ok_or_else(|| {
-                                InterpreterError::TypeError(
-                                    "int() argument must be a string or a number".into(),
-                                )
-                                .into()
-                            })
-                    }
-                    crate::value::EnumKind::Str => match &**inner {
-                        Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
-                        _ => Err(InterpreterError::TypeError(
-                            "int() argument must be a string or a number".into(),
-                        )
-                        .into()),
-                    },
-                    crate::value::EnumKind::Plain | crate::value::EnumKind::Flag => {
-                        Err(InterpreterError::TypeError(
-                            "int() argument must be a string or a number".into(),
-                        )
-                        .into())
-                    }
-                },
-                _ => Err(InterpreterError::TypeError(format!(
-                    "int() argument must be a string or a number, not '{}'",
-                    args[0].type_name()
-                ))
-                .into()),
-            }
-        }
+        // Extracted into a helper so this hot `try_builtin` future (embedded in
+        // `eval_call` on the recursion path) stays small — see the recursion
+        // canary note in the productive-probe-areas memory.
+        "int" => builtin_int(state, args, kwargs, tools).await,
         "float" => {
             check_arg_count(name, args, 0, 1)?;
             if args.is_empty() {
@@ -868,6 +884,17 @@ pub(super) async fn try_builtin(
                     }
                     Value::Date(_) => {
                         matches!(attr_name, "year" | "month" | "day" | "isoformat" | "weekday")
+                    }
+                    // Keep in sync with the introspection arms in
+                    // `names::legacy_attribute`.
+                    Value::LruCache(_) => {
+                        matches!(attr_name, "__name__" | "__qualname__" | "__doc__" | "__wrapped__")
+                    }
+                    Value::BoundMethod { .. } => {
+                        matches!(attr_name, "__name__" | "__qualname__" | "__self__")
+                    }
+                    Value::BuiltinTypeMethod { .. } => {
+                        matches!(attr_name, "__name__" | "__qualname__")
                     }
                     _ => false,
                 },
