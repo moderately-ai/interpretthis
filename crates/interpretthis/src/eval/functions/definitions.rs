@@ -822,6 +822,42 @@ pub fn build_function_params(args: &ast::Arguments) -> Result<FunctionParams, Ev
 /// be re-parsed and re-evaluated at each call (matching CPython's "defaults
 /// are evaluated fresh" semantics) without holding a reference to the
 /// original AST that `rustpython_parser` won't let us serialise.
+/// Unparse the `for ... in ... [if ...]` clauses of a comprehension.
+fn unparse_comprehensions(gens: &[ast::Comprehension]) -> Result<String, EvalError> {
+    let mut parts = Vec::with_capacity(gens.len());
+    for g in gens {
+        let mut clause = format!("for {} in {}", unparse_expr(&g.target)?, unparse_expr(&g.iter)?);
+        for cond in &g.ifs {
+            clause.push_str(&format!(" if {}", unparse_expr(cond)?));
+        }
+        parts.push(clause);
+    }
+    Ok(parts.join(" "))
+}
+
+/// Unparse an f-string format spec (itself a `JoinedStr`): literal text plus any
+/// nested `{width}`/`{prec}` replacement fields, without the surrounding colon.
+fn unparse_format_spec(spec: &ast::Expr) -> Result<String, EvalError> {
+    let ast::Expr::JoinedStr(js) = spec else {
+        return unparse_expr(spec);
+    };
+    let mut out = String::new();
+    for value in &js.values {
+        match value {
+            ast::Expr::Constant(ast::ExprConstant { value: ast::Constant::Str(s), .. }) => {
+                out.push_str(s);
+            }
+            ast::Expr::FormattedValue(fv) => {
+                out.push('{');
+                out.push_str(&unparse_expr(&fv.value)?);
+                out.push('}');
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 fn unparse_expr(expr: &ast::Expr) -> Result<String, EvalError> {
     // Unparse each element of a slice, joined by `sep`.
     let join = |exprs: &[ast::Expr], sep: &str| -> Result<String, EvalError> {
@@ -860,7 +896,62 @@ fn unparse_expr(expr: &ast::Expr) -> Result<String, EvalError> {
             ast::Constant::Complex { real, imag } => format!("complex({real}, {imag})"),
         },
         ast::Expr::Name(n) => n.id.to_string(),
+        // f-string default (`def f(s=f"{x}")`): reconstruct the `f"..."` source.
+        // Literal chunks escape their braces; `{expr!conv:spec}` chunks unparse
+        // the embedded expression, conversion flag, and (nested) format spec.
+        ast::Expr::JoinedStr(js) => {
+            let mut out = String::from("f\"");
+            for value in &js.values {
+                match value {
+                    ast::Expr::Constant(ast::ExprConstant {
+                        value: ast::Constant::Str(s), ..
+                    }) => {
+                        out.push_str(&s.replace('{', "{{").replace('}', "}}").replace('"', "\\\""));
+                    }
+                    ast::Expr::FormattedValue(fv) => {
+                        out.push('{');
+                        out.push_str(&unparse_expr(&fv.value)?);
+                        match fv.conversion {
+                            ast::ConversionFlag::Str => out.push_str("!s"),
+                            ast::ConversionFlag::Repr => out.push_str("!r"),
+                            ast::ConversionFlag::Ascii => out.push_str("!a"),
+                            ast::ConversionFlag::None => {}
+                        }
+                        if let Some(spec) = &fv.format_spec {
+                            out.push(':');
+                            out.push_str(&unparse_format_spec(spec)?);
+                        }
+                        out.push('}');
+                    }
+                    other => {
+                        return Err(InterpreterError::TypeError(format!(
+                            "unsupported f-string default component: {:?}",
+                            std::mem::discriminant(other)
+                        ))
+                        .into());
+                    }
+                }
+            }
+            out.push('"');
+            out
+        }
         ast::Expr::List(l) => format!("[{}]", join(&l.elts, ", ")?),
+        // Comprehension defaults (`def f(x=[i for i in range(3)])`).
+        ast::Expr::ListComp(c) => {
+            format!("[{} {}]", unparse_expr(&c.elt)?, unparse_comprehensions(&c.generators)?)
+        }
+        ast::Expr::SetComp(c) => {
+            format!("{{{} {}}}", unparse_expr(&c.elt)?, unparse_comprehensions(&c.generators)?)
+        }
+        ast::Expr::GeneratorExp(c) => {
+            format!("({} {})", unparse_expr(&c.elt)?, unparse_comprehensions(&c.generators)?)
+        }
+        ast::Expr::DictComp(c) => format!(
+            "{{{}: {} {}}}",
+            unparse_expr(&c.key)?,
+            unparse_expr(&c.value)?,
+            unparse_comprehensions(&c.generators)?
+        ),
         ast::Expr::Set(s) => {
             // `{}` is an empty dict, never an empty set; a set literal always has
             // at least one element, so this branch is only reached with elements.
