@@ -202,12 +202,64 @@ fn hash_frozenset(element_hashes: &[i64]) -> i64 {
     if hash == u64::MAX { 590923713 } else { hash as i64 }
 }
 
+// CPython hashes `date`/`time`/`datetime` as the hash of their packed
+// `_getstate` bytes, and `timedelta` as `hash((days, seconds, microseconds))`.
+// Those hashes are deterministic (no SipHash key involvement beyond the shared
+// bytes path), so reproducing them puts temporal values in the correct set slot
+// order rather than the insertion-order fallback.
+
+/// `date` packed state: `[year_hi, year_lo, month, day]`.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "year is 1..=9999 (fits u16); month/day are 1..=31 — all bounded"
+)]
+fn date_state(d: &chrono::NaiveDate) -> [u8; 4] {
+    use chrono::Datelike as _;
+    let [yhi, ylo] = (d.year() as u16).to_be_bytes();
+    [yhi, ylo, d.month() as u8, d.day() as u8]
+}
+
+/// `time` packed state: `[hour, minute, second, us_hi, us_mid, us_lo]` (naive).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "hour/min/sec are bounded; microseconds is 0..1_000_000, split big-endian into 3 bytes"
+)]
+fn time_state(t: &chrono::NaiveTime) -> [u8; 6] {
+    use chrono::Timelike as _;
+    let us = t.nanosecond() / 1000;
+    [
+        t.hour() as u8,
+        t.minute() as u8,
+        t.second() as u8,
+        (us >> 16) as u8,
+        (us >> 8) as u8,
+        us as u8,
+    ]
+}
+
+/// `datetime` packed state: the 4 date bytes followed by the 6 time bytes.
+fn datetime_state(dt: &chrono::NaiveDateTime) -> [u8; 10] {
+    let d = date_state(&dt.date());
+    let t = time_state(&dt.time());
+    [d[0], d[1], d[2], d[3], t[0], t[1], t[2], t[3], t[4], t[5]]
+}
+
+/// `hash(timedelta)` == `hash((days, seconds, microseconds))` over CPython's
+/// normalised components (seconds/microseconds non-negative; days signed).
+fn timedelta_hash(micros: i64) -> i64 {
+    let secs_total = micros.div_euclid(1_000_000);
+    let us = micros.rem_euclid(1_000_000);
+    let days = secs_total.div_euclid(86_400);
+    let seconds = secs_total.rem_euclid(86_400);
+    hash_tuple(&[hash_i64(days), hash_i64(seconds), hash_i64(us)])
+}
+
 /// CPython's `hash()` for the hashable value types that appear as set/dict
 /// elements. Returns `None` for values whose CPython hash is not reproducible
-/// here — instances with a user `__hash__` (address-influenced or async), and
-/// the numeric/temporal types not yet ported (Decimal/Fraction/EnumMember/
-/// date-time) — so the caller can fall back to insertion order rather than emit
-/// a wrong order.
+/// here — instances with a user `__hash__` (address-influenced or async),
+/// `EnumMember` (identity hash), and aware `datetime` (offset-normalised) — so
+/// the caller can fall back to insertion order rather than emit a wrong order.
 #[must_use]
 pub fn python_hash(value: &Value) -> Option<i64> {
     match value {
@@ -220,6 +272,12 @@ pub fn python_hash(value: &Value) -> Option<i64> {
         // Decimal/Fraction hash through CPython's rational formula so an equal
         // int/float/Decimal/Fraction share a hash (and thus a set/dict slot).
         Value::Decimal(..) | Value::Fraction(_) => crate::types::rational_number_hash(value),
+        // Temporal types hash their packed state; an aware datetime uses a
+        // different (offset-normalised) formula, so only naive ones are ported.
+        Value::Date(d) => Some(hash_bytes(&date_state(d))),
+        Value::Time(t) => Some(hash_bytes(&time_state(t))),
+        Value::DateTime { dt, tz_offset_secs: None } => Some(hash_bytes(&datetime_state(dt))),
+        Value::TimeDelta(micros) => Some(timedelta_hash(*micros)),
         Value::String(s) => Some(hash_bytes(&str_hash_buffer(s))),
         Value::Bytes(b) => Some(hash_bytes(b)),
         Value::Tuple(items) => {
