@@ -23,10 +23,6 @@ use crate::{
     value::{ExceptionValue, Value, shared_list},
 };
 
-/// Encode `s` into a single-byte codec (ascii `max=0x7f`, latin-1 `max=0xff`),
-/// applying CPython's `errors` handler to each unencodable character. Supports
-/// the standard built-in handlers; an unknown handler raises `LookupError` as
-/// CPython does.
 /// Python's `unicode-escape` codec: printable ASCII passes through; the common
 /// control chars use their short escapes; everything else becomes
 /// `\xXX`/`\uXXXX`/`\UXXXXXXXX`. The result is ASCII bytes.
@@ -55,6 +51,10 @@ fn unicode_escape_encode(s: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Encode `s` into a single-byte codec (ascii `max=0x7f`, latin-1 `max=0xff`),
+/// applying CPython's `errors` handler to each unencodable character. Supports
+/// the standard built-in handlers; an unknown handler raises `LookupError` as
+/// CPython does.
 fn encode_narrow(s: &str, max: u32, codec: &str, errors: &str) -> Result<Vec<u8>, EvalError> {
     let mut out = Vec::with_capacity(s.len());
     for ch in s.chars() {
