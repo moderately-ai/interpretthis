@@ -1048,6 +1048,8 @@ pub async fn apply_unaryop(
             | Value::Decimal(..)
             | Value::Fraction(_) => Ok(operand.clone()),
             Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
+            // `+timedelta` returns the same timedelta.
+            Value::TimeDelta(_) => Ok(operand.clone()),
             // `+Counter` keeps only the strictly-positive counts (CPython's
             // `Counter.__pos__`, used to strip zero/negative tallies).
             Value::Counter(c) => Ok(Value::Counter(counter_unary(c, false))),
@@ -1077,6 +1079,8 @@ pub async fn apply_unaryop(
             // `-Counter` negates every count and keeps the now-positive ones
             // (CPython's `Counter.__neg__`).
             Value::Counter(c) => Ok(Value::Counter(counter_unary(c, true))),
+            // `-timedelta` negates the microsecond total.
+            Value::TimeDelta(us) => Ok(Value::TimeDelta(-*us)),
             _ => Err(InterpreterError::TypeError(format!(
                 "bad operand type for unary -: '{}'",
                 operand.type_name()

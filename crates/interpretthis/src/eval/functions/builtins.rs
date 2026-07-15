@@ -959,6 +959,8 @@ pub(super) async fn try_builtin(
                 // abs(complex) is the magnitude (a float): sqrt(re^2 + im^2).
                 Value::Complex(c) => Ok(Some(Value::Float(c.norm()))),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
+                // `abs(timedelta)` yields a non-negative duration.
+                Value::TimeDelta(us) => Ok(Some(Value::TimeDelta(us.abs()))),
                 Value::Decimal(d, _) => Ok(Some(Value::Decimal(Box::new(d.abs()), false))),
                 Value::Fraction(fr) => {
                     use num_traits::Signed as _;

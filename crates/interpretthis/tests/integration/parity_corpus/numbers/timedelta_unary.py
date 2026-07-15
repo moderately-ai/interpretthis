@@ -1,0 +1,13 @@
+from datetime import timedelta
+print(-timedelta(days=1))
+print(-timedelta(days=1, hours=2, minutes=30))
+print(+timedelta(hours=5))
+print(abs(timedelta(days=-5)))
+print(abs(timedelta(days=5)))
+print(abs(timedelta(hours=-3, minutes=-30)))
+print(-timedelta(0))
+print(-(-timedelta(days=2)))
+print(sorted([timedelta(days=1), -timedelta(days=1), timedelta(0)]))
+td = timedelta(hours=1)
+print(td + (-td))
+print(-timedelta(microseconds=1))
