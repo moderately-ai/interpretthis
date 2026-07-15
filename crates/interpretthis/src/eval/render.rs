@@ -198,6 +198,42 @@ pub fn render<'a>(
                 state.repr_active.remove(&ptr);
                 result
             }
+            // A user exception subclass may override `__str__` / `__repr__`
+            // (`def __str__(self): return f"[{self.code}] {self.args[0]}"`).
+            // Dispatch it with the exception as `self` — attribute access
+            // (`self.args`, `self.code`) resolves through the exception's fields
+            // — so str/repr/f-string honour the override before the default
+            // BaseException rendering below.
+            Value::Exception(e)
+                if lookup_method_in_mro(
+                    state,
+                    &e.type_name,
+                    if matches!(mode, RenderMode::Display) { "__str__" } else { "__repr__" },
+                )
+                .is_some() =>
+            {
+                let slot = if matches!(mode, RenderMode::Display) { "__str__" } else { "__repr__" };
+                let (_, method) =
+                    lookup_method_in_mro(state, &e.type_name, slot).ok_or_else(|| {
+                        EvalError::from(InterpreterError::Runtime(
+                            "exception render slot vanished after guard".into(),
+                        ))
+                    })?;
+                let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+                let (returned, _self) =
+                    call_method(state, &method, value.clone(), call, tools).await?;
+                match returned {
+                    Value::String(s) => Ok(match mode {
+                        RenderMode::Ascii => ascii_escape(&s),
+                        _ => s.into(),
+                    }),
+                    other => Err(EvalError::from(InterpreterError::TypeError(format!(
+                        "{}.{slot} returned non-string (type {})",
+                        e.type_name,
+                        other.type_name()
+                    )))),
+                }
+            }
             // `str(exc)` mirrors CPython's BaseException.__str__: no args
             // renders empty, a single arg renders as that arg's str, and
             // multiple args render as the args tuple's repr. `repr(exc)`
