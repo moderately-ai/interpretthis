@@ -1,0 +1,12 @@
+r = range(20)
+print(list(r[2:10:2]))
+print(list(r[::-1])[:5])
+print(list(r[::2]))
+print(list(r[5:]))
+print(list(r[:5]))
+print(list(r[-3:]))
+print(list(r[100:]))
+print(list(range(0, 100, 5)[3:8]))
+print(list(range(10, 0, -1)[2:6]))
+# Slicing a range yields a range, not a list.
+print(range(20)[2:10:2])

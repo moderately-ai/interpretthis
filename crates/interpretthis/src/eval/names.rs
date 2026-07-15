@@ -964,6 +964,42 @@ pub(crate) fn apply_value_slice(
                 _ => Ok(Value::Bytes(bytes)),
             }
         }
+        // `range[i:j:k]` returns a *new range* (CPython) rather than materialising
+        // the elements: map the slice indices back onto the arithmetic sequence.
+        Value::Range { start, stop, step } => {
+            let len =
+                i64::try_from(crate::types::range_length(*start, *stop, *step)).map_err(|_| {
+                    EvalError::from(InterpreterError::Runtime("range length overflow".into()))
+                })?;
+            let resolve = |v: Option<&Value>, default: i64| -> Result<i64, EvalError> {
+                match v {
+                    None | Some(Value::None) => Ok(default),
+                    Some(Value::Int(i)) => Ok(*i),
+                    Some(Value::Bool(b)) => Ok(i64::from(*b)),
+                    Some(other) => Err(InterpreterError::TypeError(format!(
+                        "slice indices must be integers or None, not '{}'",
+                        other.type_name()
+                    ))
+                    .into()),
+                }
+            };
+            let (begin, end) = if stride > 0 {
+                (
+                    clamp_slice_index(resolve(lower, 0)?, len),
+                    clamp_slice_index(resolve(upper, len)?, len),
+                )
+            } else {
+                (
+                    clamp_slice_index_neg(resolve(lower, len - 1)?, len),
+                    clamp_slice_index_neg(resolve(upper, -(len + 1))?, len),
+                )
+            };
+            Ok(Value::Range {
+                start: start + begin * step,
+                stop: start + end * step,
+                step: step * stride,
+            })
+        }
         _ => Err(InterpreterError::TypeError(format!(
             "'{}' object is not subscriptable",
             obj.type_name()
