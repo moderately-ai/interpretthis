@@ -1210,6 +1210,25 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             Value::ExceptionType(a) | Value::Type(a) | Value::Class(a),
             Value::ExceptionType(b) | Value::Type(b) | Value::Class(b),
         ) => a == b,
+        // Temporal types: value-based equality (missing arms previously fell to
+        // `_ => false`, so `date == date`, `[date] == [date]`, and `date in
+        // [...]` were all False). datetime equality compares the wall clock for
+        // naive pairs and the absolute instant for aware pairs; a naive value
+        // never equals an aware one.
+        (Value::Date(a), Value::Date(b)) => a == b,
+        (Value::Time(a), Value::Time(b)) => a == b,
+        (Value::TimeDelta(a), Value::TimeDelta(b)) => a == b,
+        (
+            Value::DateTime { dt: a, tz_offset_secs: ta },
+            Value::DateTime { dt: b, tz_offset_secs: tb },
+        ) => match (ta, tb) {
+            (None, None) => a == b,
+            (Some(oa), Some(ob)) => {
+                (*a - chrono::Duration::seconds(i64::from(*oa)))
+                    == (*b - chrono::Duration::seconds(i64::from(*ob)))
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

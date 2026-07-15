@@ -1079,6 +1079,20 @@ pub enum ValueKey {
         hash: i64,
         value: Box<Value>,
     },
+    /// `date` key — `NaiveDate` is `Hash`/`Eq`.
+    Date(NaiveDate),
+    /// `time` key — `NaiveTime` is `Hash`/`Eq`.
+    Time(NaiveTime),
+    /// `datetime` key. Equality and hashing normalise an aware value to its
+    /// UTC instant (so two aware datetimes for the same instant key alike);
+    /// the original offset is retained for `to_value` round-tripping. A naive
+    /// value never equals an aware one.
+    DateTime {
+        dt: NaiveDateTime,
+        tz_offset_secs: Option<i32>,
+    },
+    /// `timedelta` key — the whole duration as microseconds.
+    TimeDelta(i64),
 }
 
 impl PartialEq for ValueKey {
@@ -1130,6 +1144,20 @@ impl PartialEq for ValueKey {
                     _ => crate::eval::operations::values_equal_pub(a, b),
                 }
             }
+            (Self::Date(a), Self::Date(b)) => a == b,
+            (Self::Time(a), Self::Time(b)) => a == b,
+            (Self::TimeDelta(a), Self::TimeDelta(b)) => a == b,
+            (
+                Self::DateTime { dt: a, tz_offset_secs: ta },
+                Self::DateTime { dt: b, tz_offset_secs: tb },
+            ) => match (ta, tb) {
+                (None, None) => a == b,
+                (Some(oa), Some(ob)) => {
+                    (*a - chrono::Duration::seconds(i64::from(*oa)))
+                        == (*b - chrono::Duration::seconds(i64::from(*ob)))
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -1154,6 +1182,10 @@ impl core::hash::Hash for ValueKey {
         const COMPLEX_TAG: u8 = 6;
         const ELLIPSIS_TAG: u8 = 7;
         const FROZENSET_TAG: u8 = 8;
+        const DATE_TAG: u8 = 9;
+        const TIME_TAG: u8 = 10;
+        const DATETIME_TAG: u8 = 11;
+        const TIMEDELTA_TAG: u8 = 12;
         match self {
             Self::None => NONE_TAG.hash(state),
             Self::Ellipsis => ELLIPSIS_TAG.hash(state),
@@ -1207,6 +1239,33 @@ impl core::hash::Hash for ValueKey {
             Self::Instance { hash, .. } => {
                 INSTANCE_TAG.hash(state);
                 hash.hash(state);
+            }
+            Self::Date(d) => {
+                DATE_TAG.hash(state);
+                d.hash(state);
+            }
+            Self::Time(t) => {
+                TIME_TAG.hash(state);
+                t.hash(state);
+            }
+            Self::TimeDelta(m) => {
+                TIMEDELTA_TAG.hash(state);
+                m.hash(state);
+            }
+            Self::DateTime { dt, tz_offset_secs } => {
+                DATETIME_TAG.hash(state);
+                // Hash the UTC instant so aware datetimes for the same instant
+                // (whatever their offset) collide, agreeing with PartialEq.
+                match tz_offset_secs {
+                    None => {
+                        0u8.hash(state);
+                        dt.hash(state);
+                    }
+                    Some(o) => {
+                        1u8.hash(state);
+                        (*dt - chrono::Duration::seconds(i64::from(*o))).hash(state);
+                    }
+                }
             }
         }
     }
@@ -2607,6 +2666,12 @@ impl ValueKey {
             Self::Tuple(items) => Value::Tuple(items.iter().map(Self::to_value).collect()),
             Self::Frozenset(items) => Value::Frozenset(items.iter().map(Self::to_value).collect()),
             Self::Instance { value, .. } => (**value).clone(),
+            Self::Date(d) => Value::Date(*d),
+            Self::Time(t) => Value::Time(*t),
+            Self::TimeDelta(m) => Value::TimeDelta(*m),
+            Self::DateTime { dt, tz_offset_secs } => {
+                Value::DateTime { dt: *dt, tz_offset_secs: *tz_offset_secs }
+            }
         }
     }
 }
@@ -2660,6 +2725,11 @@ impl fmt::Display for ValueKey {
                 write!(f, "}})")
             }
             Self::Instance { value, .. } => write!(f, "{value}"),
+            // Render through the corresponding Value so temporal keys display
+            // identically to the standalone values.
+            Self::Date(_) | Self::Time(_) | Self::TimeDelta(_) | Self::DateTime { .. } => {
+                write!(f, "{}", self.to_value())
+            }
         }
     }
 }

@@ -1286,7 +1286,7 @@ static DATE_TYPE: TypeObject = TypeObject {
     name: "date",
     eq_slot: object_eq,
     hash_slot: Some(fallback_hash_slot),
-    lt_slot: noimpl_lt,
+    lt_slot: date_lt,
     contains_slot: None,
     arith_slot: datetime_cluster_arith,
     iter_slot: None,
@@ -1303,7 +1303,7 @@ static DATETIME_TYPE: TypeObject = TypeObject {
     name: "datetime",
     eq_slot: object_eq,
     hash_slot: Some(fallback_hash_slot),
-    lt_slot: noimpl_lt,
+    lt_slot: datetime_lt,
     contains_slot: None,
     arith_slot: datetime_cluster_arith,
     iter_slot: None,
@@ -1320,7 +1320,7 @@ static TIME_TYPE: TypeObject = TypeObject {
     name: "time",
     eq_slot: object_eq,
     hash_slot: Some(fallback_hash_slot),
-    lt_slot: noimpl_lt,
+    lt_slot: time_lt,
     contains_slot: None,
     arith_slot: noimpl_arith,
     iter_slot: None,
@@ -1337,7 +1337,7 @@ static TIMEDELTA_TYPE: TypeObject = TypeObject {
     name: "timedelta",
     eq_slot: object_eq,
     hash_slot: Some(fallback_hash_slot),
-    lt_slot: noimpl_lt,
+    lt_slot: timedelta_lt,
     contains_slot: None,
     arith_slot: datetime_cluster_arith,
     iter_slot: None,
@@ -1620,6 +1620,55 @@ fn recurse_eq(lhs: &Value, rhs: &Value) -> bool {
 /// fallback.
 const fn noimpl_lt(_lhs: &Value, _rhs: &Value) -> Option<Result<bool, EvalError>> {
     None
+}
+
+/// `date < date` — `NaiveDate` is chronologically ordered.
+fn date_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    match (lhs, rhs) {
+        (Value::Date(a), Value::Date(b)) => Some(Ok(a < b)),
+        _ => None,
+    }
+}
+
+/// `time < time` — `NaiveTime` is ordered within a day.
+fn time_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    match (lhs, rhs) {
+        (Value::Time(a), Value::Time(b)) => Some(Ok(a < b)),
+        _ => None,
+    }
+}
+
+/// `timedelta < timedelta` — compare the microsecond magnitudes.
+fn timedelta_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    match (lhs, rhs) {
+        (Value::TimeDelta(a), Value::TimeDelta(b)) => Some(Ok(a < b)),
+        _ => None,
+    }
+}
+
+/// `datetime < datetime` — naive pairs compare wall-clock; aware pairs compare
+/// absolute instants (each shifted to UTC by its offset). Mixing a naive and an
+/// aware datetime raises, matching CPython.
+fn datetime_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    let (
+        Value::DateTime { dt: a, tz_offset_secs: ta },
+        Value::DateTime { dt: b, tz_offset_secs: tb },
+    ) = (lhs, rhs)
+    else {
+        return None;
+    };
+    match (ta, tb) {
+        (None, None) => Some(Ok(a < b)),
+        (Some(oa), Some(ob)) => {
+            let ia = *a - chrono::Duration::seconds(i64::from(*oa));
+            let ib = *b - chrono::Duration::seconds(i64::from(*ob));
+            Some(Ok(ia < ib))
+        }
+        _ => Some(Err(InterpreterError::TypeError(
+            "can't compare offset-naive and offset-aware datetimes".into(),
+        )
+        .into())),
+    }
 }
 
 fn bool_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {

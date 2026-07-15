@@ -223,7 +223,11 @@ fn json_key(key: &ValueKey) -> String {
         | ValueKey::Complex(..)
         | ValueKey::Tuple(_)
         | ValueKey::Frozenset(_)
-        | ValueKey::Instance { .. } => {
+        | ValueKey::Instance { .. }
+        | ValueKey::Date(_)
+        | ValueKey::Time(_)
+        | ValueKey::TimeDelta(_)
+        | ValueKey::DateTime { .. } => {
             format!("{key}")
         }
     }

@@ -215,6 +215,15 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
             let keys: Result<Vec<ValueKey>, _> = items.iter().map(value_to_key).collect();
             Ok(ValueKey::Frozenset(keys?))
         }
+        // Temporal types are hashable in CPython (usable as dict keys / set
+        // members). The key retains the original fields; equality/hash
+        // normalise aware datetimes to their UTC instant (see ValueKey).
+        Value::Date(d) => Ok(ValueKey::Date(*d)),
+        Value::Time(t) => Ok(ValueKey::Time(*t)),
+        Value::TimeDelta(m) => Ok(ValueKey::TimeDelta(*m)),
+        Value::DateTime { dt, tz_offset_secs } => {
+            Ok(ValueKey::DateTime { dt: *dt, tz_offset_secs: *tz_offset_secs })
+        }
         _ => Err(crate::error::InterpreterError::TypeError(format!(
             "unhashable type: '{}'",
             val.type_name()
