@@ -24,6 +24,7 @@ pub fn has_function(name: &str) -> bool {
         name,
         "chain"
             | "combinations"
+            | "combinations_with_replacement"
             | "permutations"
             | "product"
             | "repeat"
@@ -156,6 +157,12 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
             let r = arg_usize("combinations", args, 1)?;
             Ok(Value::List(shared_list(combinations(&items, r))))
         }
+        "combinations_with_replacement" => {
+            // Like combinations, but an element may be chosen more than once.
+            let items = iterate_value(need_arg(func, args, 0)?)?;
+            let r = arg_usize("combinations_with_replacement", args, 1)?;
+            Ok(Value::List(shared_list(combinations_with_replacement(&items, r))))
+        }
         "permutations" => {
             // permutations(iterable, [r]) — all r-length permutations.
             let items = iterate_value(need_arg(func, args, 0)?)?;
@@ -243,6 +250,35 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
 
 /// `combinations(items, r)`: all r-length sub-tuples in
 /// lexicographic order.
+/// `combinations_with_replacement(iterable, r)` — sorted r-length tuples where
+/// each element may repeat (indices are non-decreasing, all 0..n each usable).
+fn combinations_with_replacement(items: &[Value], r: usize) -> Vec<Value> {
+    let n = items.len();
+    if n == 0 {
+        return if r == 0 { vec![Value::Tuple(Vec::new())] } else { Vec::new() };
+    }
+    let mut result = Vec::new();
+    let mut indices = vec![0usize; r];
+    loop {
+        result.push(Value::Tuple(indices.iter().map(|&i| items[i].clone()).collect()));
+        // Advance: rightmost index not yet at n-1 increments; the rest reset to it.
+        let mut i = r;
+        loop {
+            if i == 0 {
+                return result;
+            }
+            i -= 1;
+            if indices[i] != n - 1 {
+                let v = indices[i] + 1;
+                for slot in &mut indices[i..] {
+                    *slot = v;
+                }
+                break;
+            }
+        }
+    }
+}
+
 fn combinations(items: &[Value], r: usize) -> Vec<Value> {
     if r > items.len() {
         return Vec::new();

@@ -691,7 +691,52 @@ fn try_builtin_dunder(
         "__str__" => pure(Value::String(format!("{obj}").into())),
         "__repr__" => pure(Value::String(obj.repr().into())),
         "__bool__" => pure(Value::Bool(obj.is_truthy())),
+        // `__floor__`/`__ceil__`/`__trunc__` return the integral part per the
+        // numeric type (exact for Fraction/Decimal/int, truncating floor/ceil
+        // for float). Non-numeric types fall through to AttributeError.
+        "__floor__" | "__ceil__" | "__trunc__" => match numeric_integral(obj, method) {
+            Some(v) => pure(v),
+            None => Ok(None),
+        },
         _ => Ok(None),
+    }
+}
+
+/// Integral part of a numeric value for `__floor__`/`__ceil__`/`__trunc__`.
+/// Returns `None` for a non-numeric receiver.
+fn numeric_integral(obj: &Value, method: &str) -> Option<Value> {
+    use num_traits::ToPrimitive as _;
+    match obj {
+        Value::Int(_) | Value::BigInt(_) => Some(obj.clone()),
+        Value::Bool(b) => Some(Value::Int(i64::from(*b))),
+        Value::Float(f) => {
+            let r = match method {
+                "__floor__" => f.floor(),
+                "__ceil__" => f.ceil(),
+                _ => f.trunc(),
+            };
+            r.to_i64().map(Value::Int)
+        }
+        Value::Fraction(fr) => {
+            let r = match method {
+                "__floor__" => fr.floor(),
+                "__ceil__" => fr.ceil(),
+                _ => fr.trunc(),
+            };
+            Some(crate::value::int_from_bigint(r.to_integer()))
+        }
+        Value::Decimal(d) => {
+            use bigdecimal::BigDecimal;
+            let rounding = match method {
+                "__floor__" => bigdecimal::RoundingMode::Floor,
+                "__ceil__" => bigdecimal::RoundingMode::Ceiling,
+                _ => bigdecimal::RoundingMode::Down,
+            };
+            let int_dec: BigDecimal = d.with_scale_round(0, rounding);
+            let (bigint, _) = int_dec.as_bigint_and_exponent();
+            Some(crate::value::int_from_bigint(bigint))
+        }
+        _ => None,
     }
 }
 
