@@ -1455,6 +1455,30 @@ async fn instance_attr_call_fallback(
         .await?;
         return Ok((result, instance));
     }
+    // A function/lambda stored as a class attribute (`greet = lambda self: …`,
+    // or a callable placed in a `type(name, bases, ns)` namespace) is a method:
+    // bind `self` as the first argument. Non-function callables are not auto-
+    // bound, matching CPython's descriptor rules.
+    let class_attr = state.classes.get(class_name).and_then(|c| {
+        c.mro
+            .iter()
+            .find_map(|anc| state.classes.get(anc).and_then(|a| a.class_attrs.get(method_name)))
+            .cloned()
+    });
+    if let Some(attr @ (Value::Function(_) | Value::Lambda(_))) = class_attr {
+        let mut full = Vec::with_capacity(call.positional.len() + 1);
+        full.push(instance.clone());
+        full.extend_from_slice(call.positional);
+        let result = crate::eval::functions::call_value_as_function(
+            state,
+            &attr,
+            &full,
+            call.keyword,
+            tools,
+        )
+        .await?;
+        return Ok((result, instance));
+    }
     // `__getattr__` fires on a miss: resolve the attribute, then call it.
     if let Some((_, getattr)) = lookup_method_in_mro(state, class_name, "__getattr__") {
         let attr_arg = Value::String(method_name.into());
