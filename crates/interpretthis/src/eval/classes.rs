@@ -1319,12 +1319,73 @@ pub async fn instance_method_call(
     // zero-arg `super()` inside that method resumes at the next slot.
     let method = lookup_method_in_mro(state, &class_name, method_name);
     let Some((_defining_class, def)) = method else {
-        return Err(InterpreterError::AttributeError(format!(
-            "'{class_name}' object has no attribute '{method_name}'"
+        // Box the fallback future so it does not inflate this hot function's
+        // state machine on the recursion path (the `deep_recursion` canary
+        // SIGABRTs otherwise — an embedded future here costs native stack).
+        return Box::pin(instance_attr_call_fallback(
+            state,
+            instance,
+            &class_name,
+            method_name,
+            call,
+            tools,
         ))
-        .into());
+        .await;
     };
     call_method(state, &def, instance, call, tools).await
+}
+
+/// `instance.name(...)` when `name` is not a method on the MRO. CPython treats
+/// this as `(instance.name)(...)` — an attribute lookup followed by a call — so
+/// resolve the attribute the same way plain access does (a callable stored in
+/// the instance's own dict, then `__getattr__`) and call the result. Returns
+/// the same AttributeError as before when nothing resolves.
+async fn instance_attr_call_fallback(
+    state: &mut InterpreterState,
+    instance: Value,
+    class_name: &str,
+    method_name: &str,
+    call: CallArgs<'_>,
+    tools: &Tools,
+) -> Result<(Value, Value), EvalError> {
+    // A callable stored directly on the instance (`self.cb = fn; self.cb()`).
+    let field = match &instance {
+        Value::Instance(inst) => inst.fields.lock().get(method_name).cloned(),
+        _ => None,
+    };
+    if let Some(f) = field {
+        let result = crate::eval::functions::call_value_as_function(
+            state,
+            &f,
+            call.positional,
+            call.keyword,
+            tools,
+        )
+        .await?;
+        return Ok((result, instance));
+    }
+    // `__getattr__` fires on a miss: resolve the attribute, then call it.
+    if let Some((_, getattr)) = lookup_method_in_mro(state, class_name, "__getattr__") {
+        let attr_arg = Value::String(method_name.into());
+        let empty_kwargs = indexmap::IndexMap::new();
+        let getattr_call =
+            CallArgs { positional: std::slice::from_ref(&attr_arg), keyword: &empty_kwargs };
+        let (attr_value, _self) =
+            call_method(state, &getattr, instance.clone(), getattr_call, tools).await?;
+        let result = crate::eval::functions::call_value_as_function(
+            state,
+            &attr_value,
+            call.positional,
+            call.keyword,
+            tools,
+        )
+        .await?;
+        return Ok((result, instance));
+    }
+    Err(InterpreterError::AttributeError(format!(
+        "'{class_name}' object has no attribute '{method_name}'"
+    ))
+    .into())
 }
 
 /// Run a method body with `self` bound to `self_value`, returning the method's
