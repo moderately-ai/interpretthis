@@ -846,7 +846,13 @@ pub(super) async fn try_builtin(
         "sum" => {
             check_arg_count(name, args, 1, 2)?;
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
-            let start = if args.len() >= 2 { args[1].clone() } else { Value::Int(0) };
+            // `start` is the second positional or the `start=` keyword (CPython
+            // 3.12 accepts both), defaulting to 0.
+            let start = if args.len() >= 2 {
+                args[1].clone()
+            } else {
+                kwargs.get("start").cloned().unwrap_or(Value::Int(0))
+            };
             // CPython 3.12 sums a run of floats with Neumaier compensation,
             // so `sum([0.1] * 10) == 1.0` rather than 0.999…. Take that
             // fast path when start + every item is a plain number and at

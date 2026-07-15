@@ -772,6 +772,25 @@ fn clean_underscores(s: &str) -> Option<String> {
 /// materializing the (potentially astronomical) intermediate value.
 /// CPython requires integer operands for the 3-arg form; non-int operands
 /// raise `TypeError`.
+/// Modular inverse of `a` mod `m` via the extended Euclidean algorithm, or
+/// `None` when `gcd(a, m) != 1` (no inverse exists). The result is reduced into
+/// `[0, |m|)`.
+fn mod_inverse(a: i64, m: i64) -> Option<i64> {
+    let modulus = m.unsigned_abs() as i128;
+    let (mut old_r, mut r) = (i128::from(a).rem_euclid(modulus), modulus);
+    let (mut old_s, mut s) = (1_i128, 0_i128);
+    while r != 0 {
+        let q = old_r / r;
+        (old_r, r) = (r, old_r - q * r);
+        (old_s, s) = (s, old_s - q * s);
+    }
+    if old_r != 1 {
+        return None; // not coprime
+    }
+    let inv = old_s.rem_euclid(modulus);
+    i64::try_from(inv).ok()
+}
+
 pub(super) fn pow_three_arg(
     base: &Value,
     exp: &Value,
@@ -813,26 +832,27 @@ pub(super) fn pow_three_arg(
             "pow() 3rd argument cannot be 0",
         )));
     }
-    if exp_i < 0 {
-        // CPython allows this when gcd(base, mod) == 1 (modular inverse),
-        // but the modinverse machinery is out of scope for A3. Raise the
-        // CPython-shaped error for now.
-        return Err(EvalError::Exception(ExceptionValue::new(
-            "ValueError",
-            "pow() 2nd argument cannot be negative when 3rd argument specified",
-        )));
-    }
-    // Square-and-multiply: O(log exp_i) i64 multiplications. The
-    // `rem_euclid` keeps the result in [0, mod_i) matching CPython's
-    // sign rule for modulo (result sign follows divisor). Use u128 for
-    // the intermediate product to avoid overflow on the squarings.
+    // A negative exponent computes the modular inverse of the base (CPython
+    // 3.8+), raised to the exponent's magnitude. It exists only when the base
+    // is coprime with the modulus.
+    let (effective_base, exp_u) = if exp_i < 0 {
+        let inv = mod_inverse(base_i.rem_euclid(mod_i), mod_i).ok_or_else(|| {
+            EvalError::Exception(ExceptionValue::new(
+                "ValueError",
+                "base is not invertible for the given modulus",
+            ))
+        })?;
+        (inv, exp_i.unsigned_abs())
+    } else {
+        (base_i, exp_i.unsigned_abs())
+    };
+    // Square-and-multiply: O(log exp) i64 multiplications. The `rem_euclid`
+    // keeps the result in [0, mod_i) matching CPython's sign rule for modulo
+    // (result sign follows divisor). Use u128 for the intermediate product to
+    // avoid overflow on the squarings.
     let m = mod_i.unsigned_abs();
     let mut result: u128 = 1;
-    let mut b: u128 = u128::from(base_i.rem_euclid(mod_i).unsigned_abs());
-    // exp_i >= 0 was verified above, so the cast through u64 is sign-preserving.
-    let exp_u = u64::try_from(exp_i).map_err(|err| {
-        EvalError::from(InterpreterError::Runtime(format!("pow() exponent out of range: {err}")))
-    })?;
+    let mut b: u128 = u128::from(effective_base.rem_euclid(mod_i).unsigned_abs());
     let mut e: u64 = exp_u;
     let mod_u: u128 = m.into();
     while e > 0 {
