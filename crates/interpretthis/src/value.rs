@@ -827,6 +827,11 @@ pub struct ClassValue {
     /// `@dataclass(order=True)` — rich comparisons use field tuples.
     #[serde(default)]
     pub order: bool,
+    /// `@functools.total_ordering` — the class defines `__eq__` and one of
+    /// `__lt__`/`__le__`/`__gt__`/`__ge__`; the remaining ordering operators
+    /// are derived at compare time from that root plus `__eq__`.
+    #[serde(default)]
+    pub total_ordering: bool,
     /// `@dataclass(slots=True)` or class-body `__slots__` — only listed
     /// fields may be set on instances (CPython's no-`__dict__` restriction,
     /// modelled as a field-name allowlist rather than layout change).
@@ -857,6 +862,7 @@ impl ClassValue {
             dataclass_fields: None,
             frozen: false,
             order: false,
+            total_ordering: false,
             slots: false,
             slot_names: Vec::new(),
         }

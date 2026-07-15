@@ -35,6 +35,7 @@ pub fn has_function(name: &str) -> bool {
             | "lru_cache"
             | "cache"
             | "_lru_wrap"
+            | "total_ordering"
     )
 }
 
@@ -171,6 +172,35 @@ pub async fn call(
                 ))
             })?;
             Ok(make_lru_cache(func, maxsize))
+        }
+        "total_ordering" => {
+            // Class decorator: flag the class so op::compare derives the
+            // missing ordering operators from the one it defines plus __eq__.
+            let Some(Value::Class(class_name)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "total_ordering() argument must be a class".into(),
+                )
+                .into());
+            };
+            let class = state.classes.get(class_name).ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError(format!(
+                    "total_ordering: unknown class '{class_name}'"
+                )))
+            })?;
+            // CPython requires __eq__ and at least one ordering root.
+            let has_root = ["__lt__", "__le__", "__gt__", "__ge__"]
+                .iter()
+                .any(|m| class.methods.contains_key(*m));
+            if !has_root {
+                return Err(InterpreterError::ValueError(
+                    "must define at least one ordering operation: < > <= >=".into(),
+                )
+                .into());
+            }
+            if let Some(class) = state.classes.get_mut(class_name) {
+                class.total_ordering = true;
+            }
+            Ok(Value::Class(class_name.clone()))
         }
         "cmp_to_key" => {
             // Returns a key= factory: key(obj) wraps obj for cmp-based sort.

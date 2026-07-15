@@ -523,6 +523,11 @@ pub async fn compare(
     if let Some(r) = dataclass_order_compare(state, op, left, right) {
         return Ok((r?, None, None));
     }
+    // `@functools.total_ordering` — derive the missing ordering operator from
+    // the one the class defines plus `__eq__`.
+    if let Some(r) = total_ordering_derive(state, op, left, right, tools).await? {
+        return Ok((r, None, None));
+    }
     // An ordering comparison involving a user-class instance that resolved no
     // ordering slot raises directly — CPython does NOT derive `<=`/`>=` from
     // `__lt__`/`__eq__` (only @total_ordering does), so falling through to the
@@ -606,6 +611,66 @@ fn dataclass_order_compare(
         _ => return None,
     };
     Some(Ok(result))
+}
+
+/// Derive a `@functools.total_ordering` ordering result. Returns `None` when
+/// `op` is not an ordering comparison or `left` is not a `total_ordering`
+/// instance; otherwise evaluates the ordering operator the class DOES define
+/// plus `__eq__`, and combines them per CPython's `functools` derivations.
+fn total_ordering_derive<'a>(
+    state: &'a mut InterpreterState,
+    op: rustpython_parser::ast::CmpOp,
+    left: &'a Value,
+    right: &'a Value,
+    tools: &'a Tools,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<bool>, EvalError>> + Send + 'a>>
+{
+    use rustpython_parser::ast::CmpOp;
+    Box::pin(async move {
+        if !matches!(op, CmpOp::Lt | CmpOp::LtE | CmpOp::Gt | CmpOp::GtE) {
+            return Ok(None);
+        }
+        let Value::Instance(inst) = left else { return Ok(None) };
+        let Some(class) = state.classes.get(&inst.class_name) else { return Ok(None) };
+        if !class.total_ordering {
+            return Ok(None);
+        }
+        // Pick the ordering root the class defines (in CPython's precedence).
+        let root = [
+            ("__lt__", CmpOp::Lt),
+            ("__le__", CmpOp::LtE),
+            ("__gt__", CmpOp::Gt),
+            ("__ge__", CmpOp::GtE),
+        ]
+        .into_iter()
+        .find(|(m, _)| class.methods.contains_key(*m));
+        let Some((_, root_op)) = root else { return Ok(None) };
+
+        // Evaluate the defined root and `==` through the normal slot dispatch
+        // (recursion terminates: both ops resolve a real slot, not this path).
+        let (r, _, _) = compare(state, root_op, left, right, tools).await?;
+        let (e, _, _) = compare(state, CmpOp::Eq, left, right, tools).await?;
+
+        // self OP other, expressed via r = (self root other) and e = (self == other).
+        let result = match (root_op, op) {
+            (CmpOp::Lt, CmpOp::LtE) => r || e,
+            (CmpOp::Lt, CmpOp::Gt) => !r && !e,
+            (CmpOp::Lt, CmpOp::GtE) => !r,
+            (CmpOp::LtE, CmpOp::Lt) => r && !e,
+            (CmpOp::LtE, CmpOp::Gt) => !r,
+            (CmpOp::LtE, CmpOp::GtE) => !r || e,
+            (CmpOp::Gt, CmpOp::Lt) => !r && !e,
+            (CmpOp::Gt, CmpOp::LtE) => !r,
+            (CmpOp::Gt, CmpOp::GtE) => r || e,
+            (CmpOp::GtE, CmpOp::Lt) => !r,
+            (CmpOp::GtE, CmpOp::LtE) => !r || e,
+            (CmpOp::GtE, CmpOp::Gt) => r && !e,
+            // Requested op equals the defined root — the direct slot should have
+            // handled it; fall through rather than derive.
+            _ => return Ok(None),
+        };
+        Ok(Some(result))
+    })
 }
 
 /// Async-aware `<` for sorted / min / max. Dispatches `__lt__` on a
