@@ -73,9 +73,12 @@ pub mod value;
 
 pub(crate) mod eval;
 pub(crate) mod parser;
-/// CPython-compatible hashing and set/frozenset iteration order. Public so the
-/// host bindings can render a set in the same order CPython would.
+/// CPython-compatible hashing and set/frozenset iteration order. `pub` only so
+/// the Node binding can order a set; reverts to `pub(crate)` in the set-table
+/// refactor once sets carry their order and the binding no longer reaches here.
 pub mod pyhash;
+/// CPython-faithful `set`/`frozenset` open-addressing table.
+pub(crate) mod pyset;
 pub(crate) mod security;
 pub(crate) mod serialize;
 pub(crate) mod state;

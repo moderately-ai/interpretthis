@@ -176,11 +176,38 @@ fn hash_tuple(element_hashes: &[i64]) -> i64 {
     if h == -1 { 1546275796 } else { h }
 }
 
+/// `hash(complex)` — `hash(real) + _PyHASH_IMAG * hash(imag)` (`complexobject.c`).
+fn hash_complex(re: f64, im: f64) -> i64 {
+    // _PyHASH_IMAG = 1000003.
+    let combined =
+        (hash_double(re) as u64).wrapping_add(1000003u64.wrapping_mul(hash_double(im) as u64));
+    if combined == u64::MAX { combined.wrapping_sub(1) as i64 } else { combined as i64 }
+}
+
+/// `_shuffle_bits` from `frozenset_hash` (`setobject.c`).
+fn shuffle_bits(h: u64) -> u64 {
+    ((h ^ 89869747u64) ^ (h << 16)).wrapping_mul(3644798167u64)
+}
+
+/// CPython's `frozenset_hash` (`setobject.c`) over already-computed element
+/// hashes — order-independent (XOR fold) plus a size mix and final avalanche.
+fn hash_frozenset(element_hashes: &[i64]) -> i64 {
+    let mut hash: u64 = 0;
+    for &h in element_hashes {
+        hash ^= shuffle_bits(h as u64);
+    }
+    hash ^= (element_hashes.len() as u64).wrapping_add(1).wrapping_mul(1927868237u64);
+    hash ^= (hash >> 11) ^ (hash >> 25);
+    hash = hash.wrapping_mul(69069u64).wrapping_add(907133923u64);
+    if hash == u64::MAX { 590923713 } else { hash as i64 }
+}
+
 /// CPython's `hash()` for the hashable value types that appear as set/dict
 /// elements. Returns `None` for values whose CPython hash is not reproducible
 /// here — instances with a user `__hash__` (address-influenced or async), and
-/// the numeric/temporal types not yet ported — so the caller can fall back to
-/// insertion order rather than emit a wrong order.
+/// the numeric/temporal types not yet ported (Decimal/Fraction/EnumMember/
+/// date-time) — so the caller can fall back to insertion order rather than emit
+/// a wrong order.
 #[must_use]
 pub fn python_hash(value: &Value) -> Option<i64> {
     match value {
@@ -189,6 +216,7 @@ pub fn python_hash(value: &Value) -> Option<i64> {
         Value::Int(n) => Some(hash_i64(*n)),
         Value::BigInt(n) => Some(hash_bigint(n)),
         Value::Float(f) => Some(hash_double(*f)),
+        Value::Complex(c) => Some(hash_complex(c.re, c.im)),
         Value::String(s) => Some(hash_bytes(&str_hash_buffer(s))),
         Value::Bytes(b) => Some(hash_bytes(b)),
         Value::Tuple(items) => {
@@ -197,6 +225,13 @@ pub fn python_hash(value: &Value) -> Option<i64> {
                 hashes.push(python_hash(item)?);
             }
             Some(hash_tuple(&hashes))
+        }
+        Value::Frozenset(items) => {
+            let mut hashes = Vec::with_capacity(items.len());
+            for item in items {
+                hashes.push(python_hash(item)?);
+            }
+            Some(hash_frozenset(&hashes))
         }
         _ => None,
     }
@@ -381,6 +416,26 @@ mod tests {
             python_hash(&Value::Tuple(vec![Value::Int(1), Value::Int(2)])),
             Some(-3550055125485641917)
         );
+    }
+
+    #[test]
+    fn complex_hashes_match_cpython() {
+        let cx = |re, im| Value::Complex(Box::new(num_complex::Complex64::new(re, im)));
+        assert_eq!(python_hash(&cx(3.0, 4.0)), Some(4000015));
+        // complex(2, 0) hashes like int/float 2 (equal in the numeric tower).
+        assert_eq!(python_hash(&cx(2.0, 0.0)), Some(2));
+    }
+
+    #[test]
+    fn frozenset_hashes_match_cpython() {
+        let fs =
+            |xs: &[i64]| Value::Frozenset(xs.iter().map(|&n| Value::Int(n)).collect::<Vec<_>>());
+        assert_eq!(python_hash(&fs(&[1, 2, 3])), Some(-272375401224217160));
+        assert_eq!(python_hash(&fs(&[])), Some(133146708735736));
+        // Order-independent: {1,2,3} and {3,2,1} hash identically.
+        assert_eq!(python_hash(&fs(&[3, 2, 1])), python_hash(&fs(&[1, 2, 3])));
+        let fss = Value::Frozenset(vec![Value::String("a".into()), Value::String("b".into())]);
+        assert_eq!(python_hash(&fss), Some(1679668661828516449));
     }
 
     #[test]
