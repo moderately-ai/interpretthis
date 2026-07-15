@@ -339,6 +339,13 @@ pub(crate) fn value_to_i64(val: &Value) -> Result<i64, EvalError> {
     match val {
         Value::Int(i) => Ok(*i),
         Value::Bool(b) => Ok(i64::from(*b)),
+        // IntEnum / IntFlag members interpret as their underlying int; a plain
+        // Enum / Flag is not an integer and falls through to the type error.
+        Value::EnumMember {
+            value,
+            kind: crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag,
+            ..
+        } => value_to_i64(value),
         Value::Float(_) => Err(InterpreterError::TypeError(
             "'float' object cannot be interpreted as an integer".into(),
         )

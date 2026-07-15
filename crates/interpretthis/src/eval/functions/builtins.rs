@@ -283,6 +283,34 @@ pub(super) async fn try_builtin(
                     Ok(Some(crate::value::int_from_bigint(int_val)))
                 }
                 Value::Fraction(fr) => Ok(Some(crate::value::int_from_bigint(fr.to_integer()))),
+                // IntEnum/IntFlag → underlying int; StrEnum → parse the underlying
+                // str. A plain Enum/Flag is not a number (CPython raises TypeError).
+                Value::EnumMember { value: inner, kind, .. } => match kind {
+                    crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag => {
+                        crate::value::value_as_bigint(inner)
+                            .map(crate::value::int_from_bigint)
+                            .map(Some)
+                            .ok_or_else(|| {
+                                InterpreterError::TypeError(
+                                    "int() argument must be a string or a number".into(),
+                                )
+                                .into()
+                            })
+                    }
+                    crate::value::EnumKind::Str => match &**inner {
+                        Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
+                        _ => Err(InterpreterError::TypeError(
+                            "int() argument must be a string or a number".into(),
+                        )
+                        .into()),
+                    },
+                    crate::value::EnumKind::Plain | crate::value::EnumKind::Flag => {
+                        Err(InterpreterError::TypeError(
+                            "int() argument must be a string or a number".into(),
+                        )
+                        .into())
+                    }
+                },
                 _ => Err(InterpreterError::TypeError(format!(
                     "int() argument must be a string or a number, not '{}'",
                     args[0].type_name()
@@ -848,6 +876,24 @@ pub(super) async fn try_builtin(
                 Value::Fraction(fr) => {
                     use num_traits::Signed as _;
                     Ok(Some(Value::Fraction(Box::new((**fr).abs()))))
+                }
+                // IntEnum / IntFlag members take abs on their underlying int; a
+                // plain Enum / Flag is not numeric (CPython raises TypeError).
+                Value::EnumMember {
+                    value: inner,
+                    kind: crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag,
+                    ..
+                } => {
+                    use num_traits::Signed as _;
+                    crate::value::value_as_bigint(inner)
+                        .map(|b| Some(crate::value::int_from_bigint(b.abs())))
+                        .ok_or_else(|| {
+                            InterpreterError::TypeError(format!(
+                                "bad operand type for abs(): '{}'",
+                                args[0].type_name()
+                            ))
+                            .into()
+                        })
                 }
                 _ => Err(InterpreterError::TypeError(format!(
                     "bad operand type for abs(): '{}'",

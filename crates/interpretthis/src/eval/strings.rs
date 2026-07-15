@@ -342,6 +342,21 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
         return Ok(Value::String(format!("{value}").into()));
     }
 
+    // IntEnum / IntFlag / StrEnum members format through their mixed-in int/str
+    // value (`f"{Priority.HIGH:d}"` == `"10"`), matching CPython where the data
+    // type's `__format__` handles the spec. A plain `Enum` has no mixed-in type
+    // and keeps the default rendering path below.
+    if let Value::EnumMember { value: inner, kind, .. } = value {
+        if matches!(
+            kind,
+            crate::value::EnumKind::Int
+                | crate::value::EnumKind::Str
+                | crate::value::EnumKind::IntFlag
+        ) {
+            return apply_format_spec(inner, spec);
+        }
+    }
+
     // A user-class instance reaching here has no `__format__` slot (the callers
     // dispatch that first) yet was given a non-empty spec. CPython's inherited
     // `object.__format__` rejects exactly this, naming the class:

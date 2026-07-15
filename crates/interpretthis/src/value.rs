@@ -132,6 +132,12 @@ pub fn value_as_bigint(v: &Value) -> Option<num_bigint::BigInt> {
         Value::Int(i) => Some(num_bigint::BigInt::from(*i)),
         Value::BigInt(b) => Some((**b).clone()),
         Value::Bool(b) => Some(num_bigint::BigInt::from(i64::from(*b))),
+        // An IntEnum / IntFlag member *is* an int (CPython mixes in `int`), so it
+        // participates in every integer context. A plain `Enum` / `Flag` is not
+        // an int, so it stays `None` (`int(Color.RED)` raises in CPython).
+        Value::EnumMember { value, kind: EnumKind::Int | EnumKind::IntFlag, .. } => {
+            value_as_bigint(value)
+        }
         _ => None,
     }
 }
@@ -2754,6 +2760,11 @@ impl Value {
             Self::Fraction(fr) => {
                 use num_traits::ToPrimitive as _;
                 fr.to_f64()
+            }
+            // IntEnum / IntFlag members convert as their underlying int
+            // (`float(Priority.LOW)`); a plain Enum / Flag is not numeric.
+            Self::EnumMember { value, kind: EnumKind::Int | EnumKind::IntFlag, .. } => {
+                value.as_float()
             }
             _ => None,
         }
