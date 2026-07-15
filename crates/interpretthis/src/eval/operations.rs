@@ -871,9 +871,10 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         }
         return Ok(Value::Dict(crate::value::shared_dict(result)));
     }
-    let l = to_int(left)?;
-    let r = to_int(right)?;
-    Ok(Value::Int(l | r))
+    if let (Value::Int(a), Value::Int(b)) = (left, right) {
+        return Ok(Value::Int(a | b));
+    }
+    Ok(crate::value::int_from_bigint(to_bigint(left)? | to_bigint(right)?))
 }
 
 fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
@@ -887,9 +888,10 @@ fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         }
         return Ok(wrap_set_like(left, result));
     }
-    let l = to_int(left)?;
-    let r = to_int(right)?;
-    Ok(Value::Int(l ^ r))
+    if let (Value::Int(a), Value::Int(b)) = (left, right) {
+        return Ok(Value::Int(a ^ b));
+    }
+    Ok(crate::value::int_from_bigint(to_bigint(left)? ^ to_bigint(right)?))
 }
 
 fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
@@ -903,9 +905,10 @@ fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         let result: Vec<Value> = a.iter().filter(|v| set_contains(b, v)).cloned().collect();
         return Ok(wrap_set_like(left, result));
     }
-    let l = to_int(left)?;
-    let r = to_int(right)?;
-    Ok(Value::Int(l & r))
+    if let (Value::Int(a), Value::Int(b)) = (left, right) {
+        return Ok(Value::Int(a & b));
+    }
+    Ok(crate::value::int_from_bigint(to_bigint(left)? & to_bigint(right)?))
 }
 
 /// Build the `Counter` for a unary `+`/`-`: keep counts that are strictly
