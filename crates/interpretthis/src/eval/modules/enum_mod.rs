@@ -24,25 +24,29 @@ pub fn has_function(name: &str) -> bool {
     matches!(name, "auto")
 }
 
-pub fn call(func: &str, args: &[Value]) -> EvalResult {
+/// The sentinel value `auto()` returns, replaced during enum class
+/// construction. Modelled as an otherwise-unused `ModuleFunction` handle so it
+/// is distinct from any real member value.
+#[must_use]
+pub fn auto_sentinel() -> Value {
+    Value::ModuleFunction { module: "enum".into(), name: "__auto__".into() }
+}
+
+/// Whether `value` is the [`auto_sentinel`].
+#[must_use]
+pub fn is_auto_sentinel(value: &Value) -> bool {
+    matches!(value, Value::ModuleFunction { module, name } if module == "enum" && name == "__auto__")
+}
+
+pub fn call(func: &str, _args: &[Value]) -> EvalResult {
     match func {
         "auto" => {
-            // auto() returns a sentinel that the class-body assignment
-            // turns into a sequential integer. CPython's auto() is
-            // stateful per-class; we expose it as Int(0) and let user
-            // code manually assign distinct values when the auto-
-            // numbering would be observable. For typical usage
-            // (Color.RED = auto(); Color.GREEN = auto() with the
-            // user expecting 1, 2) we approximate by returning
-            // a small sentinel that prints reasonably.
-            Ok(Value::Int(
-                args.first()
-                    .and_then(|v| match v {
-                        Value::Int(i) => Some(*i),
-                        _ => None,
-                    })
-                    .unwrap_or(1),
-            ))
+            // auto() returns a distinct sentinel that the enum class builder
+            // (`wrap_enum_member`) replaces with the next sequential value:
+            // highest previous value + 1 for int-valued enums, or the
+            // lowercased member name for a StrEnum (CPython semantics). The
+            // sentinel must be distinguishable from an explicit `= 1`.
+            Ok(auto_sentinel())
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'enum' has no attribute '{func}'"

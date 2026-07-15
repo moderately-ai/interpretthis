@@ -2272,6 +2272,10 @@ impl Value {
                 let inner = e.args.iter().map(Self::repr).collect::<Vec<_>>().join(", ");
                 format!("{name}({inner})")
             }
+            // CPython enum repr: `<Color.RED: 1>` (Display/str is `Color.RED`).
+            Self::EnumMember { class_name, member_name, value, .. } => {
+                format!("<{class_name}.{member_name}: {}>", value.repr())
+            }
             other => format!("{other}"),
         }
     }

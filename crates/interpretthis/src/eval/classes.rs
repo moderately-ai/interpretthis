@@ -166,6 +166,8 @@ pub async fn eval_class_def(
     let mut annotations: Vec<String> = Vec::new();
     // Enum member names in declaration order, for order-preserving iteration.
     let mut enum_members: Vec<String> = Vec::new();
+    // Next value an `auto()` member resolves to (see `wrap_enum_member`).
+    let mut enum_auto_next: i64 = 1;
 
     // PEP 3115: Meta.__prepare__(name, bases) may supply the initial namespace.
     if let Some(ref meta) = metaclass_name {
@@ -229,7 +231,14 @@ pub async fn eval_class_def(
                     // tuple/list unpacking (`X, Y = 1, 2`) both land as class attrs.
                     let value = eval_expr(state, &assign.value, tools).await?;
                     for target in &assign.targets {
-                        bind_class_target(target, &value, enum_kind, class_name, &mut class_attrs)?;
+                        bind_class_target(
+                            target,
+                            &value,
+                            enum_kind,
+                            class_name,
+                            &mut class_attrs,
+                            &mut enum_auto_next,
+                        )?;
                         // Record enum member declaration order (simple-name
                         // targets that wrap into a member).
                         if enum_kind.is_some() {
@@ -254,8 +263,13 @@ pub async fn eval_class_def(
                         }
                         if let Some(value_expr) = &ann.value {
                             let value = eval_expr(state, value_expr, tools).await?;
-                            let wrapped =
-                                wrap_enum_member(enum_kind, class_name, &attr_name, value);
+                            let wrapped = wrap_enum_member(
+                                enum_kind,
+                                class_name,
+                                &attr_name,
+                                value,
+                                &mut enum_auto_next,
+                            );
                             class_attrs.insert(attr_name, wrapped);
                         }
                     }
@@ -285,7 +299,8 @@ pub async fn eval_class_def(
                 }
             }
             for (name, value) in changed {
-                let wrapped = wrap_enum_member(enum_kind, class_name, &name, value);
+                let wrapped =
+                    wrap_enum_member(enum_kind, class_name, &name, value, &mut enum_auto_next);
                 class_attrs.insert(name, wrapped);
             }
         }
@@ -690,16 +705,21 @@ fn bind_class_target(
     enum_kind: Option<crate::value::EnumKind>,
     class_name: &str,
     class_attrs: &mut BTreeMap<String, Value>,
+    auto_next: &mut i64,
 ) -> Result<(), EvalError> {
     match target {
         Expr::Name(name) => {
             let attr = name.id.as_str().to_string();
-            let wrapped = wrap_enum_member(enum_kind, class_name, &attr, value.clone());
+            let wrapped = wrap_enum_member(enum_kind, class_name, &attr, value.clone(), auto_next);
             class_attrs.insert(attr, wrapped);
             Ok(())
         }
-        Expr::Tuple(t) => unpack_class_targets(&t.elts, value, enum_kind, class_name, class_attrs),
-        Expr::List(l) => unpack_class_targets(&l.elts, value, enum_kind, class_name, class_attrs),
+        Expr::Tuple(t) => {
+            unpack_class_targets(&t.elts, value, enum_kind, class_name, class_attrs, auto_next)
+        }
+        Expr::List(l) => {
+            unpack_class_targets(&l.elts, value, enum_kind, class_name, class_attrs, auto_next)
+        }
         // Attribute / subscript / starred class-body targets are unusual and
         // left unmodelled (as before).
         _ => Ok(()),
@@ -714,6 +734,7 @@ fn unpack_class_targets(
     enum_kind: Option<crate::value::EnumKind>,
     class_name: &str,
     class_attrs: &mut BTreeMap<String, Value>,
+    auto_next: &mut i64,
 ) -> Result<(), EvalError> {
     let items: Vec<Value> = match value {
         Value::Tuple(items) => items.clone(),
@@ -736,7 +757,7 @@ fn unpack_class_targets(
         .into());
     }
     for (elt, item) in elts.iter().zip(items) {
-        bind_class_target(elt, &item, enum_kind, class_name, class_attrs)?;
+        bind_class_target(elt, &item, enum_kind, class_name, class_attrs, auto_next)?;
     }
     Ok(())
 }
@@ -746,6 +767,7 @@ fn wrap_enum_member(
     class_name: &str,
     member_name: &str,
     value: Value,
+    auto_next: &mut i64,
 ) -> Value {
     let Some(kind) = enum_kind else { return value };
     // Don't wrap methods / lambdas — they're enum methods.
@@ -757,6 +779,23 @@ fn wrap_enum_member(
     if matches!(value, Value::EnumMember { .. }) || member_name.starts_with('_') {
         return value;
     }
+    // Resolve `auto()`: StrEnum yields the lowercased member name, otherwise the
+    // next sequential integer. An explicit int advances the auto counter past
+    // itself so a following `auto()` continues from there (CPython semantics).
+    let value = if crate::eval::modules::enum_mod::is_auto_sentinel(&value) {
+        if matches!(kind, crate::value::EnumKind::Str) {
+            Value::String(member_name.to_lowercase().into())
+        } else {
+            let n = *auto_next;
+            *auto_next = n + 1;
+            Value::Int(n)
+        }
+    } else {
+        if let Value::Int(i) = &value {
+            *auto_next = (*auto_next).max(i.saturating_add(1));
+        }
+        value
+    };
     Value::EnumMember {
         class_name: class_name.to_string(),
         member_name: member_name.to_string(),

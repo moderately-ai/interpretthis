@@ -459,6 +459,26 @@ pub async fn eval_call(
                 .await?;
                 return Ok(returned);
             }
+            // Enum member method call: a method defined in the enum class body
+            // (`Color.RED.describe()`) dispatches with the member bound as
+            // `self`. Falls through to the builtin enum attributes below when
+            // the class defines no such method.
+            if let Value::EnumMember { class_name, .. } = &temp {
+                if let Some((_, method)) =
+                    crate::eval::classes::lookup_method_in_mro(state, class_name, method_name)
+                {
+                    let call = CallArgs { positional: &resolved_args, keyword: &kwargs };
+                    let (returned, _self) = crate::eval::classes::call_method(
+                        state,
+                        &method,
+                        temp.clone(),
+                        call,
+                        tools,
+                    )
+                    .await?;
+                    return Ok(returned);
+                }
+            }
             // super().method(...): walk the MRO starting at the slot
             // AFTER defining_class. The receiver passed to the method
             // is the original instance, not the Super proxy — matches

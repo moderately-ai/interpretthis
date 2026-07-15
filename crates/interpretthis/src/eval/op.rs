@@ -98,6 +98,20 @@ pub async fn getitem(
             }
         };
     }
+    // `Color["RED"]` — an enum class is subscriptable by member name (CPython's
+    // `EnumMeta.__getitem__`), raising KeyError for an unknown name.
+    if let (Value::Class(class_name), Value::String(member)) = (container, index) {
+        if let Some(class) = state.classes.get(class_name) {
+            if class.enum_kind.is_some() {
+                return class.class_attrs.get(member.as_str()).cloned().ok_or_else(|| {
+                    EvalError::Exception(crate::value::ExceptionValue::new(
+                        "KeyError",
+                        format!("'{member}'"),
+                    ))
+                });
+            }
+        }
+    }
     crate::types::dispatch_getitem(container, index)
 }
 
