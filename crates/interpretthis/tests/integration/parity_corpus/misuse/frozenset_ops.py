@@ -1,0 +1,16 @@
+fs = frozenset([1, 2, 3])
+print(sorted(fs.union([4, 5])))
+print(sorted(fs.intersection([2, 3, 4])))
+print(sorted(fs.difference([1])))
+print(sorted(fs.symmetric_difference([3, 4])))
+print(fs.issubset(frozenset([1, 2, 3, 4])))
+print(fs.issuperset(frozenset([1, 2])))
+print(fs.isdisjoint(frozenset([7, 8])))
+print(2 in fs)
+print(len(fs))
+d = {fs: "value"}
+print(d[frozenset([3, 2, 1])])
+print(frozenset() == frozenset([]))
+print(sorted(frozenset([1, 2]) | frozenset([2, 3])))
+combined = {frozenset([1]): "a", frozenset([2]): "b"}
+print(len(combined))

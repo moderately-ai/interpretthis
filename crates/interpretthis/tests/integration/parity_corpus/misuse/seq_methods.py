@@ -1,0 +1,20 @@
+lst = [1, 2, 3, 2, 1]
+print(lst.index(2))
+print(lst.index(2, 2))
+print(lst.count(1))
+print((1, 2, 3, 2).index(2, 2))
+print("abcabc".index("b", 2))
+print("abcabc".rindex("b"))
+try:
+    [1, 2].index(5)
+except ValueError as e:
+    print("ValueError")
+print([1, 2, 3][-1])
+print((1, 2, 3)[-2])
+print("hello"[-1])
+print([1, 2, 3, 4, 5][1:4])
+t = (1, 2, 3)
+print(t + (4, 5))
+print(t * 2)
+print(3 in t)
+print(len("héllo"))

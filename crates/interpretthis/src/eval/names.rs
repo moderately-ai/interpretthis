@@ -308,6 +308,11 @@ pub(crate) async fn getattr_on_value(
     // would fall into the dispatch_getattr_opt below — but BuiltinName
     // has no get-attr slot, so the lookup would error.
     if let Value::BuiltinName(type_name) = &obj {
+        // `float.__name__` / `int.__qualname__` are the bare type name, not an
+        // unbound method descriptor.
+        if attr_name == "__name__" || attr_name == "__qualname__" {
+            return Ok(Value::String(type_name.as_str().into()));
+        }
         return Ok(Value::BuiltinTypeMethod {
             type_name: type_name.clone(),
             method: attr_name.to_string(),

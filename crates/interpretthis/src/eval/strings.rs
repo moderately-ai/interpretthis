@@ -407,17 +407,20 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
             )
         }
         '=' => {
-            // Padding between sign and digits
+            // Sign-aware padding goes AFTER any sign and AFTER a radix prefix,
+            // so `{:#010x}` of 255 is "0x000000ff", not "0000000xff".
             let padding = width - display_width;
-            if with_sign.starts_with('-')
-                || with_sign.starts_with('+')
-                || with_sign.starts_with(' ')
-            {
-                let (s, rest) = with_sign.split_at(1);
-                format!("{s}{}{rest}", fill_char.to_string().repeat(padding))
-            } else {
-                format!("{}{with_sign}", fill_char.to_string().repeat(padding))
+            let mut head = 0;
+            if matches!(with_sign.as_bytes().first(), Some(b'-' | b'+' | b' ')) {
+                head = 1;
             }
+            if let Some(after) = with_sign.get(head..head + 2) {
+                if matches!(after, "0x" | "0X" | "0o" | "0O" | "0b" | "0B") {
+                    head += 2;
+                }
+            }
+            let (prefix, rest) = with_sign.split_at(head);
+            format!("{prefix}{}{rest}", fill_char.to_string().repeat(padding))
         }
         _ => with_sign,
     };
