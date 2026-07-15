@@ -109,6 +109,29 @@ pub fn render<'a>(
                 if let Some(fields) = class.dataclass_fields.clone() {
                     return Ok(render_dataclass(state, &inst.class_name, inst, &fields));
                 }
+                // A `collections.namedtuple` reprs as `Name(field=value, …)`.
+                if let Some(Value::Tuple(field_names)) = class.class_attrs.get("_fields") {
+                    let names: Vec<String> = field_names
+                        .iter()
+                        .filter_map(|n| match n {
+                            Value::String(s) => Some(s.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut out = format!("{}(", inst.class_name);
+                    for (i, name) in names.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        let field_val =
+                            inst.fields.lock().get(name.as_str()).cloned().unwrap_or(Value::None);
+                        out.push_str(name);
+                        out.push('=');
+                        out.push_str(&render(state, &field_val, RenderMode::Repr, tools).await?);
+                    }
+                    out.push(')');
+                    return Ok(out);
+                }
             }
             return Ok(format!("<{} object>", inst.class_name));
         }

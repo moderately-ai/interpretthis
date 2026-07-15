@@ -458,6 +458,101 @@ pub(crate) fn call_namedtuple_with_state(
         },
     );
 
+    // Synthesize `_make` (staticmethod) and `_replace` (method) as thin
+    // wrappers over the constructor:
+    //   _make(iterable)  -> ClassName(*iterable)
+    //   _replace(self, **kwargs) -> ClassName(**{**self._asdict(), **kwargs})
+    use rustpython_parser::ast::{ExprCall, ExprStarred, Keyword};
+    let name_expr = |id: &str| {
+        Expr::Name(ExprName {
+            id: ast_::Identifier::new(id),
+            ctx: ExprContext::Load,
+            range: TextRange::default(),
+        })
+    };
+    // FunctionDef builder shared by the two synthesized wrappers.
+    let mk_def = |key: String, params: FunctionParams| FunctionDef {
+        name: key,
+        wraps_name: None,
+        params,
+        closure: BTreeMap::new(),
+        source: String::new(),
+        nonlocal_names: Vec::new(),
+        is_generator: false,
+        nonlocal_cell_id: None,
+        assigned_names: Vec::new(),
+        global_names: Vec::new(),
+        is_module_level: false,
+    };
+    let no_defaults = |args: Vec<Param>, kwarg: Option<String>| FunctionParams {
+        args,
+        defaults: Vec::new(),
+        default_values: Vec::new(),
+        vararg: None,
+        kwonlyargs: Vec::new(),
+        kw_defaults: Vec::new(),
+        kw_default_values: Vec::new(),
+        kwarg,
+    };
+
+    let make_body = vec![Stmt::Return(StmtReturn {
+        value: Some(Box::new(Expr::Call(ExprCall {
+            func: Box::new(name_expr(&class_name)),
+            args: vec![Expr::Starred(ExprStarred {
+                value: Box::new(name_expr("iterable")),
+                ctx: ExprContext::Load,
+                range: TextRange::default(),
+            })],
+            keywords: vec![],
+            range: TextRange::default(),
+        }))),
+        range: TextRange::default(),
+    })];
+    let make_key = format!("{class_name}._make");
+    state.function_bodies.insert(make_key.clone(), std::sync::Arc::new(make_body));
+    let mut static_methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
+    static_methods.insert(
+        "_make".to_string(),
+        mk_def(make_key, no_defaults(vec![Param { name: "iterable".to_string() }], None)),
+    );
+
+    let merged_dict = Expr::Dict(ExprDict {
+        keys: vec![None, None],
+        values: vec![
+            Expr::Call(ExprCall {
+                func: Box::new(Expr::Attribute(ExprAttribute {
+                    value: Box::new(name_expr("self")),
+                    attr: ast_::Identifier::new("_asdict"),
+                    ctx: ExprContext::Load,
+                    range: TextRange::default(),
+                })),
+                args: vec![],
+                keywords: vec![],
+                range: TextRange::default(),
+            }),
+            name_expr("kwargs"),
+        ],
+        range: TextRange::default(),
+    });
+    let replace_body = vec![Stmt::Return(StmtReturn {
+        value: Some(Box::new(Expr::Call(ExprCall {
+            func: Box::new(name_expr(&class_name)),
+            args: vec![],
+            keywords: vec![Keyword { arg: None, value: merged_dict, range: TextRange::default() }],
+            range: TextRange::default(),
+        }))),
+        range: TextRange::default(),
+    })];
+    let replace_key = format!("{class_name}._replace");
+    state.function_bodies.insert(replace_key.clone(), std::sync::Arc::new(replace_body));
+    methods.insert(
+        "_replace".to_string(),
+        mk_def(
+            replace_key,
+            no_defaults(vec![Param { name: "self".to_string() }], Some("kwargs".to_string())),
+        ),
+    );
+
     // Class attributes: _fields tuple, __match_args__ tuple (so PEP
     // 634 class patterns work on namedtuple instances).
     let mut class_attrs: BTreeMap<String, Value> = BTreeMap::new();
@@ -469,6 +564,7 @@ pub(crate) fn call_namedtuple_with_state(
     state.classes.insert(class_name_str.clone(), {
         let mut cv = ClassValue::new(class_name_str.clone());
         cv.methods = methods;
+        cv.static_methods = static_methods;
         cv.class_attrs = class_attrs;
         cv
     });

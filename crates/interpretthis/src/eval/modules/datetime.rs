@@ -33,6 +33,8 @@ pub fn has_function(name: &str) -> bool {
 pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
     match (type_name, method) {
         ("datetime", "strptime") => Some("strptime"),
+        ("date", "fromisoformat") => Some("date.fromisoformat"),
+        ("datetime", "fromisoformat") => Some("datetime.fromisoformat"),
         _ => None,
     }
 }
@@ -187,6 +189,30 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
             let fmt = arg_str("strptime", args, 1)?;
             parse_strptime(s, fmt)
         }
+        "date.fromisoformat" => {
+            let s = arg_str("fromisoformat", args, 0)?;
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").map(Value::Date).map_err(|_| {
+                EvalError::from(InterpreterError::ValueError(format!(
+                    "Invalid isoformat string: '{s}'"
+                )))
+            })
+        }
+        "datetime.fromisoformat" => {
+            let s = arg_str("fromisoformat", args, 0)?;
+            // Accept the common "T"/" "-separated forms, with or without seconds.
+            let parsed = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
+                .or_else(|_| {
+                    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                        .map(|d| d.and_hms_opt(0, 0, 0).unwrap_or_default())
+                });
+            parsed.map(|dt| Value::DateTime { dt, tz_offset_secs: None }).map_err(|_| {
+                EvalError::from(InterpreterError::ValueError(format!(
+                    "Invalid isoformat string: '{s}'"
+                )))
+            })
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'datetime' has no attribute '{func}'"
         ))
@@ -303,6 +329,8 @@ pub fn dispatch_date_method(
         "weekday" => Ok(Value::Int(i64::from(date.weekday().num_days_from_monday()))),
         // Python: Monday == 1 … Sunday == 7.
         "isoweekday" => Ok(Value::Int(i64::from(date.weekday().number_from_monday()))),
+        // Proleptic Gregorian ordinal — day 1 is 0001-01-01, matching CPython.
+        "toordinal" => Ok(Value::Int(i64::from(date.num_days_from_ce()))),
         "strftime" => {
             let fmt = arg_str("strftime", args, 0)?;
             Ok(Value::String(date.format(fmt).to_string().into()))

@@ -495,6 +495,28 @@ pub fn dispatch_hash(state: &InterpreterState, value: &Value) -> Result<i64, Eva
 /// type's slot; on a second `NotImplemented` returns `Ok(false)` per
 /// CPython's "objects of different types compare unequal" default. User-
 /// class instances route through their `__eq__` method if defined.
+/// The field values of a `collections.namedtuple` instance in declaration
+/// order, or `None` if `inst`'s class is not a namedtuple (no `_fields`).
+fn namedtuple_field_values(
+    state: &InterpreterState,
+    inst: &crate::value::InstanceValue,
+) -> Option<Vec<Value>> {
+    let class = state.classes.get(&inst.class_name)?;
+    let Value::Tuple(field_names) = class.class_attrs.get("_fields")? else {
+        return None;
+    };
+    let fields = inst.fields.lock();
+    Some(
+        field_names
+            .iter()
+            .map(|name| match name {
+                Value::String(n) => fields.get(n.as_str()).cloned().unwrap_or(Value::None),
+                _ => Value::None,
+            })
+            .collect(),
+    )
+}
+
 pub fn dispatch_eq(state: &InterpreterState, lhs: &Value, rhs: &Value) -> EvalResult {
     // User-class instance eq: look up `__eq__` on the class registry, fall
     // back to identity comparison if undefined. Direct shortcut here so we
@@ -533,6 +555,28 @@ pub fn dispatch_eq(state: &InterpreterState, lhs: &Value, rhs: &Value) -> EvalRe
                     }
                 }
             }
+        }
+        // A `collections.namedtuple` subclasses `tuple`, so it compares by
+        // value: its field tuple equals another namedtuple's (or a plain
+        // tuple's) elements. Detected by the `_fields` class attribute.
+        if let Some(lhs_fields) = namedtuple_field_values(state, inst) {
+            let rhs_elems = match rhs {
+                Value::Tuple(items) => Some(items.clone()),
+                Value::Instance(other) => namedtuple_field_values(state, other),
+                _ => None,
+            };
+            if let Some(rhs_elems) = rhs_elems {
+                if lhs_fields.len() != rhs_elems.len() {
+                    return Ok(Value::Bool(false));
+                }
+                for (a, b) in lhs_fields.iter().zip(&rhs_elems) {
+                    if !matches!(dispatch_eq(state, a, b)?, Value::Bool(true)) {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                return Ok(Value::Bool(true));
+            }
+            return Ok(Value::Bool(false));
         }
         // User-defined `__eq__` is dispatched at the async eval-layer
         // entry (`eval_compare`), not here. Sync `dispatch_eq` is
