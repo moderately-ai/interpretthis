@@ -391,6 +391,28 @@ pub fn dispatch_binop(
     if let Some(result) = (rhs_type.arith_slot)(op, lhs, rhs, decimal_prec) {
         return result;
     }
+    // CPython gives a sequence-specific message when the left operand is a
+    // sequence being concatenated with a non-matching type, rather than the
+    // generic "unsupported operand type(s)".
+    if matches!(op, BinOp::Add) {
+        match lhs {
+            Value::String(_) | Value::List(_) | Value::Tuple(_) => {
+                return Err(InterpreterError::TypeError(format!(
+                    "can only concatenate {0} (not \"{1}\") to {0}",
+                    lhs_type.name, rhs_type.name,
+                ))
+                .into());
+            }
+            Value::Bytes(_) | Value::ByteArray(_) => {
+                return Err(InterpreterError::TypeError(format!(
+                    "can't concat {} to {}",
+                    rhs_type.name, lhs_type.name,
+                ))
+                .into());
+            }
+            _ => {}
+        }
+    }
     Err(InterpreterError::TypeError(format!(
         "unsupported operand type(s) for {}: '{}' and '{}'",
         op.symbol(),

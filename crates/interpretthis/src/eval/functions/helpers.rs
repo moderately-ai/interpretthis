@@ -671,7 +671,10 @@ pub(super) fn parse_int_str(raw: &str, base: i64) -> Result<Value, EvalError> {
     let invalid = || {
         EvalError::Exception(ExceptionValue::new(
             "ValueError",
-            format!("invalid literal for int() with base {base}: {raw:?}"),
+            format!(
+                "invalid literal for int() with base {base}: {}",
+                crate::value::python_str_repr(raw)
+            ),
         ))
     };
 
