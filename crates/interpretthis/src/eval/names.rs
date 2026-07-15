@@ -498,6 +498,56 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                 Err(attribute_error("function", attr_name))
             }
         }
+        // A bound method (`obj.method` captured as a value) exposes CPython's
+        // `builtin_function_or_method` introspection: `__self__` (the receiver),
+        // `__name__` (the method), and `__qualname__` (`<type>.<method>`).
+        // `__func__`/`__doc__` have no reproducible builtin form here, so they
+        // stay AttributeError.
+        Value::BoundMethod { receiver, method } => match attr_name {
+            "__name__" => Ok(Value::String(method.clone().into())),
+            "__self__" | "__qualname__" => {
+                let self_value = match receiver {
+                    crate::value::BoundMethodReceiver::Snapshot(v) => (**v).clone(),
+                    crate::value::BoundMethodReceiver::Place { root, steps } => {
+                        let mut root_clone = state
+                            .variables
+                            .get(root)
+                            .ok_or_else(|| {
+                                EvalError::from(InterpreterError::name_not_defined(root))
+                            })?
+                            .clone();
+                        let pl_steps: Vec<crate::eval::place::PlaceStep> = steps
+                            .iter()
+                            .map(|s| match s {
+                                crate::value::BoundMethodStep::Index(v) => {
+                                    crate::eval::place::PlaceStep::Index(v.clone())
+                                }
+                                crate::value::BoundMethodStep::Attr(n) => {
+                                    crate::eval::place::PlaceStep::Attr(n.clone())
+                                }
+                            })
+                            .collect();
+                        crate::eval::place::with_navigate_mut(&mut root_clone, &pl_steps, |t| {
+                            t.clone()
+                        })?
+                    }
+                };
+                if attr_name == "__self__" {
+                    Ok(self_value)
+                } else {
+                    Ok(Value::String(format!("{}.{method}", self_value.python_type_name()).into()))
+                }
+            }
+            _ => Err(attribute_error("builtin_function_or_method", attr_name)),
+        },
+        // An unbound builtin-type method (`str.upper`) is a method descriptor:
+        // `__name__` is the method, `__qualname__` is `<type>.<method>`; it has
+        // no `__self__`.
+        Value::BuiltinTypeMethod { type_name, method } => match attr_name {
+            "__name__" => Ok(Value::String(method.clone().into())),
+            "__qualname__" => Ok(Value::String(format!("{type_name}.{method}").into())),
+            _ => Err(attribute_error("method_descriptor", attr_name)),
+        },
         Value::Module(module) => crate::eval::modules::module_member(module, attr_name),
         Value::Slice(slice) => match attr_name {
             "start" => Ok(slice.start.clone()),
