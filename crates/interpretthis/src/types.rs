@@ -1046,7 +1046,7 @@ static RANGE_TYPE: TypeObject = TypeObject {
     del_item_slot: None,
     missing_slot: None,
     len_slot: Some(range_len),
-    get_attr_slot: Some(noattr_get_attr),
+    get_attr_slot: Some(range_get_attr),
     set_attr_slot: None,
     has_methods_table: false,
 };
@@ -3051,6 +3051,19 @@ fn bytes_get_attr(value: &Value, name: &str) -> EvalResult {
 
 const MEMORYVIEW_METHODS: &[&str] = &["tobytes", "tolist", "hex"];
 
+/// Callable (non-attribute) methods of `int`/`bool`, so `(5).bit_length` and
+/// `hasattr(5, "to_bytes")` bind like CPython. The value attributes
+/// (`real`/`imag`/`numerator`/`denominator`) are handled separately.
+const INT_METHODS: &[&str] =
+    &["bit_length", "bit_count", "to_bytes", "from_bytes", "as_integer_ratio", "conjugate"];
+
+/// Callable methods of `float` (the `real`/`imag` value attributes aside).
+const FLOAT_METHODS: &[&str] = &["is_integer", "as_integer_ratio", "hex", "fromhex", "conjugate"];
+
+const COMPLEX_METHODS: &[&str] = &["conjugate"];
+
+const RANGE_METHODS: &[&str] = &["count", "index"];
+
 fn memoryview_get_attr(value: &Value, name: &str) -> EvalResult {
     if MEMORYVIEW_METHODS.contains(&name) {
         return Ok(bound_method(value, name));
@@ -3271,6 +3284,7 @@ fn int_get_attr(value: &Value, name: &str) -> EvalResult {
         "real" | "numerator" => Ok(value.clone()),
         "imag" => Ok(Value::Int(0)),
         "denominator" => Ok(Value::Int(1)),
+        _ if INT_METHODS.contains(&name) => Ok(bound_method(value, name)),
         _ => Err(attribute_error("int", name)),
     }
 }
@@ -3284,15 +3298,18 @@ fn bool_get_attr(value: &Value, name: &str) -> EvalResult {
         "real" | "numerator" => Ok(Value::Int(n)),
         "imag" => Ok(Value::Int(0)),
         "denominator" => Ok(Value::Int(1)),
+        // bool is an int subclass, so it exposes int's methods too.
+        _ if INT_METHODS.contains(&name) => Ok(bound_method(value, name)),
         _ => Err(attribute_error("bool", name)),
     }
 }
 
-/// `float.real` (itself) / `.imag` (`0.0`).
+/// `float.real` (itself) / `.imag` (`0.0`), plus float's callable methods.
 fn float_get_attr(value: &Value, name: &str) -> EvalResult {
     match name {
         "real" => Ok(value.clone()),
         "imag" => Ok(Value::Float(0.0)),
+        _ if FLOAT_METHODS.contains(&name) => Ok(bound_method(value, name)),
         _ => Err(attribute_error("float", name)),
     }
 }
@@ -3304,7 +3321,23 @@ fn complex_get_attr(value: &Value, name: &str) -> EvalResult {
     match name {
         "real" => Ok(Value::Float(c.re)),
         "imag" => Ok(Value::Float(c.im)),
+        _ if COMPLEX_METHODS.contains(&name) => Ok(bound_method(value, name)),
         _ => Err(attribute_error("complex", name)),
+    }
+}
+
+/// `range.start`/`.stop`/`.step` value attributes plus its `count`/`index`
+/// methods (CPython exposes all five).
+fn range_get_attr(value: &Value, name: &str) -> EvalResult {
+    let Value::Range { start, stop, step } = value else {
+        unreachable!("range_get_attr sees only Range")
+    };
+    match name {
+        "start" => Ok(Value::Int(*start)),
+        "stop" => Ok(Value::Int(*stop)),
+        "step" => Ok(Value::Int(*step)),
+        _ if RANGE_METHODS.contains(&name) => Ok(bound_method(value, name)),
+        _ => Err(attribute_error("range", name)),
     }
 }
 
