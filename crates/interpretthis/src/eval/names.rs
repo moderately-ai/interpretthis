@@ -779,20 +779,28 @@ async fn eval_subscript_slice(
     slice_node: &ast::ExprSlice,
     tools: &Tools,
 ) -> EvalResult {
-    let lower = if let Some(ref expr) = slice_node.lower {
-        Some(eval_expr(state, expr, tools).await?)
-    } else {
-        None
+    // A slice bound may be any object with `__index__` (CPython's
+    // `operator.index`); resolve those to ints before applying the slice.
+    let lower = match &slice_node.lower {
+        Some(expr) => {
+            let v = eval_expr(state, expr, tools).await?;
+            Some(crate::eval::op::coerce_index(state, v, tools).await?)
+        }
+        None => None,
     };
-    let upper = if let Some(ref expr) = slice_node.upper {
-        Some(eval_expr(state, expr, tools).await?)
-    } else {
-        None
+    let upper = match &slice_node.upper {
+        Some(expr) => {
+            let v = eval_expr(state, expr, tools).await?;
+            Some(crate::eval::op::coerce_index(state, v, tools).await?)
+        }
+        None => None,
     };
-    let step_expr = if let Some(ref expr) = slice_node.step {
-        Some(eval_expr(state, expr, tools).await?)
-    } else {
-        None
+    let step_expr = match &slice_node.step {
+        Some(expr) => {
+            let v = eval_expr(state, expr, tools).await?;
+            Some(crate::eval::op::coerce_index(state, v, tools).await?)
+        }
+        None => None,
     };
 
     apply_value_slice(obj, lower.as_ref(), upper.as_ref(), step_expr.as_ref())

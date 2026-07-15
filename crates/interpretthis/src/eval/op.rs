@@ -125,7 +125,51 @@ pub async fn getitem(
             }
         }
     }
+    // Indexing a sequence with an object that defines `__index__` (CPython's
+    // `operator.index`) — e.g. `[10, 20][obj]`. Resolve it to an int, then
+    // dispatch normally. Non-sequences (dict/counter) key on the object itself.
+    if matches!(index, Value::Instance(_))
+        && matches!(
+            container,
+            Value::List(_)
+                | Value::Tuple(_)
+                | Value::String(_)
+                | Value::Bytes(_)
+                | Value::ByteArray(_)
+                | Value::Range { .. }
+        )
+    {
+        let coerced = coerce_index(state, index.clone(), tools).await?;
+        if !matches!(coerced, Value::Instance(_)) {
+            return crate::types::dispatch_getitem(container, &coerced);
+        }
+    }
     crate::types::dispatch_getitem(container, index)
+}
+
+/// Resolve any `__index__`-defining instance to the integer it returns
+/// (CPython's `operator.index`), leaving every other value — including an
+/// instance without `__index__` — unchanged. Used wherever a sequence index or
+/// slice bound accepts an arbitrary `__index__` object.
+pub async fn coerce_index(
+    state: &mut InterpreterState,
+    val: Value,
+    tools: &Tools,
+) -> Result<Value, EvalError> {
+    if matches!(val, Value::Instance(_)) {
+        if let Some(resolved) = instance_unary_dunder(state, &val, "__index__", tools).await {
+            let idx = resolved?;
+            return match idx {
+                Value::Int(_) | Value::Bool(_) => Ok(idx),
+                other => Err(InterpreterError::TypeError(format!(
+                    "__index__ returned non-int (type {})",
+                    other.type_name()
+                ))
+                .into()),
+            };
+        }
+    }
+    Ok(val)
 }
 
 /// `container[key] = value` for a user-class instance: dispatches
