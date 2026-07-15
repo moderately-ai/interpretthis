@@ -819,8 +819,88 @@ fn try_builtin_dunder(
                 _ => Ok(None),
             }
         }
+        // Binary arithmetic / bitwise dunders on builtins (`(10).__add__(5)`,
+        // `(100).__divmod__(7)`). Routed through the shared sync binop with
+        // default context (prec 28, 1 Mibit) — the only divergence is a Decimal
+        // op made through an explicit dunder while a non-default getcontext()
+        // precision is active, which is vanishingly rare. Instances keep their
+        // own user-defined dunders (handled before this shim is reached).
+        _ if !matches!(obj, Value::Instance(_) | Value::Class(_)) => {
+            let Some((op, reflected)) = arith_dunder_op(method) else {
+                return Ok(None);
+            };
+            let Some(other) = args.first() else {
+                return Ok(None);
+            };
+            let (lhs, rhs) = if reflected { (other, obj) } else { (obj, other) };
+            if method == "__divmod__" || method == "__rdivmod__" {
+                let q = crate::eval::operations::apply_binop(
+                    lhs,
+                    rhs,
+                    rustpython_parser::ast::Operator::FloorDiv,
+                    28,
+                    1_048_576,
+                )?;
+                let r = crate::eval::operations::apply_binop(
+                    lhs,
+                    rhs,
+                    rustpython_parser::ast::Operator::Mod,
+                    28,
+                    1_048_576,
+                )?;
+                return pure(Value::Tuple(vec![q, r]));
+            }
+            match crate::eval::operations::apply_binop(lhs, rhs, op, 28, 1_048_576) {
+                Ok(v) => pure(v),
+                // A type mismatch means this dunder doesn't apply to the pair;
+                // fall through to AttributeError rather than surfacing it.
+                Err(_) => Ok(None),
+            }
+        }
         _ => Ok(None),
     }
+}
+
+/// Map a binary arithmetic/bitwise dunder name to its operator and whether it
+/// is the reflected form (operands swapped). `__divmod__`/`__rdivmod__` return a
+/// placeholder operator (`Add`) — the caller special-cases them.
+fn arith_dunder_op(method: &str) -> Option<(rustpython_parser::ast::Operator, bool)> {
+    use rustpython_parser::ast::Operator::{
+        Add, BitAnd, BitOr, BitXor, Div, FloorDiv, LShift, MatMult, Mod, Mult, Pow, RShift, Sub,
+    };
+    let (op, reflected) = match method {
+        "__add__" => (Add, false),
+        "__radd__" => (Add, true),
+        "__sub__" => (Sub, false),
+        "__rsub__" => (Sub, true),
+        "__mul__" => (Mult, false),
+        "__rmul__" => (Mult, true),
+        "__truediv__" => (Div, false),
+        "__rtruediv__" => (Div, true),
+        "__floordiv__" => (FloorDiv, false),
+        "__rfloordiv__" => (FloorDiv, true),
+        "__mod__" => (Mod, false),
+        "__rmod__" => (Mod, true),
+        "__pow__" => (Pow, false),
+        "__rpow__" => (Pow, true),
+        "__matmul__" => (MatMult, false),
+        "__rmatmul__" => (MatMult, true),
+        "__and__" => (BitAnd, false),
+        "__rand__" => (BitAnd, true),
+        "__or__" => (BitOr, false),
+        "__ror__" => (BitOr, true),
+        "__xor__" => (BitXor, false),
+        "__rxor__" => (BitXor, true),
+        "__lshift__" => (LShift, false),
+        "__rlshift__" => (LShift, true),
+        "__rshift__" => (RShift, false),
+        "__rrshift__" => (RShift, true),
+        // divmod uses a placeholder op; the caller builds the (q, r) tuple.
+        "__divmod__" => (Add, false),
+        "__rdivmod__" => (Add, true),
+        _ => return None,
+    };
+    Some((op, reflected))
 }
 
 /// Integral part of a numeric value for `__floor__`/`__ceil__`/`__trunc__`.
