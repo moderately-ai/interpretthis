@@ -137,14 +137,17 @@ pub(crate) fn dispatch_dict_method(
         }
         "popitem" => {
             // CPython 3.7+: remove and return the LAST inserted (key, value)
-            // pair (LIFO); empty dict raises KeyError.
-            reject_kwargs(method, kwargs)?;
-            if !args.is_empty() {
-                return Err(
-                    InterpreterError::TypeError("popitem() takes no arguments".into()).into()
-                );
-            }
-            let Some((key, val)) = map.pop() else {
+            // pair (LIFO); empty dict raises KeyError. We also accept the
+            // `last` keyword (True default) that OrderedDict.popitem takes,
+            // since OrderedDict is modelled as a plain dict — last=False pops
+            // the FIRST pair (FIFO). See CONFORMANCE.md#ordereddict-on-dict.
+            let last = match args.first().or_else(|| kwargs.get("last")) {
+                None => true,
+                Some(v) => v.is_truthy(),
+            };
+            let popped =
+                if last { map.pop() } else { map.shift_remove_index(0).map(|(k, v)| (k, v)) };
+            let Some((key, val)) = popped else {
                 return Err(EvalError::Exception(ExceptionValue::new(
                     "KeyError",
                     "'popitem(): dictionary is empty'",
