@@ -65,8 +65,9 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
                     "shorten() requires a width argument".into(),
                 ))
             })?;
-            let placeholder = args
-                .get(2)
+            let placeholder = kwargs
+                .get("placeholder")
+                .or_else(|| args.get(2))
                 .and_then(|v| match v {
                     Value::String(s) => Some(s.to_string()),
                     _ => None,
@@ -125,26 +126,29 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
-        if current.is_empty() {
-            if word.len() > width {
-                // A single word longer than the width gets its own
-                // line (CPython does not break_long_words by default
-                // beyond this).
-                lines.push(word.to_string());
-            } else {
-                current.push_str(word);
-            }
-        } else if current.len() + 1 + word.len() <= width {
+        let wlen = word.chars().count();
+        // Word fits on the current line (with a joining space)?
+        if !current.is_empty() && current.chars().count() + 1 + wlen <= width {
             current.push(' ');
             current.push_str(word);
+            continue;
+        }
+        // Otherwise the word starts a new line; flush what we have.
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if wlen <= width {
+            current.push_str(word);
         } else {
-            lines.push(current.clone());
-            current.clear();
-            if word.len() > width {
-                lines.push(word.to_string());
-            } else {
-                current.push_str(word);
+            // break_long_words (CPython's default): chop the over-long word into
+            // width-sized pieces; the trailing remainder seeds the next line.
+            let chars: Vec<char> = word.chars().collect();
+            let mut idx = 0;
+            while chars.len() - idx > width {
+                lines.push(chars[idx..idx + width].iter().collect());
+                idx += width;
             }
+            current = chars[idx..].iter().collect();
         }
     }
     if !current.is_empty() {
@@ -158,21 +162,30 @@ fn fill(text: &str, width: usize) -> String {
 }
 
 fn shorten(text: &str, width: usize, placeholder: &str) -> String {
-    // CPython's shorten collapses whitespace then truncates.
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.len() <= width {
+    // Collapse runs of whitespace, then keep as many whole words as fit
+    // alongside the placeholder — CPython never emits a partial word.
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let collapsed = words.join(" ");
+    if collapsed.chars().count() <= width {
         return collapsed;
     }
-    if placeholder.len() >= width {
-        return placeholder.to_string();
+    let ph_len = placeholder.chars().count();
+    let mut kept: Vec<&str> = Vec::new();
+    for word in &words {
+        let joined_len =
+            kept.iter().chain(std::iter::once(word)).map(|w| w.chars().count()).sum::<usize>()
+                + kept.len(); // one space between each of the (kept.len()+1) words
+        if joined_len + ph_len <= width {
+            kept.push(word);
+        } else {
+            break;
+        }
     }
-    let available = width.saturating_sub(placeholder.len());
-    // Trim back to word boundary.
-    let cap = available.min(collapsed.len());
-    let truncated = collapsed[..cap]
-        .rfind(' ')
-        .map_or_else(|| collapsed[..cap].to_string(), |idx| collapsed[..idx].to_string());
-    format!("{truncated}{placeholder}")
+    if kept.is_empty() {
+        // Not even the first word fits; CPython emits the stripped placeholder.
+        return placeholder.trim_start().to_string();
+    }
+    format!("{}{}", kept.join(" "), placeholder)
 }
 
 /// The `width` argument: a `width=` keyword takes precedence over the second

@@ -1,0 +1,11 @@
+import textwrap
+print(textwrap.fill("The quick brown fox jumps", width=10))
+print(textwrap.wrap("one two three four five", width=8))
+print(textwrap.shorten("Hello World Foo Bar", width=15))
+print(textwrap.indent("line1\nline2", ">> "))
+print(textwrap.dedent("    indented\n    text"))
+print(textwrap.fill("word " * 5, width=12))
+print(len(textwrap.wrap("a" * 100, width=20)))
+print(textwrap.shorten("The quick brown fox", width=12, placeholder="..."))
+print(repr(textwrap.dedent("  a\n    b\n  c")))
+print(textwrap.wrap("supercalifragilistic", width=5))
