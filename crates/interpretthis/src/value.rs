@@ -1731,6 +1731,11 @@ pub struct FunctionDef {
     /// captured value.
     #[serde(default)]
     pub is_module_level: bool,
+    /// The function's docstring (`__doc__`): the body's first statement when it
+    /// is a bare string literal, else `None`. `functools.wraps` copies this from
+    /// the wrapped function onto the wrapper.
+    #[serde(default)]
+    pub docstring: Option<String>,
 }
 
 impl FunctionDef {

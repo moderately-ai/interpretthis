@@ -453,6 +453,7 @@ fn classify_decorated_method(
             crate::eval::functions::collect_assigned_names(&body);
         assigned_names.retain(|n| !global_names.contains(n));
         let is_generator = crate::eval::functions::contains_yield_stmts(&body);
+        let docstring = crate::eval::functions::extract_docstring(&body);
         state.function_bodies.insert(key.clone(), Arc::new(body));
         FunctionDef {
             name: key,
@@ -470,6 +471,7 @@ fn classify_decorated_method(
             // is moot here. The flag is kept consistent with how
             // top-level `def` would have been classified.
             is_module_level: false,
+            docstring,
         }
     };
     // No decorators: regular method.
@@ -1598,6 +1600,12 @@ pub fn class_attribute(state: &InterpreterState, class_name: &str, attr: &str) -
     }
     if let Some(value) = lookup_class_attr(state, class_name, attr) {
         return Ok(value);
+    }
+    // A regular method accessed through the class (`C.method`, not `instance.method`)
+    // is the plain function in CPython — callable as `C.method(instance, ...)` with
+    // the receiver passed explicitly. Return the underlying FunctionDef.
+    if let Some((_, def)) = lookup_method_in_mro(state, class_name, attr) {
+        return Ok(Value::Function(std::sync::Arc::new(def)));
     }
     Err(InterpreterError::AttributeError(format!(
         "type object '{class_name}' has no attribute '{attr}'"

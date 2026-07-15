@@ -253,9 +253,17 @@ pub async fn call(
                 Value::Lambda(_) => "<lambda>".to_string(),
                 other => other.type_name().to_string(),
             };
+            // wraps also copies __doc__ from the wrapped function.
+            let wrapped_doc = match wrapped {
+                Value::Function(fd) => fd.docstring.clone(),
+                _ => None,
+            };
             Ok(Value::Partial(Box::new(crate::value::PartialData {
                 func: Value::BuiltinName("__apply_wraps__".to_string()),
-                args: vec![Value::String(wrapped_name.into())],
+                args: vec![
+                    Value::String(wrapped_name.into()),
+                    wrapped_doc.map_or(Value::None, |d| Value::String(d.into())),
+                ],
                 keywords: indexmap::IndexMap::new(),
             })))
         }

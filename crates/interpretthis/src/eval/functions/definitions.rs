@@ -125,6 +125,7 @@ pub async fn eval_function_def(
     let is_module_level = state.call_depth == 0;
 
     let is_generator = contains_yield_stmts(&node.body);
+    let docstring = extract_docstring(&node.body);
 
     let mut func = Value::Function(std::sync::Arc::new(FunctionDef {
         name: name.to_string(),
@@ -139,6 +140,7 @@ pub async fn eval_function_def(
         assigned_names,
         global_names,
         is_module_level,
+        docstring,
     }));
 
     // Apply decorators in REVERSE order so the textually nearest one
@@ -757,6 +759,19 @@ impl VariableCheckpoint {
             }
         }
     }
+}
+
+/// The docstring of a body: its first statement when that is a bare string
+/// literal (`def f(): "doc"`), matching CPython's `__doc__`. `None` otherwise.
+pub(crate) fn extract_docstring(body: &[ast::Stmt]) -> Option<String> {
+    if let Some(ast::Stmt::Expr(e)) = body.first() {
+        if let ast::Expr::Constant(ast::ExprConstant { value: ast::Constant::Str(s), .. }) =
+            e.value.as_ref()
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 /// Extract function source code from the current source using AST range.

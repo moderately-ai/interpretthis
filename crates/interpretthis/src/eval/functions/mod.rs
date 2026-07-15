@@ -23,7 +23,8 @@ pub use builtins::is_exception_type_name;
 // Re-exports from call
 pub use call::eval_call;
 pub(crate) use definitions::{
-    VariableCheckpoint, collect_assigned_names, contains_yield_stmts, extract_function_source,
+    VariableCheckpoint, collect_assigned_names, contains_yield_stmts, extract_docstring,
+    extract_function_source,
 };
 // Re-exports from definitions
 pub use definitions::{build_function_params, eval_function_def, eval_lambda_def};

@@ -395,6 +395,7 @@ pub(crate) fn call_namedtuple_with_state(
         // Synthesized methods carry empty closures; the flag is
         // immaterial here.
         is_module_level: false,
+        docstring: None,
     };
     let mut methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
     methods.insert("__init__".to_string(), init_def);
@@ -462,6 +463,7 @@ pub(crate) fn call_namedtuple_with_state(
             assigned_names: Vec::new(),
             global_names: Vec::new(),
             is_module_level: false,
+            docstring: None,
         },
     );
 
@@ -491,6 +493,7 @@ pub(crate) fn call_namedtuple_with_state(
         assigned_names: Vec::new(),
         global_names: Vec::new(),
         is_module_level: false,
+        docstring: None,
     };
     let no_defaults = |args: Vec<Param>, kwarg: Option<String>| FunctionParams {
         args,

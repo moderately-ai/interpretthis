@@ -474,6 +474,10 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                 // `name` stays the body-cache key.
                 let reported = func_def.wraps_name.as_ref().unwrap_or(&func_def.name);
                 Ok(Value::String(reported.clone().into()))
+            } else if attr_name == "__doc__" {
+                // The docstring, or None (CPython's `f.__doc__` for an
+                // undocumented function).
+                Ok(func_def.docstring.clone().map_or(Value::None, |d| Value::String(d.into())))
             } else {
                 Err(attribute_error("function", attr_name))
             }
@@ -481,6 +485,9 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
         Value::Lambda(_) => {
             if attr_name == "__name__" || attr_name == "__qualname__" {
                 Ok(Value::String("<lambda>".into()))
+            } else if attr_name == "__doc__" {
+                // Lambdas never have a docstring.
+                Ok(Value::None)
             } else {
                 Err(attribute_error("function", attr_name))
             }

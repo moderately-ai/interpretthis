@@ -462,9 +462,9 @@ pub(super) async fn try_builtin(
         // name onto the decorated function's `__name__`. Not user-callable
         // (the name doesn't resolve as a bare builtin).
         "__apply_wraps__" => {
-            let [Value::String(new_name), target] = args else {
+            let [Value::String(new_name), new_doc, target] = args else {
                 return Err(InterpreterError::TypeError(
-                    "__apply_wraps__ expects (name, function)".into(),
+                    "__apply_wraps__ expects (name, doc, function)".into(),
                 )
                 .into());
             };
@@ -472,6 +472,11 @@ pub(super) async fn try_builtin(
                 Value::Function(fd) => {
                     let mut renamed = (**fd).clone();
                     renamed.wraps_name = Some(new_name.to_string());
+                    // wraps copies __doc__ (overwriting the wrapper's own).
+                    renamed.docstring = match new_doc {
+                        Value::String(s) => Some(s.to_string()),
+                        _ => None,
+                    };
                     Ok(Some(Value::Function(std::sync::Arc::new(renamed))))
                 }
                 // Non-function targets pass through unchanged.
