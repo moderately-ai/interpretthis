@@ -711,6 +711,58 @@ pub fn assign_target<'a>(
                     }
                 }
 
+                // A user-class instance takes `obj[i:j] = v` via
+                // `__setitem__(slice(i, j), v)`, not the builtin slice assign.
+                if let place::PlaceStep::Slice(spec) = last {
+                    let receiver = {
+                        let root =
+                            state.variables.get_mut(&target_place.root).ok_or_else(|| {
+                                EvalError::from(InterpreterError::name_not_defined(
+                                    &target_place.root,
+                                ))
+                            })?;
+                        place::with_navigate_mut(root, prefix, |container| {
+                            matches!(container, Value::Instance(_)).then(|| container.clone())
+                        })?
+                    };
+                    if let Some(receiver) = receiver {
+                        let slice_val = Value::Slice(Box::new(crate::value::SliceValue {
+                            start: spec.lower.clone().unwrap_or(Value::None),
+                            stop: spec.upper.clone().unwrap_or(Value::None),
+                            step: spec.step.clone().unwrap_or(Value::None),
+                        }));
+                        if let Some(updated_self) = crate::eval::op::setitem(
+                            state,
+                            &receiver,
+                            &slice_val,
+                            value.clone(),
+                            tools,
+                        )
+                        .await?
+                        {
+                            let delta = {
+                                let root = state.variables.get_mut(&target_place.root).ok_or_else(
+                                    || {
+                                        EvalError::from(InterpreterError::name_not_defined(
+                                            &target_place.root,
+                                        ))
+                                    },
+                                )?;
+                                place::with_navigate_mut(root, prefix, |container| {
+                                    let delta = place::size_delta(
+                                        estimate_value_size(container),
+                                        estimate_value_size(&updated_self),
+                                    );
+                                    *container = updated_self;
+                                    delta
+                                })?
+                            };
+                            place::apply_mem_delta(state, delta)?;
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let delta = {
                     let root = state.variables.get_mut(&target_place.root).ok_or_else(|| {
                         EvalError::from(InterpreterError::name_not_defined(&target_place.root))

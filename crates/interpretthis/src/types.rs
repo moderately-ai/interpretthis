@@ -2698,6 +2698,40 @@ fn dict_set_item(container: &mut Value, index: &Value, value: Value) -> Result<i
 /// Returns the (negative) byte delta.
 fn list_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalError> {
     let Value::List(items) = container else { unreachable!("list_del_item only on LIST_TYPE") };
+    // `del lst[slice(...)]` — a computed slice object deletes the strided range,
+    // matching the `del lst[i:j:k]` syntax path.
+    if let Value::Slice(s) = index {
+        let step = match &s.step {
+            Value::None => 1,
+            Value::Int(n) => *n,
+            Value::Bool(b) => i64::from(*b),
+            other => {
+                return Err(InterpreterError::TypeError(format!(
+                    "slice indices must be integers or None, not '{}'",
+                    other.type_name()
+                ))
+                .into());
+            }
+        };
+        if step == 0 {
+            return Err(InterpreterError::ValueError("slice step cannot be zero".into()).into());
+        }
+        let mut guard = items.lock();
+        let len = i64::try_from(guard.len()).unwrap_or(i64::MAX);
+        // `strided_indices` returns positions in descending order, so removing
+        // them left-to-right does not shift the not-yet-removed ones.
+        let indices =
+            crate::eval::delete::strided_indices(Some(&s.start), Some(&s.stop), step, len);
+        let mut freed = 0usize;
+        for &u in &indices {
+            if u < guard.len() {
+                freed += crate::state::estimate_value_size(&guard[u]);
+                guard.remove(u);
+            }
+        }
+        drop(guard);
+        return Ok(-to_isize_sat(freed));
+    }
     let raw = int_index(index, "list")?;
     let mut guard = items.lock();
     let idx = normalize_seq_index(raw, guard.len(), "list")?;

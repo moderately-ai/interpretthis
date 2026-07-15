@@ -648,8 +648,12 @@ pub async fn eval_subscript(
     let index = eval_expr(state, &node.slice, tools).await?;
 
     // A first-class `slice()` object used as an index applies the same slice
-    // semantics as the `a[i:j:k]` syntax.
+    // semantics as the `a[i:j:k]` syntax. A user-class instance routes the slice
+    // object straight to `__getitem__`, like the `a[i:j:k]` syntax path above.
     if let Value::Slice(slice) = &index {
+        if matches!(obj, Value::Instance(_)) {
+            return crate::eval::op::getitem(state, &obj, &index, tools).await;
+        }
         return apply_value_slice(&obj, Some(&slice.start), Some(&slice.stop), Some(&slice.step));
     }
 
@@ -813,6 +817,17 @@ async fn eval_subscript_slice(
         }
         None => None,
     };
+
+    // A user-class instance slices through `__getitem__(slice(...))`, not the
+    // builtin sequence slicer — CPython passes a `slice` object to the dunder.
+    if matches!(obj, Value::Instance(_)) {
+        let slice_val = Value::Slice(Box::new(crate::value::SliceValue {
+            start: lower.unwrap_or(Value::None),
+            stop: upper.unwrap_or(Value::None),
+            step: step_expr.unwrap_or(Value::None),
+        }));
+        return crate::eval::op::getitem(state, obj, &slice_val, tools).await;
+    }
 
     apply_value_slice(obj, lower.as_ref(), upper.as_ref(), step_expr.as_ref())
 }

@@ -178,6 +178,46 @@ async fn delete_target(
             // path for `del lst[1:3]` and similar list-slice idioms.
             if let Expr::Slice(slice_node) = sub_node.slice.as_ref() {
                 if let Expr::Name(name_node) = sub_node.value.as_ref() {
+                    // A user-class instance deletes a slice via
+                    // `__delitem__(slice(...))`, not the builtin slice deleter.
+                    if matches!(
+                        state.variables.get(name_node.id.as_str()),
+                        Some(Value::Instance(_))
+                    ) {
+                        let start = match &slice_node.lower {
+                            Some(e) => {
+                                let v = eval_expr(state, e, tools).await?;
+                                crate::eval::op::coerce_index(state, v, tools).await?
+                            }
+                            None => Value::None,
+                        };
+                        let stop = match &slice_node.upper {
+                            Some(e) => {
+                                let v = eval_expr(state, e, tools).await?;
+                                crate::eval::op::coerce_index(state, v, tools).await?
+                            }
+                            None => Value::None,
+                        };
+                        let step = match &slice_node.step {
+                            Some(e) => {
+                                let v = eval_expr(state, e, tools).await?;
+                                crate::eval::op::coerce_index(state, v, tools).await?
+                            }
+                            None => Value::None,
+                        };
+                        let slice_val =
+                            Value::Slice(Box::new(crate::value::SliceValue { start, stop, step }));
+                        let receiver = eval_expr(state, sub_node.value.as_ref(), tools).await?;
+                        if let Some(updated_self) =
+                            crate::eval::op::delitem(state, &receiver, &slice_val, tools).await?
+                        {
+                            return writeback_receiver(
+                                state,
+                                sub_node.value.as_ref(),
+                                updated_self,
+                            );
+                        }
+                    }
                     return delete_slice(state, name_node.id.as_str(), slice_node, tools).await;
                 }
                 return Err(InterpreterError::Runtime(
@@ -407,7 +447,7 @@ async fn delete_slice(
 /// returned in descending order so a caller can `remove` each without shifting
 /// the rest. Reuses the read-path clamp semantics so `del a[::2]` deletes the
 /// same elements that `a[::2]` would read.
-fn strided_indices(
+pub(crate) fn strided_indices(
     lower: Option<&Value>,
     upper: Option<&Value>,
     step: i64,

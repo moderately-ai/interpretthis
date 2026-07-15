@@ -94,7 +94,21 @@ pub(crate) fn eval_place<'a>(
                     place.steps.push(PlaceStep::Slice(Box::new(SliceSpec { lower, upper, step })));
                 } else {
                     let key = eval_expr(state, &sub.slice, tools).await?;
-                    place.steps.push(PlaceStep::Index(key));
+                    // A computed `slice()` object subscript (`lst[s] = v` where
+                    // `s = slice(...)`) is slice assignment, exactly like the
+                    // `lst[i:j:k]` syntax — turn it into a Slice step rather than
+                    // an integer-index step.
+                    if let Value::Slice(s) = key {
+                        let to_opt =
+                            |v: Value| if matches!(v, Value::None) { None } else { Some(v) };
+                        place.steps.push(PlaceStep::Slice(Box::new(SliceSpec {
+                            lower: to_opt(s.start),
+                            upper: to_opt(s.stop),
+                            step: to_opt(s.step),
+                        })));
+                    } else {
+                        place.steps.push(PlaceStep::Index(key));
+                    }
                 }
                 Ok(Some(place))
             }
