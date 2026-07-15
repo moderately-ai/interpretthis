@@ -288,6 +288,16 @@ fn format_integer(
     use num_bigint::Sign;
     use num_traits::ToPrimitive as _;
 
+    // CPython forbids a precision with the integer presentation types (and with
+    // no type); it is only meaningful for the float codes f/e/g/%.
+    if precision.is_some()
+        && matches!(type_char, None | Some('d' | 'n' | 'b' | 'o' | 'x' | 'X' | 'c'))
+    {
+        return Err(InterpreterError::ValueError(
+            "Precision not allowed in integer format specifier".into(),
+        )
+        .into());
+    }
     let big = crate::value::value_as_bigint(value).ok_or_else(|| {
         EvalError::from(InterpreterError::Runtime("expected integer value".into()))
     })?;
@@ -409,7 +419,16 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
         (None, rest)
     };
 
-    // Parse type character
+    // Parse type character — it must be the final character of the spec.
+    // Anything trailing (e.g. `d.2`, where the type precedes the precision) is
+    // a malformed spec, which CPython rejects rather than silently ignoring.
+    if rest.len() > 1 {
+        return Err(InterpreterError::ValueError(format!(
+            "Invalid format specifier '{spec}' for object of type '{}'",
+            value.python_type_name()
+        ))
+        .into());
+    }
     let type_char = if rest.is_empty() { None } else { Some(rest[0]) };
 
     // Format the value.
