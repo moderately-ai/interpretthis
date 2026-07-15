@@ -405,25 +405,29 @@ pub fn dispatch_binop(
             Value::String(_) | Value::List(_) | Value::Tuple(_) => {
                 return Err(InterpreterError::TypeError(format!(
                     "can only concatenate {0} (not \"{1}\") to {0}",
-                    lhs_type.name, rhs_type.name,
+                    lhs_type.name,
+                    rhs.python_type_name(),
                 ))
                 .into());
             }
             Value::Bytes(_) | Value::ByteArray(_) => {
                 return Err(InterpreterError::TypeError(format!(
                     "can't concat {} to {}",
-                    rhs_type.name, lhs_type.name,
+                    rhs.python_type_name(),
+                    lhs_type.name,
                 ))
                 .into());
             }
             _ => {}
         }
     }
+    // Use the dynamic class name for instances (`type_of` bottoms out at the
+    // static "object" TypeObject), matching CPython's per-class wording.
     Err(InterpreterError::TypeError(format!(
         "unsupported operand type(s) for {}: '{}' and '{}'",
         op.symbol(),
-        lhs_type.name,
-        rhs_type.name,
+        lhs.python_type_name(),
+        rhs.python_type_name(),
     ))
     .into())
 }
