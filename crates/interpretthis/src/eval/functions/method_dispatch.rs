@@ -611,6 +611,27 @@ fn hash_digest_methods(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
+    let Value::HashDigest { bytes, .. } = obj else {
+        return Err(type_mismatch("HASH"));
+    };
+    // `update(data)` appends to the accumulated buffer (the digest is computed
+    // lazily), so the incremental create-then-update pattern works.
+    if method == "update" {
+        crate::eval::functions::reject_kwargs(method, kwargs)?;
+        let data = match args.first() {
+            Some(Value::Bytes(b)) => b.clone(),
+            Some(Value::ByteArray(b)) => b.lock().clone(),
+            _ => {
+                return Err(InterpreterError::TypeError(
+                    "update() argument must be a bytes-like object".into(),
+                )
+                .into());
+            }
+        };
+        let grew = data.len();
+        bytes.extend_from_slice(&data);
+        return Ok(MethodOutcome::grew(Value::None, grew));
+    }
     let Value::HashDigest { algo, bytes } = obj else {
         return Err(type_mismatch("HASH"));
     };

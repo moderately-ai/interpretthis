@@ -1,0 +1,15 @@
+import hashlib
+print(hashlib.md5(b"hello").hexdigest())
+print(hashlib.sha256(b"world").hexdigest())
+print(hashlib.sha1(b"test").hexdigest())
+print(len(hashlib.sha512(b"x").hexdigest()))
+import base64
+print(base64.b64encode(b"hello world"))
+print(base64.b64decode(b"aGVsbG8gd29ybGQ="))
+print(base64.b64encode(b"Python").decode())
+print(base64.urlsafe_b64encode(b"\xff\xef"))
+print(base64.b64decode("SGk="))
+h = hashlib.sha256()
+h.update(b"a")
+h.update(b"b")
+print(h.hexdigest() == hashlib.sha256(b"ab").hexdigest())

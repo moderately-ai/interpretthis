@@ -145,8 +145,7 @@ pub(crate) fn dispatch_dict_method(
                 None => true,
                 Some(v) => v.is_truthy(),
             };
-            let popped =
-                if last { map.pop() } else { map.shift_remove_index(0).map(|(k, v)| (k, v)) };
+            let popped = if last { map.pop() } else { map.shift_remove_index(0) };
             let Some((key, val)) = popped else {
                 return Err(EvalError::Exception(ExceptionValue::new(
                     "KeyError",
