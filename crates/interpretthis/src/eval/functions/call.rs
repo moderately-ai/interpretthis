@@ -94,7 +94,14 @@ pub async fn eval_call(
                     .into());
                 };
                 if method_name == "format" {
-                    return crate::eval::strings::str_format(&template, &resolved_args, &kwargs);
+                    return crate::eval::strings::str_format(
+                        state,
+                        &template,
+                        &resolved_args,
+                        &kwargs,
+                        tools,
+                    )
+                    .await;
                 }
                 // format_map: take the single mapping argument as the keywords.
                 let mapping = resolved_args.first().and_then(Value::as_dict).ok_or_else(|| {
@@ -110,7 +117,7 @@ pub async fn eval_call(
                         _ => None,
                     })
                     .collect();
-                return crate::eval::strings::str_format(&template, &[], &kw);
+                return crate::eval::strings::str_format(state, &template, &[], &kw, tools).await;
             }
 
             // list.count / index / remove need async `__eq__` when elements

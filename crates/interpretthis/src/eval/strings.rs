@@ -672,7 +672,13 @@ pub(crate) fn template_substitute(
     Ok(out)
 }
 
-pub fn str_format(template: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
+pub async fn str_format(
+    state: &mut InterpreterState,
+    template: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> EvalResult {
     let chars: Vec<char> = template.chars().collect();
     let mut out = String::new();
     let mut auto_index: usize = 0;
@@ -714,12 +720,10 @@ pub fn str_format(template: &str, args: &[Value], kwargs: &IndexMap<String, Valu
                     .into());
                 }
                 let field: String = chars[i + 1..j].iter().collect();
-                out.push_str(&value_text(render_format_field(
-                    &field,
-                    args,
-                    kwargs,
-                    &mut auto_index,
-                )?));
+                out.push_str(&value_text(
+                    render_format_field(state, &field, args, kwargs, &mut auto_index, tools)
+                        .await?,
+                ));
                 i = j + 1;
             }
             Some('}') => {
@@ -748,61 +752,91 @@ fn value_text(value: Value) -> String {
 }
 
 /// Render one `{...}` replacement field (without the surrounding braces).
-fn render_format_field(
-    field: &str,
-    args: &[Value],
-    kwargs: &IndexMap<String, Value>,
-    auto_index: &mut usize,
-) -> EvalResult {
-    // `field_name[!conversion][:format_spec]` — the spec is everything after the
-    // first ':'; the conversion is a single char after a trailing '!'.
-    let (head, spec) = match field.split_once(':') {
-        Some((h, s)) => (h, Some(s)),
-        None => (field, None),
-    };
-    let (name_part, conversion) = match head.rsplit_once('!') {
-        Some((name, conv)) if conv.chars().count() == 1 => (name, conv.chars().next()),
-        _ => (head, None),
-    };
+///
+/// Boxed future because it and [`resolve_nested_spec`] recurse into each
+/// other (a replacement field can appear inside a format spec).
+fn render_format_field<'a>(
+    state: &'a mut InterpreterState,
+    field: &'a str,
+    args: &'a [Value],
+    kwargs: &'a IndexMap<String, Value>,
+    auto_index: &'a mut usize,
+    tools: &'a Tools,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = EvalResult> + Send + 'a>> {
+    Box::pin(async move {
+        // `field_name[!conversion][:format_spec]` — the spec is everything after the
+        // first ':'; the conversion is a single char after a trailing '!'.
+        let (head, spec) = match field.split_once(':') {
+            Some((h, s)) => (h, Some(s)),
+            None => (field, None),
+        };
+        let (name_part, conversion) = match head.rsplit_once('!') {
+            Some((name, conv)) if conv.chars().count() == 1 => (name, conv.chars().next()),
+            _ => (head, None),
+        };
 
-    let value = resolve_format_arg(name_part, args, kwargs, auto_index)?;
+        use crate::eval::render::{RenderMode, render};
+        let value = resolve_format_arg(name_part, args, kwargs, auto_index)?;
 
-    let converted = match conversion {
-        None => value,
-        Some('s') => Value::String(format!("{value}").into()),
-        Some('r') => Value::String(value.repr().into()),
-        Some('a') => Value::String(ascii_repr(&value).into()),
-        Some(other) => {
-            return Err(InterpreterError::ValueError(format!(
-                "Unknown conversion specifier {other}"
-            ))
-            .into());
+        let converted = match conversion {
+            None => value,
+            Some('s') => {
+                Value::String(render(state, &value, RenderMode::Display, tools).await?.into())
+            }
+            Some('r') => {
+                Value::String(render(state, &value, RenderMode::Repr, tools).await?.into())
+            }
+            Some('a') => {
+                Value::String(render(state, &value, RenderMode::Ascii, tools).await?.into())
+            }
+            Some(other) => {
+                return Err(InterpreterError::ValueError(format!(
+                    "Unknown conversion specifier {other}"
+                ))
+                .into());
+            }
+        };
+
+        // Resolve any replacement fields nested inside the spec (`{:>{}}`,
+        // `{:.{}f}`) to a literal spec first.
+        let resolved_spec: Option<String> = match spec {
+            None => None,
+            Some(s) if s.contains('{') => {
+                Some(resolve_nested_spec(state, s, args, kwargs, auto_index, tools).await?)
+            }
+            Some(s) => Some(s.to_string()),
+        };
+
+        // A user-class `__format__` wins for any spec (empty included), matching
+        // CPython's `obj.__format__(spec)`; builtins keep the render/apply path.
+        let spec_for_slot = resolved_spec.as_deref().unwrap_or("");
+        if let Some(rendered) = call_format_slot(state, &converted, spec_for_slot, tools).await? {
+            return Ok(Value::String(rendered.into()));
         }
-    };
 
-    match spec {
-        None | Some("") => Ok(Value::String(format!("{converted}").into())),
-        Some(s) if s.contains('{') => {
-            // The format spec itself carries replacement fields
-            // (`{:>{}}`, `{:.{}f}`). Resolve that one nesting level —
-            // consuming further positional args in order — then apply
-            // the now-literal spec.
-            let resolved = resolve_nested_spec(s, args, kwargs, auto_index)?;
-            apply_format_spec(&converted, &resolved)
+        match resolved_spec {
+            None => Ok(Value::String(
+                render(state, &converted, RenderMode::Display, tools).await?.into(),
+            )),
+            Some(s) if s.is_empty() => Ok(Value::String(
+                render(state, &converted, RenderMode::Display, tools).await?.into(),
+            )),
+            Some(s) => apply_format_spec(&converted, &s),
         }
-        Some(s) => apply_format_spec(&converted, s),
-    }
+    })
 }
 
 /// Resolve replacement fields nested inside a format spec (one level,
 /// as CPython allows). Each `{...}` is rendered to its literal text via
 /// [`render_format_field`]; the surrounding spec characters pass
 /// through unchanged.
-fn resolve_nested_spec(
+async fn resolve_nested_spec(
+    state: &mut InterpreterState,
     spec: &str,
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
     auto_index: &mut usize,
+    tools: &Tools,
 ) -> Result<String, EvalError> {
     let chars: Vec<char> = spec.chars().collect();
     let mut out = String::new();
@@ -821,7 +855,9 @@ fn resolve_nested_spec(
                     .into());
                 }
                 let inner: String = chars[i + 1..j].iter().collect();
-                out.push_str(&value_text(render_format_field(&inner, args, kwargs, auto_index)?));
+                out.push_str(&value_text(
+                    render_format_field(state, &inner, args, kwargs, auto_index, tools).await?,
+                ));
                 i = j + 1;
             }
             Some(other) => {
@@ -832,15 +868,6 @@ fn resolve_nested_spec(
         }
     }
     Ok(out)
-}
-
-/// ASCII-escape a value's repr, mirroring the `!a` conversion in f-strings.
-fn ascii_repr(value: &Value) -> String {
-    value
-        .repr()
-        .chars()
-        .map(|c| if c.is_ascii() { c.to_string() } else { format!("\\u{:04x}", c as u32) })
-        .collect()
 }
 
 /// Resolve a format field's base selector plus any `.attr` / `[idx]` accessors.
