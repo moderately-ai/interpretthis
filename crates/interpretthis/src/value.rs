@@ -2183,8 +2183,41 @@ impl fmt::Display for Value {
 /// scientific notation, matching CPython's `str(Decimal)` output for
 /// the common ranges. CPython's scientific notation thresholds for
 /// extreme magnitudes are tracked by `gap-decimal-scientific-formatting`.
+/// Format a `Decimal` with CPython's `to-scientific-string` algorithm, so the
+/// exponent form is preserved (`Decimal("1E+2")` prints `1E+2`, not `100`) and
+/// small/large magnitudes switch to `E` notation exactly where CPython does.
 fn format_decimal_str(f: &mut fmt::Formatter<'_>, d: &bigdecimal::BigDecimal) -> fmt::Result {
-    write!(f, "{}", d.to_plain_string())
+    use num_traits::Signed as _;
+    // value == mantissa * 10^(-scale); CPython's exponent is `-scale` and the
+    // coefficient is the mantissa's absolute-value digit string.
+    let (mantissa, scale) = d.as_bigint_and_exponent();
+    let negative = mantissa.is_negative();
+    let digits = mantissa.abs().to_string();
+    let exp: i64 = -scale;
+    let sign = if negative { "-" } else { "" };
+    let n = digits.len() as i64;
+    let leftdigits = exp + n; // position of the decimal point from the left
+
+    // No exponent when the point sits within a small window of the coefficient.
+    if exp <= 0 && leftdigits > -6 {
+        if exp == 0 {
+            write!(f, "{sign}{digits}")
+        } else if leftdigits > 0 {
+            let (int_part, frac_part) = digits.split_at(leftdigits as usize);
+            write!(f, "{sign}{int_part}.{frac_part}")
+        } else {
+            write!(f, "{sign}0.{}{digits}", "0".repeat(usize::try_from(-leftdigits).unwrap_or(0)))
+        }
+    } else {
+        // Scientific notation: one digit before the point, `E±adjusted`.
+        let adjusted = leftdigits - 1;
+        if n == 1 {
+            write!(f, "{sign}{digits}E{adjusted:+}")
+        } else {
+            let (first, rest) = digits.split_at(1);
+            write!(f, "{sign}{first}.{rest}E{adjusted:+}")
+        }
+    }
 }
 
 /// Write a Python bytes literal (`b'...'`) with CPython's quote selection and
