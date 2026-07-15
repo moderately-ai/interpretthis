@@ -84,6 +84,19 @@ pub fn is_exception_type_name(name: &str) -> bool {
     )
 }
 
+/// Wrap eagerly-computed `items` in a one-shot `Lazy` iterator with a fresh
+/// cursor. CPython's `zip`/`map`/`filter`/`enumerate`/`reversed` return
+/// single-use *iterators*, not lists: `next()` advances them, a second pass
+/// sees only the remainder, and they are neither subscriptable nor sized. We
+/// still compute the items up front (the sandbox caps iteration) but expose the
+/// iterator protocol so those observable behaviours match.
+fn into_iter_value(state: &mut InterpreterState, items: Vec<Value>) -> Value {
+    let cursor_id = state.next_cursor_id;
+    state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
+    state.lazy_cursors.insert(cursor_id, 0);
+    Value::Lazy { items, cursor_id }
+}
+
 /// Try to dispatch a builtin function. Returns Ok(Some(val)) if handled, Ok(None) if not a builtin.
 pub(super) async fn try_builtin(
     state: &mut InterpreterState,
@@ -941,11 +954,11 @@ pub(super) async fn try_builtin(
             for (i, v) in items.into_iter().enumerate() {
                 result.push(Value::Tuple(vec![Value::Int(start + to_len_i64(i)?), v]));
             }
-            Ok(Some(Value::List(shared_list(result))))
+            Ok(Some(into_iter_value(state, result)))
         }
         "zip" => {
             if args.is_empty() {
-                return Ok(Some(Value::List(shared_list(Vec::new()))));
+                return Ok(Some(into_iter_value(state, Vec::new())));
             }
             let strict = kwargs.get("strict").is_some_and(Value::is_truthy);
             // If any argument is an infinite lazy producer, zip must pull
@@ -981,13 +994,13 @@ pub(super) async fn try_builtin(
                 let tuple: Vec<Value> = iterables.iter().map(|it| it[i].clone()).collect();
                 result.push(Value::Tuple(tuple));
             }
-            Ok(Some(Value::List(shared_list(result))))
+            Ok(Some(into_iter_value(state, result)))
         }
         "reversed" => {
             check_arg_count(name, args, 1, 1)?;
             let mut items = crate::eval::op::iter(state, &args[0], tools).await?;
             items.reverse();
-            Ok(Some(Value::List(shared_list(items))))
+            Ok(Some(into_iter_value(state, items)))
         }
         "chr" => {
             check_arg_count(name, args, 1, 1)?;
@@ -1361,7 +1374,7 @@ pub(super) async fn try_builtin(
                     result.push(item);
                 }
             }
-            Ok(Some(Value::List(shared_list(result))))
+            Ok(Some(into_iter_value(state, result)))
         }
         "map" => {
             if args.len() < 2 {
@@ -1379,7 +1392,7 @@ pub(super) async fn try_builtin(
                         .await?;
                     result.push(val);
                 }
-                Ok(Some(Value::List(shared_list(result))))
+                Ok(Some(into_iter_value(state, result)))
             } else {
                 // Multiple iterables — zip them
                 let mut iterables: Vec<Vec<Value>> = Vec::with_capacity(args.len() - 1);
@@ -1395,7 +1408,7 @@ pub(super) async fn try_builtin(
                             .await?;
                     result.push(val);
                 }
-                Ok(Some(Value::List(shared_list(result))))
+                Ok(Some(into_iter_value(state, result)))
             }
         }
         "repr" => {
@@ -1628,5 +1641,5 @@ async fn zip_lazy(
         out.push(Value::Tuple(tuple));
         round += 1;
     }
-    Ok(Value::List(shared_list(out)))
+    Ok(into_iter_value(state, out))
 }
