@@ -1158,6 +1158,11 @@ pub async fn contains(
             return Ok(false);
         }
         if let Some(items) = container.set_items() {
+            // `x in set` hashes `x` to probe the table, so an unhashable instance
+            // (`__hash__ = None`, `__eq__` without `__hash__`) raises TypeError —
+            // unlike `x in list`, which only scans. (Membership uses structural
+            // eq below, but the hash gate still matches CPython.)
+            hash(state, item, tools).await?;
             for stored in &items {
                 if eq(state, stored, item, tools).await? {
                     return Ok(true);
