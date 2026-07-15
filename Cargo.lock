@@ -557,6 +557,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "siphasher",
  "stacker",
  "thiserror",
  "tikv-jemalloc-ctl",

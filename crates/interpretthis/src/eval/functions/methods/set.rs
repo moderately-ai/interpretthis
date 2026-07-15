@@ -124,7 +124,12 @@ pub(crate) fn dispatch_set_method(
                     "pop from an empty set",
                 )));
             }
-            let val = items.remove(0);
+            // CPython's set.pop() returns the first element in hash-table
+            // order, not our insertion order.
+            let idx = crate::pyhash::cpython_set_order_indices(items)
+                .and_then(|order| order.first().copied())
+                .unwrap_or(0);
+            let val = items.remove(idx);
             let freed = estimate_value_size(&val);
             Ok(MethodOutcome::shrank(val, freed))
         }

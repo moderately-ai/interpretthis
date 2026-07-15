@@ -64,6 +64,10 @@ mimalloc = { workspace = true, optional = true }
 unicode-general-category = "1.1.0"
 md-5 = "=0.10.6"
 sha1 = "=0.10.6"
+# SipHash-1-3, validated bit-exact against CPython 3.12's pysiphash with a
+# zero key (PYTHONHASHSEED=0) — the primitive behind CPython str/bytes hashing,
+# which drives set/frozenset iteration order.
+siphasher = "=1.0.3"
 
 [features]
 # Use jemalloc as the global allocator in this crate's bench binaries.

@@ -2096,8 +2096,10 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
             Self::Set(items) => {
+                let ordered = crate::pyhash::cpython_set_order(items);
+                let seq = ordered.as_deref().unwrap_or(items);
                 write!(f, "{{")?;
-                for (i, item) in items.iter().enumerate() {
+                for (i, item) in seq.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -2111,8 +2113,10 @@ impl fmt::Display for Value {
                 if items.is_empty() {
                     return write!(f, "frozenset()");
                 }
+                let ordered = crate::pyhash::cpython_set_order(items);
+                let seq = ordered.as_deref().unwrap_or(items);
                 write!(f, "frozenset({{")?;
-                for (i, item) in items.iter().enumerate() {
+                for (i, item) in seq.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -2780,7 +2784,13 @@ impl Value {
             Self::Bytes(b) => serde_json::json!(b),
             // List / Tuple / Set / Deque all project to a JSON array.
             Self::List(items) => array(&items.lock())?,
-            Self::Tuple(items) | Self::Set(items) | Self::Frozenset(items) => array(items)?,
+            Self::Tuple(items) => array(items)?,
+            Self::Set(items) | Self::Frozenset(items) => {
+                match crate::pyhash::cpython_set_order(items) {
+                    Some(ordered) => array(&ordered)?,
+                    None => array(items)?,
+                }
+            }
             Self::Deque { items, .. } => {
                 J::Array(items.iter().map(Self::to_json).collect::<Result<_, _>>()?)
             }
@@ -2941,12 +2951,16 @@ impl fmt::Display for ValueKey {
                 if items.is_empty() {
                     return write!(f, "frozenset()");
                 }
+                // A frozenset dict-key renders in CPython hash-table order too.
+                let values: Vec<Value> = items.iter().map(ValueKey::to_value).collect();
+                let order = crate::pyhash::cpython_set_order_indices(&values)
+                    .unwrap_or_else(|| (0..items.len()).collect());
                 write!(f, "frozenset({{")?;
-                for (i, item) in items.iter().enumerate() {
+                for (i, &idx) in order.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{item}")?;
+                    write!(f, "{}", items[idx])?;
                 }
                 write!(f, "}})")
             }

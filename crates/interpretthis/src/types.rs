@@ -929,7 +929,7 @@ static SET_TYPE: TypeObject = TypeObject {
     lt_slot: set_lt,
     contains_slot: Some(sequence_contains),
     arith_slot: set_arith,
-    iter_slot: Some(sequence_iter),
+    iter_slot: Some(set_iter),
     // Sets are not subscriptable in CPython (set has no __getitem__).
     get_item_slot: None,
     set_item_slot: None,
@@ -951,7 +951,7 @@ static FROZENSET_TYPE: TypeObject = TypeObject {
     lt_slot: set_lt,
     contains_slot: Some(sequence_contains),
     arith_slot: set_arith,
-    iter_slot: Some(sequence_iter),
+    iter_slot: Some(set_iter),
     get_item_slot: None,
     set_item_slot: None,
     del_item_slot: None,
@@ -2186,6 +2186,16 @@ fn sequence_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
         unreachable!("sequence_iter only attached to list/tuple/set TypeObjects")
     };
     Ok(items.clone())
+}
+
+/// `iter(set)` / `iter(frozenset)` — yield elements in CPython's hash-table
+/// slot order (not our insertion order), falling back to insertion order when a
+/// non-reproducibly-hashable element is present.
+fn set_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
+    let (Value::Set(items) | Value::Frozenset(items)) = value else {
+        unreachable!("set_iter only attached to set/frozenset TypeObjects")
+    };
+    Ok(crate::pyhash::cpython_set_order(items).unwrap_or_else(|| items.clone()))
 }
 
 /// `iter(str)` — yield single-char strings, matching CPython's str iteration.

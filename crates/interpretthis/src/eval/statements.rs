@@ -737,7 +737,12 @@ fn value_to_iterable(val: &Value) -> Result<Vec<Value>, EvalError> {
         // List is shared via Arc<Mutex<Vec>>; clone the inner Vec under
         // the lock to snapshot for unpacking. Tuple/Set wrap plain Vec.
         Value::List(items) => Ok(items.lock().clone()),
-        Value::Tuple(items) | Value::Set(items) | Value::Frozenset(items) => Ok(items.clone()),
+        Value::Tuple(items) => Ok(items.clone()),
+        // Sets unpack in CPython's hash-table iteration order (`a, b = {..}`),
+        // like every other set observation.
+        Value::Set(items) | Value::Frozenset(items) => {
+            Ok(crate::pyhash::cpython_set_order(items).unwrap_or_else(|| items.clone()))
+        }
         Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string().into())).collect()),
         Value::Range { start, stop, step } => {
             let mut items = Vec::new();

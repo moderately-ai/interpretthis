@@ -73,6 +73,9 @@ pub mod value;
 
 pub(crate) mod eval;
 pub(crate) mod parser;
+/// CPython-compatible hashing and set/frozenset iteration order. Public so the
+/// host bindings can render a set in the same order CPython would.
+pub mod pyhash;
 pub(crate) mod security;
 pub(crate) mod serialize;
 pub(crate) mod state;
