@@ -94,6 +94,29 @@ fn into_iter_value(state: &mut InterpreterState, items: Vec<Value>) -> Value {
     state.alloc_lazy(items)
 }
 
+/// Remove Python's `_` numeric digit separators, returning `None` when one is
+/// not flanked by two digits (CPython rejects `_1`, `1_`, `1__0`, `1_.0`).
+fn clean_numeric_underscores(s: &str) -> Option<String> {
+    if !s.contains('_') {
+        return Some(s.to_string());
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '_' {
+            let prev_digit =
+                i.checked_sub(1).and_then(|j| chars.get(j)).is_some_and(char::is_ascii_digit);
+            let next_digit = chars.get(i + 1).is_some_and(|c| c.is_ascii_digit());
+            if !(prev_digit && next_digit) {
+                return None;
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
 /// Try to dispatch a builtin function. Returns Ok(Some(val)) if handled, Ok(None) if not a builtin.
 pub(super) async fn try_builtin(
     state: &mut InterpreterState,
@@ -277,12 +300,16 @@ pub(super) async fn try_builtin(
                     if trimmed == "nan" {
                         return Ok(Some(Value::Float(f64::NAN)));
                     }
-                    let f = trimmed.parse::<f64>().map_err(|_| {
+                    let float_err = || {
                         EvalError::Exception(ExceptionValue::new(
                             "ValueError",
                             format!("could not convert string to float: '{trimmed}'"),
                         ))
-                    })?;
+                    };
+                    // CPython accepts `_` digit separators (`float("1_000.5")`),
+                    // but only between two digits.
+                    let cleaned = clean_numeric_underscores(trimmed).ok_or_else(float_err)?;
+                    let f = cleaned.parse::<f64>().map_err(|_| float_err())?;
                     Ok(Some(Value::Float(f)))
                 }
                 // int/float/bool/Decimal/Fraction/BigInt all convert via the
