@@ -30,108 +30,100 @@ pub(crate) fn is_generator_method(method: &str) -> bool {
     matches!(method, "send" | "throw" | "close" | "__next__")
 }
 
-/// `while` loops need extra resume state not yet modelled — callers fall
-/// back to the eager Lazy buffer for those generator bodies.
-#[must_use]
-pub(crate) fn body_has_while(stmts: &[Stmt]) -> bool {
-    use rustpython_parser::ast::ExceptHandler;
-    stmts.iter().any(|s| match s {
-        Stmt::While(_) => true,
-        Stmt::For(f) => body_has_while(&f.body) || body_has_while(&f.orelse),
-        Stmt::If(i) => body_has_while(&i.body) || body_has_while(&i.orelse),
-        Stmt::With(w) => body_has_while(&w.body),
-        Stmt::Try(t) => {
-            body_has_while(&t.body)
-                || t.handlers.iter().any(|h| {
-                    let ExceptHandler::ExceptHandler(eh) = h;
-                    body_has_while(&eh.body)
-                })
-                || body_has_while(&t.orelse)
-                || body_has_while(&t.finalbody)
-        }
-        Stmt::TryStar(t) => {
-            body_has_while(&t.body)
-                || t.handlers.iter().any(|h| {
-                    let ExceptHandler::ExceptHandler(eh) = h;
-                    body_has_while(&eh.body)
-                })
-                || body_has_while(&t.orelse)
-                || body_has_while(&t.finalbody)
-        }
-        _ => false,
-    })
-}
-
-/// Whether a generator body can use the suspend path. True when it has no
-/// `while` loop, or when every `while` is a TOP-LEVEL statement of the body
-/// whose `yield`s are all *direct* statements of the while body — the only
-/// shape the top-level while-resume machinery handles exactly. A `while` nested
-/// inside another block, one with an `else`, or one whose yields sit inside a
-/// nested `if`/`for`/`try` (which `body_index` resumption would re-run) forces
-/// the eager Lazy buffer, preserving the pre-existing behaviour.
+/// Whether a generator body can use the suspend path: every top-level statement
+/// must be `top_level_suspendable`. Anything the resume steppers cannot re-enter
+/// exactly (a `while` with an `else`, a yield buried in a nested loop/`with`,
+/// a tuple-target `for`) forces the eager Lazy buffer, which is correct for
+/// finite generators.
 #[must_use]
 pub(crate) fn generator_suspendable(stmts: &[Stmt]) -> bool {
-    for stmt in stmts {
-        match stmt {
-            Stmt::While(w) => {
-                if !w.orelse.is_empty()
-                    || body_has_while(&w.body)
-                    || !while_yields_are_direct(&w.body)
-                {
-                    return false;
-                }
-            }
-            // A `while` nested inside any other statement is not suspendable.
-            other if body_has_while(std::slice::from_ref(other)) => return false,
-            _ => {}
-        }
+    stmts.iter().all(top_level_suspendable)
+}
+
+/// Whether a single top-level generator-body statement can suspend correctly.
+/// A statement with no `yield` is always fine; a yielding one must use only the
+/// shapes the top-level steppers resume exactly: direct yields, a name-target
+/// `for` (`run_for_suspendable`), a `while` (`run_while_suspendable`), an `if`
+/// (`run_if_suspendable`), or a `try` (`run_try_suspendable`) — each with a body
+/// its stepper can re-enter. Loop bodies use `loop_body_suspendable` (they step
+/// only through nested `if`); `if`/`try` bodies use `if_branch_suspendable`
+/// (they also step through nested `try`). Anything else — a yield inside a
+/// nested loop/`with`/`match`, a tuple-target `for`, a `for`/`while` with an
+/// `else` — falls back to the eager buffer, correct for finite generators.
+fn top_level_suspendable(stmt: &Stmt) -> bool {
+    use rustpython_parser::ast::{ExceptHandler, Expr};
+    if !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)) {
+        return true;
     }
-    true
-}
-
-/// Whether every `yield` in a while body is a direct statement of that body
-/// (so a `body_index` cursor resumes exactly at it). A yield buried in a nested
-/// compound statement would be re-executed from the top on resume.
-fn while_yields_are_direct(body: &[Stmt]) -> bool {
-    body.iter().all(|stmt| {
-        match stmt {
-            // An `if` steps through `run_if_suspendable`, which resumes exactly
-            // at the yield (via `if_stack`) without re-running the branch or the
-            // condition — so `while True: if cond: log(); yield` suspends
-            // correctly, side effects and all. Its branches must themselves be
-            // suspendable (yields only in direct statements or nested ifs).
-            Stmt::If(node) => branch_suspendable(&node.body) && branch_suspendable(&node.orelse),
-            // Loops / try / with cannot resume mid-way through the while-body
-            // stepper, so a yield inside them still forces the eager fallback.
-            Stmt::For(_)
-            | Stmt::While(_)
-            | Stmt::With(_)
-            | Stmt::Try(_)
-            | Stmt::TryStar(_)
-            | Stmt::Match(_) => {
-                !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
-            }
-            // Simple statements (including a bare `yield` expr statement, or an
-            // assignment whose RHS yields) resume cleanly.
-            _ => true,
+    match stmt {
+        Stmt::For(f) => {
+            matches!(f.target.as_ref(), Expr::Name(_))
+                && f.orelse.is_empty()
+                && loop_body_suspendable(&f.body)
         }
-    })
+        Stmt::While(w) => w.orelse.is_empty() && loop_body_suspendable(&w.body),
+        Stmt::If(n) => if_branch_suspendable(&n.body) && if_branch_suspendable(&n.orelse),
+        Stmt::Try(t) => {
+            if_branch_suspendable(&t.body)
+                && if_branch_suspendable(&t.orelse)
+                && if_branch_suspendable(&t.finalbody)
+                && t.handlers.iter().all(|h| {
+                    let ExceptHandler::ExceptHandler(eh) = h;
+                    if_branch_suspendable(&eh.body)
+                })
+        }
+        // A bare `yield` statement, or one whose RHS/return value yields.
+        Stmt::Expr(_)
+        | Stmt::Assign(_)
+        | Stmt::AugAssign(_)
+        | Stmt::AnnAssign(_)
+        | Stmt::Return(_) => true,
+        // with / match / async / anything else carrying a yield → eager.
+        _ => false,
+    }
 }
 
-/// Whether a statement list's yields can all be suspended by the `if`/`while`
-/// steppers: yields may sit in direct statements or nested `if` branches (which
-/// resume via `if_stack`), but not inside a `for`/`while`/`with`/`match`/`try` —
-/// those can't resume mid-way here, so a yield within one forces the eager
-/// fallback.
-fn branch_suspendable(stmts: &[Stmt]) -> bool {
+/// Yields inside a `for`/`while` body can only be suspended when the loop
+/// stepper (`run_for_suspendable` / `run_while_suspendable`) can re-enter the
+/// exact statement on resume. Those steppers step through a nested `if` (via
+/// `run_if_suspendable`) but re-run any other compound statement from its top,
+/// so a yield directly inside a nested `try`/`for`/`while`/`with`/`match` child
+/// forces the eager buffer. (A `try` reached *through* an `if` is fine — the
+/// `if` stepper handles it — hence the `if` branches use `if_branch_suspendable`.)
+fn loop_body_suspendable(stmts: &[Stmt]) -> bool {
     stmts.iter().all(|stmt| match stmt {
-        Stmt::If(node) => branch_suspendable(&node.body) && branch_suspendable(&node.orelse),
+        Stmt::If(node) => if_branch_suspendable(&node.body) && if_branch_suspendable(&node.orelse),
         Stmt::For(_)
         | Stmt::While(_)
         | Stmt::With(_)
         | Stmt::Try(_)
         | Stmt::TryStar(_)
         | Stmt::Match(_) => !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)),
+        _ => true,
+    })
+}
+
+/// Yields inside an `if` branch or `try` phase can be suspended by the `if`
+/// stepper (`run_if_suspendable`) and the `try` stepper (`step_try_phase`),
+/// which both re-enter a nested `if` *and* a nested `try` exactly. So yields may
+/// sit in direct statements, nested `if`s, or nested `try`s — but not inside a
+/// `for`/`while`/`with`/`match`/`try*`, which those steppers re-run from the top.
+fn if_branch_suspendable(stmts: &[Stmt]) -> bool {
+    use rustpython_parser::ast::ExceptHandler;
+    stmts.iter().all(|stmt| match stmt {
+        Stmt::If(node) => if_branch_suspendable(&node.body) && if_branch_suspendable(&node.orelse),
+        Stmt::Try(t) => {
+            if_branch_suspendable(&t.body)
+                && if_branch_suspendable(&t.orelse)
+                && if_branch_suspendable(&t.finalbody)
+                && t.handlers.iter().all(|h| {
+                    let ExceptHandler::ExceptHandler(eh) = h;
+                    if_branch_suspendable(&eh.body)
+                })
+        }
+        Stmt::For(_) | Stmt::While(_) | Stmt::With(_) | Stmt::TryStar(_) | Stmt::Match(_) => {
+            !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
+        }
         _ => true,
     })
 }
@@ -612,8 +604,8 @@ async fn run_generator_body(
         // Top-level `if` containing a (suspendable) yield: step it so a yield
         // after side-effecting statements resumes at the yield, not the top.
         if let Stmt::If(if_node) = stmt {
-            if branch_suspendable(&if_node.body)
-                && branch_suspendable(&if_node.orelse)
+            if if_branch_suspendable(&if_node.body)
+                && if_branch_suspendable(&if_node.orelse)
                 && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
             {
                 match run_if_suspendable(state, if_node, tools).await {
@@ -711,8 +703,8 @@ async fn run_for_suspendable(
             // branch resumes at the yield (via `if_stack`), not the branch top.
             let (result, is_if) = match stmt {
                 Stmt::If(if_node)
-                    if branch_suspendable(&if_node.body)
-                        && branch_suspendable(&if_node.orelse)
+                    if if_branch_suspendable(&if_node.body)
+                        && if_branch_suspendable(&if_node.orelse)
                         && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)) =>
                 {
                     (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
@@ -1090,8 +1082,8 @@ async fn step_try_phase(
                 (run_try_suspendable(state, nested_try, tools).await.map(|()| Value::None), true)
             }
             Stmt::If(if_node)
-                if branch_suspendable(&if_node.body)
-                    && branch_suspendable(&if_node.orelse)
+                if if_branch_suspendable(&if_node.body)
+                    && if_branch_suspendable(&if_node.orelse)
                     && super::definitions::contains_yield_stmts(std::slice::from_ref(
                         &stmts[i],
                     )) =>
