@@ -949,6 +949,7 @@ pub(super) async fn try_builtin(
                 Some(Value::Dict(src)) => Some(src.lock().clone()),
                 Some(Value::Counter(src)) => Some(src.clone()),
                 Some(Value::DefaultDict(data)) => Some(data.items.clone()),
+                Some(Value::ChainMap(maps)) => Some(crate::types::chainmap_contents(maps)),
                 _ => None,
             };
             if let Some(src) = mapping_src {

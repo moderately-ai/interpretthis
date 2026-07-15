@@ -602,6 +602,9 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
                     .map(|(k, v)| estimate_key_size(k) + estimate_value_size(v))
                     .sum::<usize>()
         }
+        // The maps are shared Dict handles counted elsewhere; charge a
+        // flat per-map pointer weight to avoid double-counting.
+        Value::ChainMap(maps) => 24 + maps.len() * 8,
         Value::EnumMember { class_name, member_name, value, .. } => {
             32 + class_name.len() + member_name.len() + estimate_value_size(value)
         }

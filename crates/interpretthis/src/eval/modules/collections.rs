@@ -17,7 +17,7 @@ use crate::{
 
 /// Whether `collections` provides a callable named `name`.
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "Counter" | "deque" | "defaultdict" | "OrderedDict" | "namedtuple")
+    matches!(name, "Counter" | "deque" | "defaultdict" | "OrderedDict" | "namedtuple" | "ChainMap")
 }
 
 /// Snapshot a `dict` or `Counter` argument's entries into an owned map
@@ -158,6 +158,26 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
                 }
             }
             Ok(Value::Dict(crate::value::shared_dict(entries)))
+        }
+        // `ChainMap(*maps)` — search the maps left-to-right; writes hit
+        // the first. Each map must be a dict (our mapping model); no
+        // args seeds a single empty dict, matching CPython.
+        "ChainMap" => {
+            let mut maps: Vec<Value> = Vec::with_capacity(args.len().max(1));
+            for arg in args {
+                if !matches!(arg, Value::Dict(_)) {
+                    return Err(InterpreterError::TypeError(format!(
+                        "ChainMap() argument must be a mapping, not '{}'",
+                        arg.type_name()
+                    ))
+                    .into());
+                }
+                maps.push(arg.clone());
+            }
+            if maps.is_empty() {
+                maps.push(Value::Dict(crate::value::shared_dict(IndexMap::new())));
+            }
+            Ok(Value::ChainMap(maps))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'collections' has no attribute '{func}'"

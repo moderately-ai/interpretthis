@@ -588,6 +588,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::Counter(_) => &COUNTER_TYPE,
         Value::Deque { .. } => &DEQUE_TYPE,
         Value::DefaultDict { .. } => &DEFAULTDICT_TYPE,
+        Value::ChainMap(_) => &CHAINMAP_TYPE,
         Value::Decimal(_) => &DECIMAL_TYPE,
         Value::Fraction(_) => &FRACTION_TYPE,
         Value::Date(_) => &DATE_TYPE,
@@ -971,6 +972,183 @@ static DEFAULTDICT_TYPE: TypeObject = TypeObject {
     set_attr_slot: None,
     has_methods_table: true,
 };
+/// `collections.ChainMap` TypeObject. Lookups/iteration/len search the
+/// underlying (shared) maps left-to-right; writes and `del` target the
+/// first map. Methods (keys/values/items/get/new_child/…) route through
+/// the method-dispatch table.
+static CHAINMAP_TYPE: TypeObject = TypeObject {
+    name: "ChainMap",
+    eq_slot: noimpl_eq,
+    hash_slot: None,
+    lt_slot: noimpl_lt,
+    contains_slot: Some(chainmap_contains),
+    arith_slot: noimpl_arith,
+    iter_slot: Some(chainmap_iter),
+    get_item_slot: Some(chainmap_get_item),
+    set_item_slot: Some(chainmap_set_item),
+    del_item_slot: Some(chainmap_del_item),
+    missing_slot: None,
+    len_slot: Some(chainmap_len),
+    get_attr_slot: Some(chainmap_get_attr),
+    set_attr_slot: None,
+    has_methods_table: true,
+};
+
+/// Iterate a `ChainMap`'s maps, invoking `f` with each underlying dict's
+/// locked contents. Non-dict entries (shouldn't occur) are skipped.
+fn chainmap_for_each_map(
+    maps: &[Value],
+    mut f: impl FnMut(&indexmap::IndexMap<crate::value::ValueKey, Value>),
+) {
+    for m in maps {
+        if let Value::Dict(map) = m {
+            f(&map.lock());
+        }
+    }
+}
+
+/// Materialise a `ChainMap`'s effective mapping (reversed-map iteration
+/// order, first map's value winning) — used by `dict(chainmap)`.
+pub(crate) fn chainmap_contents(
+    maps: &[Value],
+) -> indexmap::IndexMap<crate::value::ValueKey, Value> {
+    let mut out = indexmap::IndexMap::new();
+    for m in maps.iter().rev() {
+        if let Value::Dict(map) = m {
+            for (k, v) in map.lock().iter() {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    out
+}
+
+fn chainmap_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
+    let Value::ChainMap(maps) = container else {
+        unreachable!("chainmap_get_item only on CHAINMAP_TYPE")
+    };
+    let key = crate::eval::literals::value_to_key(index)?;
+    for m in maps {
+        if let Value::Dict(map) = m {
+            if let Some(v) = map.lock().get(&key).cloned() {
+                return Ok(v);
+            }
+        }
+    }
+    Err(crate::value::ExceptionValue::key_error(key).into())
+}
+
+fn chainmap_set_item(
+    container: &mut Value,
+    index: &Value,
+    value: Value,
+) -> Result<isize, EvalError> {
+    let Value::ChainMap(maps) = container else {
+        unreachable!("chainmap_set_item only on CHAINMAP_TYPE")
+    };
+    let key = crate::eval::literals::value_to_key(index)?;
+    // Writes always target the first map (CPython). The map is a shared
+    // Dict, so its own store is mutated; size is accounted there.
+    if let Some(Value::Dict(first)) = maps.first() {
+        first.lock().insert(key, value);
+    }
+    Ok(0)
+}
+
+fn chainmap_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalError> {
+    let Value::ChainMap(maps) = container else {
+        unreachable!("chainmap_del_item only on CHAINMAP_TYPE")
+    };
+    let key = crate::eval::literals::value_to_key(index)?;
+    if let Some(Value::Dict(first)) = maps.first() {
+        if first.lock().shift_remove(&key).is_some() {
+            return Ok(0);
+        }
+    }
+    // CPython: "Key not found in the first mapping: <key>".
+    Err(crate::value::ExceptionValue::new(
+        "KeyError",
+        format!("Key not found in the first mapping: {key}"),
+    )
+    .into())
+}
+
+fn chainmap_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
+    let Value::ChainMap(maps) = container else {
+        unreachable!("chainmap_contains only on CHAINMAP_TYPE")
+    };
+    let key = crate::eval::literals::value_to_key(item)?;
+    let mut found = false;
+    chainmap_for_each_map(maps, |m| found = found || m.contains_key(&key));
+    Ok(found)
+}
+
+#[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]
+fn chainmap_len(value: &Value) -> Result<usize, EvalError> {
+    let Value::ChainMap(maps) = value else { unreachable!("chainmap_len only on CHAINMAP_TYPE") };
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "ValueKey's interior mutability is not used for its Hash/Eq (keys are hashable \
+                  ValueKey variants), so it is a sound HashSet key"
+    )]
+    let mut seen: rustc_hash::FxHashSet<crate::value::ValueKey> = rustc_hash::FxHashSet::default();
+    chainmap_for_each_map(maps, |m| {
+        for k in m.keys() {
+            seen.insert(k.clone());
+        }
+    });
+    Ok(seen.len())
+}
+
+#[expect(clippy::unnecessary_wraps, reason = "IterSlot protocol")]
+fn chainmap_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
+    let Value::ChainMap(maps) = value else { unreachable!("chainmap_iter only on CHAINMAP_TYPE") };
+    // CPython iterates `dict.fromkeys(chain.from_iterable(reversed(maps)))`
+    // — keys of later maps come first, deduped, first occurrence wins.
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "ValueKey's interior mutability is not used for its Hash/Eq (keys are hashable \
+                  ValueKey variants), so it is a sound HashSet key"
+    )]
+    let mut seen: rustc_hash::FxHashSet<crate::value::ValueKey> = rustc_hash::FxHashSet::default();
+    let mut order: Vec<crate::value::ValueKey> = Vec::new();
+    for m in maps.iter().rev() {
+        if let Value::Dict(map) = m {
+            for k in map.lock().keys() {
+                if seen.insert(k.clone()) {
+                    order.push(k.clone());
+                }
+            }
+        }
+    }
+    Ok(order.into_iter().map(|k| k.to_value()).collect())
+}
+
+/// `ChainMap.maps` / `.parents` attribute access; other names raise.
+fn chainmap_get_attr(value: &Value, attr: &str) -> Result<Value, EvalError> {
+    let Value::ChainMap(maps) = value else {
+        unreachable!("chainmap_get_attr only on CHAINMAP_TYPE")
+    };
+    match attr {
+        // `.maps` is the list of underlying mappings (shared handles).
+        "maps" => Ok(Value::List(crate::value::shared_list(maps.clone()))),
+        // `.parents` is a new ChainMap over all but the first map.
+        "parents" => {
+            let rest: Vec<Value> = maps.iter().skip(1).cloned().collect();
+            let rest = if rest.is_empty() {
+                vec![Value::Dict(crate::value::shared_dict(indexmap::IndexMap::new()))]
+            } else {
+                rest
+            };
+            Ok(Value::ChainMap(rest))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'ChainMap' object has no attribute '{attr}'"
+        ))
+        .into()),
+    }
+}
+
 /// `hashlib` digest TypeObject. HashDigest's
 /// surface is attribute-style methods (`.hexdigest()`, `.digest()`,
 /// `.update()`); the slot routes through hashlib's existing

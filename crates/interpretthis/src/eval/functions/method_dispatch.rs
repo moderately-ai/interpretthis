@@ -260,6 +260,67 @@ fn defaultdict_methods(
     methods::dict::dispatch_dict_method(&mut data.items, method, args, kwargs)
 }
 
+fn chainmap_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::ChainMap(maps) = obj else {
+        return Err(type_mismatch("ChainMap"));
+    };
+    match method {
+        // `new_child(m=None)` prepends `m` (or a fresh empty dict).
+        "new_child" => {
+            let child = match args.first() {
+                Some(v @ Value::Dict(_)) => v.clone(),
+                None | Some(Value::None) => Value::Dict(crate::value::shared_dict(IndexMap::new())),
+                Some(other) => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "ChainMap.new_child() argument must be a mapping, not '{}'",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            let mut new_maps = Vec::with_capacity(maps.len() + 1);
+            new_maps.push(child);
+            new_maps.extend(maps.iter().cloned());
+            Ok(MethodOutcome::pure(Value::ChainMap(new_maps)))
+        }
+        // `copy()` copies the first map, sharing the rest (CPython).
+        "copy" => {
+            let mut new_maps = maps.clone();
+            let copied = match new_maps.first() {
+                Some(Value::Dict(first)) => Some(crate::value::shared_dict(first.lock().clone())),
+                _ => None,
+            };
+            if let Some(c) = copied {
+                new_maps[0] = Value::Dict(c);
+            }
+            Ok(MethodOutcome::pure(Value::ChainMap(new_maps)))
+        }
+        // Read-only views search all maps (first-map value wins).
+        "keys" | "values" | "items" | "get" | "__contains__" => {
+            let mut merged = crate::types::chainmap_contents(maps);
+            methods::dict::dispatch_dict_method(&mut merged, method, args, kwargs)
+        }
+        // Mutating methods (pop/popitem/clear/setdefault/update/…)
+        // target the first map, matching CPython.
+        _ => {
+            if let Some(Value::Dict(first)) = maps.first() {
+                let mut guard = first.lock();
+                methods::dict::dispatch_dict_method(&mut guard, method, args, kwargs)
+            } else {
+                Err(InterpreterError::AttributeError(format!(
+                    "'ChainMap' object has no attribute '{method}'"
+                ))
+                .into())
+            }
+        }
+    }
+}
+
 fn set_methods(
     obj: &mut Value,
     method: &str,
@@ -526,6 +587,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Counter(_) => Some(counter_methods),
         Value::Deque { .. } => Some(deque_methods),
         Value::DefaultDict(_) => Some(defaultdict_methods),
+        Value::ChainMap(_) => Some(chainmap_methods),
         Value::Set(_) => Some(set_methods),
         Value::Frozenset(_) => Some(frozenset_methods),
         Value::Tuple(_) => Some(tuple_methods),

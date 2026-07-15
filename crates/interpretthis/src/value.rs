@@ -451,6 +451,13 @@ pub enum Value {
     /// `factory()` under the key and return it — distinct from
     /// Counter's `__missing__` which returns 0 without inserting.
     DefaultDict(Box<DefaultDictData>),
+    /// `collections.ChainMap` — an ordered list of underlying maps
+    /// searched left-to-right. Each element is a `Value::Dict` (sharing
+    /// its `Arc`), so lookups see live mutations of the source dicts and
+    /// writes go to `maps[0]`'s shared store — CPython reference
+    /// semantics. Never empty (CPython seeds an empty dict for
+    /// `ChainMap()`).
+    ChainMap(Vec<Self>),
     /// `enum.Enum` member. Wraps the underlying value with
     /// the class name + member name + kind (Plain vs IntEnum vs
     /// StrEnum), so we can match CPython's `Color.RED` repr,
@@ -1519,6 +1526,8 @@ impl Value {
             Self::TimeDelta(micros) => *micros != 0,
             Self::Deque { items, .. } => !items.is_empty(),
             Self::DefaultDict(data) => !data.items.is_empty(),
+            // Truthy when any underlying map has entries.
+            Self::ChainMap(maps) => maps.iter().any(Self::is_truthy),
             Self::EnumMember { value, .. } => value.is_truthy(),
             // Decimal / Fraction are falsy at zero, matching CPython
             // (`bool(Decimal("0")) is False`, `bool(Fraction(0)) is
@@ -1595,6 +1604,7 @@ impl Value {
             Self::HashDigest { .. } => "_hashlib.HASH",
             Self::Deque { .. } => "deque",
             Self::DefaultDict { .. } => "defaultdict",
+            Self::ChainMap(_) => "ChainMap",
             // CPython: type(Color.RED).__name__ == "Color". Our model
             // returns the class name so `type(x).__name__` reflects
             // the enum class.
@@ -1934,6 +1944,17 @@ impl fmt::Display for Value {
                     write!(f, "{}: {}", k, v.repr())?;
                 }
                 write!(f, "}})")
+            }
+            // CPython: `ChainMap({'a': 1}, {'b': 2})`.
+            Self::ChainMap(maps) => {
+                write!(f, "ChainMap(")?;
+                for (i, m) in maps.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{m}")?;
+                }
+                write!(f, ")")
             }
             // CPython: empty Counter prints `Counter()`. Non-empty
             // prints `Counter({...})` with entries sorted by count
