@@ -637,6 +637,37 @@ pub fn assign_target<'a>(
                 // `d[i] = v` O(n²) for growing dicts because each assignment
                 // cloned the entire dict before routing back to `assign_terminal`.
                 if let place::PlaceStep::Index(key) = last {
+                    // A dict with an instance key needs async `__hash__`/`__eq__`
+                    // insertion (the sync `value_to_key` path reports the
+                    // instance as unhashable). Snapshot the target dict, insert,
+                    // and write back to the same shared handle.
+                    if matches!(key, Value::Instance(_)) {
+                        let dict_handle = {
+                            let root =
+                                state.variables.get_mut(&target_place.root).ok_or_else(|| {
+                                    EvalError::from(InterpreterError::name_not_defined(
+                                        &target_place.root,
+                                    ))
+                                })?;
+                            place::with_navigate_mut(root, prefix, |container| match container {
+                                Value::Dict(map) => Some(map.clone()),
+                                _ => None,
+                            })?
+                        };
+                        if let Some(map) = dict_handle {
+                            let mut snapshot = map.lock().clone();
+                            crate::eval::op::dict_insert_instance_key_pub(
+                                state,
+                                &mut snapshot,
+                                key,
+                                value,
+                                tools,
+                            )
+                            .await?;
+                            *map.lock() = snapshot;
+                            return Ok(());
+                        }
+                    }
                     let receiver = {
                         let root =
                             state.variables.get_mut(&target_place.root).ok_or_else(|| {
