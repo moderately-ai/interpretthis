@@ -1,0 +1,13 @@
+import calendar
+print(calendar.isleap(2024), calendar.isleap(2023))
+print(calendar.weekday(2026, 7, 15))
+mr = calendar.monthrange(2026, 2)
+print(mr[0], mr[1], mr == (6, 28))
+print(calendar.leapdays(2000, 2025))
+print(calendar.month_name[1])
+print(calendar.day_name[0])
+print(calendar.month_abbr[12])
+print(calendar.day_abbr[6])
+print([calendar.isleap(y) for y in [2000, 1900, 2004, 2100]])
+mr2 = calendar.monthrange(2026, 12)
+print(mr2[0], mr2[1], mr2 == (1, 31))
