@@ -10,8 +10,9 @@ use super::{
     dispatch::call_value_as_function,
     float_to_int_exact,
     helpers::{
-        SortRequest, apply_key_fn, bytes_from_int_items, check_isinstance, dsu_sort, object_id,
-        parse_complex_str, parse_int_str, pow_three_arg, type_arg_name,
+        BUILTIN_TYPE_NAMES, SortRequest, apply_key_fn, builtin_type_issubclass,
+        bytes_from_int_items, check_isinstance, dsu_sort, object_id, parse_complex_str,
+        parse_int_str, pow_three_arg, type_arg_name,
     },
     method_dispatch::CallArgs,
     resolve_proxy, round_bigint, round_float, round_int, to_len_i64, value_to_i64,
@@ -468,18 +469,26 @@ pub(super) async fn try_builtin(
             // issubclass(C, B): True iff B is in C's MRO. C must be a
             // class value; B can be a single class or a tuple of
             // classes. CPython raises TypeError when arg1 isn't a class.
-            let Value::Class(child_name) = &args[0] else {
-                return Err(InterpreterError::TypeError(
-                    "issubclass() arg 1 must be a class".into(),
-                )
-                .into());
-            };
-            let class = state.classes.get(child_name);
-            let check_one = |target_name: &str| -> bool {
-                if target_name == "object" {
-                    return true;
+            let child_name = match &args[0] {
+                Value::Class(n) | Value::Type(n) | Value::ExceptionType(n) => n.clone(),
+                // A bare builtin name is a class only if it names a type
+                // (`bool`), not a function (`len`).
+                Value::BuiltinName(n) if BUILTIN_TYPE_NAMES.contains(&n.as_str()) => n.clone(),
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "issubclass() arg 1 must be a class".into(),
+                    )
+                    .into());
                 }
-                class.is_some_and(|c| c.mro.iter().any(|a| a == target_name))
+            };
+            let class = state.classes.get(&child_name);
+            let check_one = |target_name: &str| -> bool {
+                if let Some(c) = class {
+                    if target_name == "object" || c.mro.iter().any(|a| a == target_name) {
+                        return true;
+                    }
+                }
+                builtin_type_issubclass(&child_name, target_name)
             };
             if let Value::Tuple(items) = &args[1] {
                 let any = items.iter().any(|item| check_one(&type_arg_name(item)));

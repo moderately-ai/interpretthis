@@ -605,6 +605,45 @@ pub(super) fn check_isinstance(state: &InterpreterState, obj: &Value, type_name:
 /// argument: a class/type object yields its name; a built-in/exception name
 /// sentinel string is stripped of its prefix; a `ModuleFunction` (e.g.
 /// `collections.Counter` accessed via attribute) yields its function name.
+/// The built-in type names our interpreter recognises as classes. Used to
+/// tell a type object (`bool`, `int`) apart from a built-in *function*
+/// (`len`, `sorted`) — both surface as `Value::BuiltinName`, but only the
+/// former is a valid `issubclass`/`type`-argument. Exception types carry
+/// their own `Value::ExceptionType` sentinel and are handled separately.
+pub(super) const BUILTIN_TYPE_NAMES: &[&str] = &[
+    "int",
+    "float",
+    "complex",
+    "bool",
+    "str",
+    "bytes",
+    "bytearray",
+    "list",
+    "tuple",
+    "dict",
+    "set",
+    "frozenset",
+    "range",
+    "type",
+    "object",
+    "slice",
+    "memoryview",
+    "NoneType",
+];
+
+/// Built-in subclass relationship for `issubclass` when the child is a
+/// built-in (not user-defined) type: reflexive, everything is `object`,
+/// `bool` ⊂ `int`, `Counter` ⊂ `dict`, and the exception hierarchy.
+pub(super) fn builtin_type_issubclass(child: &str, target: &str) -> bool {
+    if target == "object" || child == target {
+        return true;
+    }
+    match (child, target) {
+        ("bool", "int") | ("Counter", "dict") => true,
+        _ => crate::eval::exceptions::builtin_exception_issubclass(child, target),
+    }
+}
+
 pub(super) fn type_arg_name(value: &Value) -> String {
     match value {
         Value::Class(n) | Value::Type(n) | Value::BuiltinName(n) | Value::ExceptionType(n) => {
