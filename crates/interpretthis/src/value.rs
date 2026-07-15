@@ -250,6 +250,26 @@ impl BuiltinIterName {
     }
 }
 
+/// Which live dict view a [`Value::DictView`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DictViewKind {
+    Keys,
+    Values,
+    Items,
+}
+
+impl DictViewKind {
+    /// The CPython type name (`dict_keys` / `dict_values` / `dict_items`).
+    #[must_use]
+    pub const fn type_name(self) -> &'static str {
+        match self {
+            Self::Keys => "dict_keys",
+            Self::Values => "dict_values",
+            Self::Items => "dict_items",
+        }
+    }
+}
+
 /// Every variable, tool argument, and return value is a `Value`. This enum
 /// covers all Python types the interpreter supports. Use the `as_*()` methods
 /// for borrowing access, `try_into_*()` for consuming access, or pattern matching.
@@ -325,6 +345,17 @@ pub enum Value {
         )]
         SharedDict,
     ),
+    /// A live `dict_keys` / `dict_values` / `dict_items` view over a
+    /// shared dict (`d.keys()` etc.). Reads the dict on each use so it
+    /// reflects later mutations; keys/items are set-like (`& | - ^`).
+    DictView {
+        #[serde(
+            serialize_with = "serialize_shared_dict",
+            deserialize_with = "deserialize_shared_dict"
+        )]
+        dict: SharedDict,
+        kind: DictViewKind,
+    },
     /// Python `set` (stored as Vec since Value isn't Hash).
     Set(Vec<Self>),
     /// Python `frozenset` — an immutable, hashable set. Same Vec storage as
@@ -1532,6 +1563,7 @@ impl Value {
             Self::DefaultDict(data) => !data.items.is_empty(),
             // Truthy when any underlying map has entries.
             Self::ChainMap(maps) => maps.iter().any(Self::is_truthy),
+            Self::DictView { dict, .. } => !dict.lock().is_empty(),
             // A Template object is always truthy (like any instance).
             Self::Template(_) => true,
             Self::EnumMember { value, .. } => value.is_truthy(),
@@ -1612,6 +1644,7 @@ impl Value {
             Self::DefaultDict { .. } => "defaultdict",
             Self::ChainMap(_) => "ChainMap",
             Self::Template(_) => "Template",
+            Self::DictView { kind, .. } => kind.type_name(),
             // CPython: type(Color.RED).__name__ == "Color". Our model
             // returns the class name so `type(x).__name__` reflects
             // the enum class.
@@ -1966,6 +1999,25 @@ impl fmt::Display for Value {
             // CPython prints `<string.Template object at 0x...>`; the
             // address is unavailable, so use a stable placeholder.
             Self::Template(_) => write!(f, "<string.Template object>"),
+            // CPython: `dict_keys([...])` / `dict_values([...])` /
+            // `dict_items([(k, v), ...])`.
+            Self::DictView { dict, kind } => {
+                write!(f, "{}([", kind.type_name())?;
+                let guard = dict.lock();
+                for (i, (k, v)) in guard.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    match kind {
+                        DictViewKind::Keys => write!(f, "{}", k.to_value().repr())?,
+                        DictViewKind::Values => write!(f, "{}", v.repr())?,
+                        DictViewKind::Items => {
+                            write!(f, "({}, {})", k.to_value().repr(), v.repr())?
+                        }
+                    }
+                }
+                write!(f, "])")
+            }
             // CPython: empty Counter prints `Counter()`. Non-empty
             // prints `Counter({...})` with entries sorted by count
             // descending, insertion order as the tie-breaker
@@ -2237,6 +2289,23 @@ impl Value {
             Self::List(items) => Some(items.lock()),
             _ => None,
         }
+    }
+
+    /// Materialise a `dict_keys`/`dict_values`/`dict_items` view into a
+    /// `Vec` of its current elements (keys, values, or `(k, v)` tuples).
+    /// `None` for any non-view value. Used by the bindings to render a
+    /// view at the host boundary.
+    #[must_use]
+    pub fn dict_view_elements(&self) -> Option<Vec<Self>> {
+        let Self::DictView { dict, kind } = self else { return None };
+        let guard = dict.lock();
+        Some(match kind {
+            DictViewKind::Keys => guard.keys().map(ValueKey::to_value).collect(),
+            DictViewKind::Values => guard.values().cloned().collect(),
+            DictViewKind::Items => {
+                guard.iter().map(|(k, v)| Self::Tuple(vec![k.to_value(), v.clone()])).collect()
+            }
+        })
     }
 
     /// Get the shared dict handle if this is a `Value::Dict`. Callers

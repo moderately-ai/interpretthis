@@ -589,6 +589,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::Deque { .. } => &DEQUE_TYPE,
         Value::DefaultDict { .. } => &DEFAULTDICT_TYPE,
         Value::ChainMap(_) => &CHAINMAP_TYPE,
+        Value::DictView { .. } => &DICTVIEW_TYPE,
         Value::Decimal(_) => &DECIMAL_TYPE,
         Value::Fraction(_) => &FRACTION_TYPE,
         Value::Date(_) => &DATE_TYPE,
@@ -972,6 +973,89 @@ static DEFAULTDICT_TYPE: TypeObject = TypeObject {
     set_attr_slot: None,
     has_methods_table: true,
 };
+/// Live `dict_keys` / `dict_values` / `dict_items` view. Iteration,
+/// `len`, and membership read the shared dict on demand; the set
+/// operators on keys/items are handled by `apply_binop`'s coercion.
+static DICTVIEW_TYPE: TypeObject = TypeObject {
+    name: "dict_view",
+    eq_slot: dictview_eq,
+    hash_slot: None,
+    lt_slot: noimpl_lt,
+    contains_slot: Some(dictview_contains),
+    arith_slot: noimpl_arith,
+    iter_slot: Some(dictview_iter),
+    get_item_slot: None,
+    set_item_slot: None,
+    del_item_slot: None,
+    missing_slot: None,
+    len_slot: Some(dictview_len),
+    get_attr_slot: None,
+    set_attr_slot: None,
+    has_methods_table: true,
+};
+
+#[expect(clippy::unnecessary_wraps, reason = "IterSlot protocol")]
+fn dictview_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
+    let Value::DictView { dict, kind } = value else {
+        unreachable!("dictview_iter only on DICTVIEW_TYPE")
+    };
+    let guard = dict.lock();
+    Ok(match kind {
+        crate::value::DictViewKind::Keys => {
+            guard.keys().map(crate::value::ValueKey::to_value).collect()
+        }
+        crate::value::DictViewKind::Values => guard.values().cloned().collect(),
+        crate::value::DictViewKind::Items => {
+            guard.iter().map(|(k, v)| Value::Tuple(vec![k.to_value(), v.clone()])).collect()
+        }
+    })
+}
+
+#[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]
+fn dictview_len(value: &Value) -> Result<usize, EvalError> {
+    let Value::DictView { dict, .. } = value else {
+        unreachable!("dictview_len only on DICTVIEW_TYPE")
+    };
+    let len = dict.lock().len();
+    Ok(len)
+}
+
+fn dictview_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
+    let Value::DictView { dict, kind } = container else {
+        unreachable!("dictview_contains only on DICTVIEW_TYPE")
+    };
+    let guard = dict.lock();
+    Ok(match kind {
+        crate::value::DictViewKind::Keys => {
+            crate::eval::literals::value_to_key(item).is_ok_and(|k| guard.contains_key(&k))
+        }
+        crate::value::DictViewKind::Values => {
+            guard.values().any(|v| crate::eval::operations::values_equal_pub(v, item))
+        }
+        crate::value::DictViewKind::Items => match item {
+            Value::Tuple(pair) if pair.len() == 2 => crate::eval::literals::value_to_key(&pair[0])
+                .ok()
+                .and_then(|k| guard.get(&k))
+                .is_some_and(|v| crate::eval::operations::values_equal_pub(v, &pair[1])),
+            _ => false,
+        },
+    })
+}
+
+fn dictview_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
+    // A view compares equal to another view / set / frozenset with the
+    // same elements (CPython: keys/items views are set-like).
+    let to_elems = |v: &Value| -> Option<Vec<Value>> {
+        match v {
+            Value::DictView { .. } => dictview_iter(v).ok(),
+            Value::Set(items) | Value::Frozenset(items) => Some(items.clone()),
+            _ => None,
+        }
+    };
+    let (a, b) = (to_elems(lhs)?, to_elems(rhs)?);
+    Some(a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| recurse_eq(x, y))))
+}
+
 /// `collections.ChainMap` TypeObject. Lookups/iteration/len search the
 /// underlying (shared) maps left-to-right; writes and `del` target the
 /// first map. Methods (keys/values/items/get/new_child/…) route through

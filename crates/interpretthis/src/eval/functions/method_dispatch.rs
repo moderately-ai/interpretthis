@@ -217,6 +217,25 @@ fn dict_methods(
     let Value::Dict(map) = obj else {
         return Err(type_mismatch("dict"));
     };
+    // `keys`/`values`/`items` return a LIVE view over the shared dict
+    // (reflects later mutations, and keys/items are set-like) rather
+    // than a materialised list.
+    if let Some(kind) = match method {
+        "keys" => Some(crate::value::DictViewKind::Keys),
+        "values" => Some(crate::value::DictViewKind::Values),
+        "items" => Some(crate::value::DictViewKind::Items),
+        _ => None,
+    } {
+        reject_kwargs(method, kwargs)?;
+        if !args.is_empty() {
+            return Err(InterpreterError::TypeError(format!(
+                "{method}() takes no arguments ({} given)",
+                args.len()
+            ))
+            .into());
+        }
+        return Ok(MethodOutcome::pure(Value::DictView { dict: map.clone(), kind }));
+    }
     // The dict methods are sync and mutate through the guard, so
     // holding the lock across the call is deadlock-free and the shared
     // dict observes the mutation.

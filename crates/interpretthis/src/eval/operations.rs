@@ -120,6 +120,14 @@ pub fn apply_binop(
     decimal_prec: i64,
     max_int_bits: u64,
 ) -> Result<Value, EvalError> {
+    // `dict_keys` / `dict_items` are set-like: coerce them to a set so
+    // `d.keys() & other`, `|`, `-`, `^` reuse the set arithmetic.
+    // `dict_values` is NOT set-like, so it is left as-is and a set op on
+    // it falls through to the normal TypeError.
+    let left_set = dictview_as_set(left);
+    let right_set = dictview_as_set(right);
+    let left = left_set.as_ref().unwrap_or(left);
+    let right = right_set.as_ref().unwrap_or(right);
     match op {
         ast::Operator::Add => {
             crate::types::dispatch_binop(crate::types::BinOp::Add, left, right, decimal_prec)
@@ -149,6 +157,24 @@ pub fn apply_binop(
         ast::Operator::BitAnd => bitand_values(left, right),
         ast::Operator::MatMult => matmult_values(left, right),
     }
+}
+
+/// Coerce a set-like dict view (`dict_keys` / `dict_items`) into a
+/// `Value::Set` of its elements for set arithmetic. `dict_values` is not
+/// set-like (values may be unhashable / duplicated), so returns `None`.
+fn dictview_as_set(value: &Value) -> Option<Value> {
+    let Value::DictView { dict, kind } = value else { return None };
+    let guard = dict.lock();
+    let items: Vec<Value> = match kind {
+        crate::value::DictViewKind::Keys => {
+            guard.keys().map(crate::value::ValueKey::to_value).collect()
+        }
+        crate::value::DictViewKind::Items => {
+            guard.iter().map(|(k, v)| Value::Tuple(vec![k.to_value(), v.clone()])).collect()
+        }
+        crate::value::DictViewKind::Values => return None,
+    };
+    Some(Value::Set(items))
 }
 
 /// Builtin-pair arithmetic kernel for the type-object slot table.

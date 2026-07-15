@@ -632,6 +632,8 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         // flat per-map pointer weight to avoid double-counting.
         Value::ChainMap(maps) => 24 + maps.len() * 8,
         Value::Template(t) => 24 + t.len(),
+        // The dict is a shared handle counted elsewhere.
+        Value::DictView { .. } => 16,
         Value::EnumMember { class_name, member_name, value, .. } => {
             32 + class_name.len() + member_name.len() + estimate_value_size(value)
         }

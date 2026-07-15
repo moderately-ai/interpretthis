@@ -113,6 +113,15 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
                 items.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
             PyFrozenSet::new(py, converted)?.into_any()
         }
+        // A live dict view materialises to a list of its elements at the
+        // boundary (CPython's dict_keys/values/items aren't representable
+        // as a distinct pyo3 type here; a list preserves iteration).
+        Value::DictView { .. } => {
+            let items = value.dict_view_elements().unwrap_or_default();
+            let converted =
+                items.iter().map(|v| value_to_py(py, v)).collect::<PyResult<Vec<_>>>()?;
+            PyList::new(py, converted)?.into_any()
+        }
         Value::Dict(map) => {
             let dict = PyDict::new(py);
             let snapshot = map.lock().clone();

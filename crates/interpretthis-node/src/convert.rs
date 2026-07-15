@@ -156,6 +156,11 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
             let snapshot: Vec<Value> = items.lock().clone();
             array_to_js(env, &snapshot, false)
         }
+        // A live dict view materialises to a JS array of its elements.
+        Value::DictView { .. } => {
+            let items = value.dict_view_elements().unwrap_or_default();
+            array_to_js(env, &items, false)
+        }
         // Frozen to signal that this was a tuple. It still comes back as a list:
         // JavaScript has no tuple to round-trip through.
         Value::Tuple(items) => array_to_js(env, items, true),
