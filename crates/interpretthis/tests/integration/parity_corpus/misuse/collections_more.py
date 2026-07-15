@@ -1,0 +1,25 @@
+from collections import OrderedDict, defaultdict, deque, Counter
+od = OrderedDict()
+od["a"] = 1
+od["b"] = 2
+od["c"] = 3
+print(list(od.keys()))
+od.move_to_end("a")
+print(list(od.keys()))
+dd = defaultdict(list)
+dd["x"].append(1)
+dd["x"].append(2)
+dd["y"].append(3)
+print(dict(dd))
+dq = deque([1, 2, 3])
+dq.appendleft(0)
+dq.append(4)
+print(list(dq))
+dq.rotate(2)
+print(list(dq))
+c = Counter("mississippi")
+print(c.most_common(2))
+print(c["s"])
+c2 = Counter([1, 1, 2, 3, 3, 3])
+print(dict(c2))
+print(sum(c2.values()))

@@ -39,6 +39,8 @@ pub fn has_function(name: &str) -> bool {
             | "starmap"
             | "pairwise"
             | "filterfalse"
+            | "tee"
+            | "chain.from_iterable"
     )
 }
 
@@ -51,6 +53,38 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
                 out.extend(iterate_value(arg)?);
             }
             Ok(Value::List(shared_list(out)))
+        }
+        "chain.from_iterable" => {
+            // chain.from_iterable(iterable) — flatten one level: iterate the
+            // single argument and concatenate each sub-iterable in order.
+            let mut out: Vec<Value> = Vec::new();
+            for sub in iterate_value(need_arg("chain.from_iterable", args, 0)?)? {
+                out.extend(iterate_value(&sub)?);
+            }
+            Ok(Value::List(shared_list(out)))
+        }
+        "tee" => {
+            // tee(iterable, n=2) — n independent iterators over the same items.
+            // The eager model returns n separate list copies (matching how
+            // `chain` etc. materialise), so each iterates independently.
+            let items = iterate_value(need_arg(func, args, 0)?)?;
+            let n = match args.get(1) {
+                None => 2,
+                Some(Value::Bool(b)) => usize::from(*b),
+                Some(Value::Int(k)) if *k >= 0 => usize::try_from(*k).unwrap_or(0),
+                Some(Value::Int(_)) => {
+                    return Err(InterpreterError::ValueError("n must be >= 0".into()).into());
+                }
+                Some(other) => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "tee() n must be an integer (got '{}')",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            let copies = (0..n).map(|_| Value::List(shared_list(items.clone()))).collect();
+            Ok(Value::Tuple(copies))
         }
         "repeat" => {
             // repeat(obj, [times]) — bounded by `times`; unbounded

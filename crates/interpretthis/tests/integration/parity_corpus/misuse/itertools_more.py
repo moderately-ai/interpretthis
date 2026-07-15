@@ -1,0 +1,13 @@
+from itertools import groupby, chain, combinations, product, accumulate, takewhile, dropwhile, tee
+print([list(g) for k, g in groupby("aabbbcc")])
+print([k for k, g in groupby([1, 1, 2, 3, 3])])
+print(list(chain([1, 2], [3, 4], [5])))
+print(list(chain.from_iterable([[1, 2], [3, 4]])))
+print(list(combinations([1, 2, 3], 2)))
+print(list(product([1, 2], ["a", "b"])))
+print(list(accumulate([1, 2, 3, 4])))
+print(list(accumulate([1, 2, 3, 4], lambda a, b: a * b)))
+print(list(takewhile(lambda x: x < 3, [1, 2, 3, 4, 1])))
+print(list(dropwhile(lambda x: x < 3, [1, 2, 3, 4, 1])))
+a, b = tee([1, 2, 3])
+print(list(a), list(b))
