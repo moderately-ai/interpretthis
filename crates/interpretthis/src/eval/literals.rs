@@ -53,7 +53,10 @@ async fn eval_display_elements(
     for elt in elts {
         if let Expr::Starred(star) = elt {
             let value = eval_expr(state, &star.value, tools).await?;
-            items.extend(crate::eval::control_flow::iterate_value(&value)?);
+            // Use the async iterator protocol so a user-class instance's
+            // `__iter__`/`__next__` is honoured (the sync `iterate_value`
+            // only handles builtin containers).
+            items.extend(crate::eval::op::iter(state, &value, tools).await?);
         } else {
             items.push(eval_expr(state, elt, tools).await?);
         }
