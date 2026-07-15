@@ -283,6 +283,15 @@ pub struct InterpreterState {
     /// write-through). Transient — not part of the serialized
     /// checkpoint.
     pub frame_cell_owners: Vec<FxHashMap<String, u64>>,
+    /// User-set attributes on function objects (`func.attr = value`),
+    /// keyed by `FunctionDef::body_key` so every `Value::Function` clone
+    /// of the same `def` shares one attribute namespace — matching
+    /// CPython's per-function-object `__dict__`. Empty for the common
+    /// case (functions carry no custom attributes). Not serialized:
+    /// `body_key` is `#[serde(skip)]`, so custom attributes do not
+    /// survive a state export/import (a documented limitation, like the
+    /// by-name body-cache rebuild).
+    pub function_attrs: FxHashMap<String, indexmap::IndexMap<String, crate::value::Value>>,
     pub config: InterpreterConfig,
     /// Shared semaphore for concurrent tool calls.
     pub tool_semaphore: Arc<Semaphore>,
@@ -385,6 +394,7 @@ impl InterpreterState {
             builtin_iters: FxHashMap::default(),
             next_builtin_iter_id: 0,
             nonlocal_cells: FxHashMap::default(),
+            function_attrs: FxHashMap::default(),
             next_nonlocal_cell_id: 0,
             frame_cell_owners: Vec::new(),
             tool_semaphore: Arc::new(Semaphore::new(config.max_concurrent_tools as usize)),

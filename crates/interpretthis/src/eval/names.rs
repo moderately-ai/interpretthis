@@ -478,6 +478,13 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
             }
         }
         Value::Function(func_def) => {
+            // User-set function attributes (`func.attr = value`) shadow
+            // everything else, mirroring CPython's function `__dict__`.
+            if let Some(v) =
+                state.function_attrs.get(func_def.body_cache_key()).and_then(|m| m.get(attr_name))
+            {
+                return Ok(v.clone());
+            }
             if attr_name == "__name__" || attr_name == "__qualname__" {
                 // `functools.wraps` overrides the reported name; the real
                 // `name` stays the body-cache key.

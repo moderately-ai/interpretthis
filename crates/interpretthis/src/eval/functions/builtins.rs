@@ -876,7 +876,16 @@ pub(super) async fn try_builtin(
                             })
                     }
                     Value::Exception(_) => attr_name == "message" || attr_name == "args",
-                    Value::Type(_) | Value::Function(_) | Value::Lambda(_) => {
+                    Value::Function(func_def) => {
+                        attr_name == "__name__"
+                            || attr_name == "__qualname__"
+                            || attr_name == "__doc__"
+                            || state
+                                .function_attrs
+                                .get(func_def.body_cache_key())
+                                .is_some_and(|m| m.contains_key(attr_name))
+                    }
+                    Value::Type(_) | Value::Lambda(_) => {
                         attr_name == "__name__" || attr_name == "__qualname__"
                     }
                     Value::Module(module) => {

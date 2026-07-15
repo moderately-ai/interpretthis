@@ -126,6 +126,28 @@ pub async fn eval_aug_assign(
                 return Ok(Value::None);
             }
         }
+        // Augmented assignment to a function attribute (`counter.count += 1`):
+        // the attribute lives in `state.function_attrs`, which the place
+        // machinery cannot reach. Read-modify-write it directly.
+        if let Expr::Name(name_node) = attr_node.value.as_ref() {
+            if let Some(Value::Function(func_def)) = state.variables.get(name_node.id.as_str()) {
+                let key = func_def.body_cache_key().to_string();
+                let attr_name = attr_node.attr.as_str();
+                if let Some(current) =
+                    state.function_attrs.get(&key).and_then(|m| m.get(attr_name)).cloned()
+                {
+                    let rhs = eval_expr(state, &node.value, tools).await?;
+                    let new_value =
+                        crate::eval::op::aug_binop(state, node.op, &current, &rhs, tools).await?;
+                    state
+                        .function_attrs
+                        .entry(key)
+                        .or_default()
+                        .insert(attr_name.to_string(), new_value);
+                    return Ok(Value::None);
+                }
+            }
+        }
     }
 
     // Track E: defaultdict pre-touch. If the target is `d[k]` where
@@ -554,6 +576,23 @@ pub fn assign_target<'a>(
                                 class.class_attrs.insert(attr_name, value.clone());
                                 return Ok(());
                             }
+                        }
+                        // Function objects carry an arbitrary attribute
+                        // namespace (`func.attr = value`) — used by decorator
+                        // patterns that stash call counters or registries on the
+                        // wrapper. Keyed by `body_key` so all clones of the def
+                        // (`g = f; g.x = 1`) share one namespace, as CPython's
+                        // per-function `__dict__` does. Reject the dunder names
+                        // that report from the FunctionDef itself.
+                        if let Value::Function(func_def) = &obj {
+                            let attr_name = attr_node.attr.as_str();
+                            let key = func_def.body_cache_key().to_string();
+                            state
+                                .function_attrs
+                                .entry(key)
+                                .or_default()
+                                .insert(attr_name.to_string(), value.clone());
+                            return Ok(());
                         }
                     }
                 }
