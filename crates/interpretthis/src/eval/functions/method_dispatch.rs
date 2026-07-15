@@ -798,6 +798,27 @@ fn try_builtin_dunder(
             Some(v) => pure(v),
             None => Ok(None),
         },
+        // `x.__round__()` returns an int (round-half-to-even); `x.__round__(n)`
+        // returns the same numeric type rounded to that scale. Mirrors the
+        // `round()` builtin so both surfaces agree.
+        "__round__" => {
+            use crate::eval::functions::{
+                round_bigint, round_decimal, round_float, round_fraction, round_int, value_to_i64,
+            };
+            let ndigits = match args.first() {
+                Some(v) => Some(value_to_i64(v)?),
+                None => None,
+            };
+            match obj {
+                Value::Int(i) => pure(round_int(*i, ndigits)),
+                Value::BigInt(b) => pure(crate::value::int_from_bigint(round_bigint(b, ndigits))),
+                Value::Bool(b) => pure(round_int(i64::from(*b), ndigits)),
+                Value::Float(f) => pure(round_float(*f, ndigits)?),
+                Value::Decimal(d, _) => pure(round_decimal(d, ndigits)),
+                Value::Fraction(fr) => pure(round_fraction(fr, ndigits)),
+                _ => Ok(None),
+            }
+        }
         _ => Ok(None),
     }
 }
