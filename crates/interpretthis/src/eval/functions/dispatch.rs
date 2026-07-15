@@ -626,7 +626,7 @@ pub(crate) async fn call_value_as_function(
             // implementations, called directly to bypass a custom override
             // (e.g. from within a class's own `__setattr__`).
             if type_name == "object" {
-                return object_default_method(method, args);
+                return object_default_method(state, method, args, tools).await;
             }
             let Some((recv_arg, rest)) = args.split_first() else {
                 return Err(InterpreterError::TypeError(format!(
@@ -856,7 +856,12 @@ fn bytes_maketrans(args: &[Value]) -> EvalResult {
 /// The default `object.__setattr__` / `__delattr__` / `__getattribute__` /
 /// `__init__`, called directly (`object.__setattr__(self, name, value)`) to
 /// bypass a class's own override. Operates straight on the instance's fields.
-fn object_default_method(method: &str, args: &[Value]) -> EvalResult {
+async fn object_default_method(
+    state: &mut InterpreterState,
+    method: &str,
+    args: &[Value],
+    tools: &Tools,
+) -> EvalResult {
     let inst = match args.first() {
         Some(Value::Instance(inst)) => inst,
         _ => {
@@ -896,11 +901,20 @@ fn object_default_method(method: &str, args: &[Value]) -> EvalResult {
                 )
                 .into());
             };
-            inst.fields
-                .lock()
-                .get(name.as_str())
-                .cloned()
-                .ok_or_else(|| EvalError::from(InterpreterError::AttributeError(name.to_string())))
+            // The default lookup protocol (descriptors, instance dict, class
+            // attrs, methods). Bypasses any user `__getattribute__` override —
+            // this is exactly what `super().__getattribute__(name)` should
+            // reach — so a subclass override that delegates here for the
+            // uninteresting names resolves methods and properties, not just
+            // instance fields.
+            crate::eval::names::getattr_normal_lookup(
+                state,
+                Value::Instance(inst.clone()),
+                name.as_str(),
+                tools,
+                None,
+            )
+            .await
         }
         // `object.__init__` / `__new__` accept anything and do nothing useful here.
         "__init__" => Ok(Value::None),

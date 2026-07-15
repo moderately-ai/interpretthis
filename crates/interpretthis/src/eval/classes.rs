@@ -2011,6 +2011,31 @@ pub async fn super_method_call(
                 }
                 Ok((Value::None, updated))
             }
+            "__getattribute__" => {
+                // `super().__getattribute__(name)` from a user
+                // `__getattribute__` override — run the default lookup
+                // protocol (descriptors, instance dict, class attrs,
+                // methods) without re-entering the override.
+                let attr_name = call
+                    .positional
+                    .first()
+                    .and_then(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                    .ok_or_else(|| {
+                        EvalError::from(InterpreterError::TypeError(
+                            "object.__getattribute__: argument must be str".into(),
+                        ))
+                    })?;
+                let inst = instance;
+                let returned = crate::eval::names::getattr_normal_lookup(
+                    state,
+                    Value::Instance(inst.clone()),
+                    &attr_name,
+                    tools,
+                    None,
+                )
+                .await?;
+                Ok((returned, Value::Instance(inst)))
+            }
             _ => Err(InterpreterError::AttributeError(format!(
                 "'super' object has no attribute '{method_name}'"
             ))

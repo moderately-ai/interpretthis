@@ -238,7 +238,45 @@ async fn eval_attribute_inner(
 /// Attribute lookup on an already-evaluated receiver. Shared by
 /// `obj.attr` and the bounded `getattr` builtin. Always runs
 /// [`validate_attribute`] so blocked dunders stay unreachable.
+///
+/// A user-defined `__getattribute__` is CPython's unconditional entry
+/// point for *every* attribute access on an instance, so it is consulted
+/// first. The default behaviour it delegates to (via
+/// `super().__getattribute__`) lands in `object.__getattribute__`, which
+/// calls [`getattr_normal_lookup`] directly — the user override is never
+/// re-entered, so there is no unbounded recursion.
 pub(crate) async fn getattr_on_value(
+    state: &mut InterpreterState,
+    obj: Value,
+    attr_name: &str,
+    tools: &Tools,
+    place_for_upgrade: Option<&crate::eval::place::Place>,
+) -> EvalResult {
+    if let Value::Instance(inst) = &obj {
+        if let Some((_, method)) =
+            crate::eval::classes::lookup_method_in_mro(state, &inst.class_name, "__getattribute__")
+        {
+            validator::validate_attribute(attr_name)?;
+            let attr_arg = Value::String(attr_name.into());
+            let call = crate::eval::functions::CallArgs {
+                positional: std::slice::from_ref(&attr_arg),
+                keyword: &indexmap::IndexMap::new(),
+            };
+            let (returned, _self) =
+                crate::eval::classes::call_method(state, &method, obj.clone(), call, tools).await?;
+            return Ok(returned);
+        }
+    }
+    getattr_normal_lookup(state, obj, attr_name, tools, place_for_upgrade).await
+}
+
+/// The default attribute-lookup protocol (CPython's
+/// `object.__getattribute__`): property/descriptor dispatch, instance
+/// dict, class attributes, builtin introspection, then the `__getattr__`
+/// miss hook. Bypasses any user `__getattribute__` override — reached
+/// either when no override exists or when the override delegates via
+/// `super().__getattribute__`.
+pub(crate) async fn getattr_normal_lookup(
     state: &mut InterpreterState,
     obj: Value,
     attr_name: &str,
