@@ -871,7 +871,7 @@ static BYTES_TYPE: TypeObject = TypeObject {
     del_item_slot: None,
     missing_slot: None,
     len_slot: Some(bytes_len),
-    get_attr_slot: Some(noattr_get_attr),
+    get_attr_slot: Some(bytes_get_attr),
     set_attr_slot: None,
     has_methods_table: true,
 };
@@ -2996,6 +2996,59 @@ fn bytearray_get_attr(value: &Value, name: &str) -> EvalResult {
     Err(attribute_error("bytearray", name))
 }
 
+/// Every non-mutating method `dispatch_bytes_method` accepts, so `b.upper`,
+/// `hasattr(b, "isdigit")`, and `map(bytes.upper, …)` bind as first-class
+/// methods (the mutating names live only on `BYTEARRAY_METHODS`).
+const BYTES_METHODS: &[&str] = &[
+    "decode",
+    "hex",
+    "startswith",
+    "endswith",
+    "split",
+    "rsplit",
+    "replace",
+    "find",
+    "rfind",
+    "index",
+    "rindex",
+    "count",
+    "upper",
+    "lower",
+    "swapcase",
+    "capitalize",
+    "title",
+    "isdigit",
+    "isalpha",
+    "isalnum",
+    "isspace",
+    "isupper",
+    "islower",
+    "istitle",
+    "isascii",
+    "strip",
+    "lstrip",
+    "rstrip",
+    "join",
+    "removeprefix",
+    "removesuffix",
+    "translate",
+    "partition",
+    "rpartition",
+    "center",
+    "ljust",
+    "rjust",
+    "zfill",
+    "splitlines",
+    "expandtabs",
+];
+
+fn bytes_get_attr(value: &Value, name: &str) -> EvalResult {
+    if BYTES_METHODS.contains(&name) {
+        return Ok(bound_method(value, name));
+    }
+    Err(attribute_error("bytes", name))
+}
+
 const MEMORYVIEW_METHODS: &[&str] = &["tobytes", "tolist", "hex"];
 
 fn memoryview_get_attr(value: &Value, name: &str) -> EvalResult {
@@ -3146,6 +3199,18 @@ const BYTEARRAY_METHODS: &[&str] = &[
     "removeprefix",
     "removesuffix",
     "join",
+    "isascii",
+    "istitle",
+    "expandtabs",
+    "rsplit",
+    "translate",
+    "partition",
+    "rpartition",
+    "center",
+    "ljust",
+    "rjust",
+    "zfill",
+    "splitlines",
 ];
 
 const SET_METHODS: &[&str] = &[

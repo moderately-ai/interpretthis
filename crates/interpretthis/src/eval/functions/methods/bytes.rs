@@ -252,6 +252,17 @@ fn rewrap_bytes_as_bytearray(value: Value) -> Value {
                 .collect();
             Value::List(shared_list(mapped))
         }
+        // `partition`/`rpartition` return a 3-tuple of sub-sequences, which for a
+        // bytearray receiver must themselves be bytearrays.
+        Value::Tuple(items) => Value::Tuple(
+            items
+                .into_iter()
+                .map(|v| match v {
+                    Value::Bytes(b) => Value::ByteArray(shared_bytes(b)),
+                    other => other,
+                })
+                .collect(),
+        ),
         other => other,
     }
 }
@@ -761,6 +772,91 @@ pub(crate) fn dispatch_bytes_method(
                 lines.push(Value::Bytes(b[start..].to_vec()));
             }
             Ok(Value::List(crate::value::shared_list(lines)))
+        }
+        // Empty is ASCII; otherwise every byte must be < 0x80.
+        "isascii" => Ok(Value::Bool(b.iter().all(u8::is_ascii))),
+        "expandtabs" => {
+            let tabsize = match args.first() {
+                None | Some(Value::None) => 8usize,
+                Some(Value::Int(n)) => usize::try_from(*n).unwrap_or(0),
+                Some(Value::Bool(bo)) => usize::from(*bo),
+                Some(_) => {
+                    return Err(InterpreterError::TypeError(
+                        "expandtabs() argument must be an integer".into(),
+                    )
+                    .into());
+                }
+            };
+            let mut out = Vec::with_capacity(b.len());
+            let mut col = 0usize;
+            for &c in b {
+                match c {
+                    b'\t' => {
+                        if tabsize > 0 {
+                            let spaces = tabsize - (col % tabsize);
+                            out.extend(std::iter::repeat_n(b' ', spaces));
+                            col += spaces;
+                        }
+                    }
+                    b'\n' | b'\r' => {
+                        out.push(c);
+                        col = 0;
+                    }
+                    _ => {
+                        out.push(c);
+                        col += 1;
+                    }
+                }
+            }
+            Ok(Value::Bytes(out))
+        }
+        "rsplit" => {
+            let sep = match args.first() {
+                Some(Value::Bytes(s)) => s.as_slice(),
+                Some(_) => {
+                    return Err(InterpreterError::TypeError(
+                        "rsplit() argument must be bytes".into(),
+                    )
+                    .into());
+                }
+                None => &b" "[..],
+            };
+            if sep.is_empty() {
+                return Err(InterpreterError::ValueError("empty separator".into()).into());
+            }
+            let maxsplit = match args.get(1) {
+                None | Some(Value::None) => -1i64,
+                Some(Value::Int(n)) => *n,
+                Some(Value::Bool(bo)) => i64::from(*bo),
+                Some(_) => {
+                    return Err(InterpreterError::TypeError(
+                        "rsplit() maxsplit must be an integer".into(),
+                    )
+                    .into());
+                }
+            };
+            // Scan from the right so only the rightmost `maxsplit` separators
+            // split; the leftmost remainder stays intact.
+            let mut parts: Vec<Value> = Vec::new();
+            let mut end = b.len();
+            let mut count = 0i64;
+            let mut i = b.len();
+            while i >= sep.len() {
+                let j = i - sep.len();
+                if (maxsplit < 0 || count < maxsplit) && &b[j..i] == sep {
+                    parts.push(Value::Bytes(b[i..end].to_vec()));
+                    end = j;
+                    i = j;
+                    count += 1;
+                } else if i == 0 {
+                    break;
+                } else {
+                    i -= 1;
+                }
+            }
+            parts.push(Value::Bytes(b[..end].to_vec()));
+            parts.reverse();
+            Ok(Value::List(shared_list(parts)))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "'bytes' object has no attribute '{method}'"
