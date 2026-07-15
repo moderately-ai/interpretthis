@@ -23,6 +23,49 @@ use crate::{
     value::{ExceptionValue, Value, shared_list},
 };
 
+/// Encode `s` into a single-byte codec (ascii `max=0x7f`, latin-1 `max=0xff`),
+/// applying CPython's `errors` handler to each unencodable character. Supports
+/// the standard built-in handlers; an unknown handler raises `LookupError` as
+/// CPython does.
+fn encode_narrow(s: &str, max: u32, codec: &str, errors: &str) -> Result<Vec<u8>, EvalError> {
+    let mut out = Vec::with_capacity(s.len());
+    for ch in s.chars() {
+        let u = ch as u32;
+        if u <= max {
+            out.push(u as u8);
+            continue;
+        }
+        match errors {
+            "strict" => {
+                return Err(EvalError::Exception(ExceptionValue::new(
+                    "UnicodeEncodeError",
+                    format!("'{codec}' codec can't encode character"),
+                )));
+            }
+            "ignore" => {}
+            "replace" => out.push(b'?'),
+            "xmlcharrefreplace" => out.extend_from_slice(format!("&#{u};").as_bytes()),
+            "backslashreplace" => {
+                let esc = if u <= 0xff {
+                    format!("\\x{u:02x}")
+                } else if u <= 0xffff {
+                    format!("\\u{u:04x}")
+                } else {
+                    format!("\\U{u:08x}")
+                };
+                out.extend_from_slice(esc.as_bytes());
+            }
+            other => {
+                return Err(EvalError::Exception(ExceptionValue::new(
+                    "LookupError",
+                    format!("unknown error handler name '{other}'"),
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// CPython `str.isdigit()`: a char with Numeric_Type Decimal or Digit. That is
 /// every Unicode decimal digit (general category Nd) plus the Digit-typed
 /// presentation forms (superscripts, subscripts, circled/parenthesised digits,
@@ -218,31 +261,18 @@ pub(crate) fn dispatch_string_method(
                     .into());
                 }
             };
+            let errors = match &bound[1] {
+                Some(Value::String(e)) => e.as_str(),
+                None => "strict",
+                Some(_) => {
+                    return Err(InterpreterError::TypeError("errors must be str".into()).into());
+                }
+            };
             match encoding.to_ascii_lowercase().as_str() {
                 "utf-8" | "utf_8" | "u8" => Ok(Value::Bytes(s.as_bytes().to_vec())),
-                "ascii" | "us-ascii" => {
-                    if s.is_ascii() {
-                        Ok(Value::Bytes(s.as_bytes().to_vec()))
-                    } else {
-                        Err(EvalError::Exception(ExceptionValue::new(
-                            "UnicodeEncodeError",
-                            "'ascii' codec can't encode character",
-                        )))
-                    }
-                }
+                "ascii" | "us-ascii" => Ok(Value::Bytes(encode_narrow(s, 0x7f, "ascii", errors)?)),
                 "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" => {
-                    let mut out = Vec::with_capacity(s.len());
-                    for ch in s.chars() {
-                        let u = ch as u32;
-                        if u > 0xff {
-                            return Err(EvalError::Exception(ExceptionValue::new(
-                                "UnicodeEncodeError",
-                                "'latin-1' codec can't encode character",
-                            )));
-                        }
-                        out.push(u as u8);
-                    }
-                    Ok(Value::Bytes(out))
+                    Ok(Value::Bytes(encode_narrow(s, 0xff, "latin-1", errors)?))
                 }
                 // UTF-16: the plain name prepends a little-endian BOM (matching
                 // CPython's native default); the explicit -le/-be forms omit it.
