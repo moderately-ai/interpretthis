@@ -232,34 +232,42 @@ fn pretouch_defaultdict_inner<'a>(
             return Ok(());
         }
         let Expr::Subscript(sub) = target else { return Ok(()) };
-        // Recurse to pre-touch any inner subscripts first.
+        // Pre-touch inner subscripts first so the base container exists — this is
+        // what makes NESTED defaultdicts (`d[a][b] += 1`) work: `d[a]` is
+        // autovivified before we touch `[b]` on it.
         pretouch_defaultdict_inner(state, sub.value.as_ref(), tools, depth + 1).await?;
-        let Expr::Name(name_node) = sub.value.as_ref() else { return Ok(()) };
-        let var_name = name_node.id.as_str().to_string();
-        if !matches!(state.variables.get(&var_name), Some(Value::DefaultDict(_))) {
+        // Resolve the base (`sub.value`) to a place — a bare name resolves to an
+        // empty-step place, a subscript to a navigable one — so a defaultdict
+        // reached through any chain (not just a bare `d`) is pre-touched.
+        let Some(place) = place::eval_place(state, sub.value.as_ref(), tools).await? else {
             return Ok(());
-        }
-        let key_val = eval_expr(state, &sub.slice, tools).await?;
-        let key = crate::eval::literals::value_to_key(&key_val)?;
-        let already_present = matches!(
-            state.variables.get(&var_name),
-            Some(Value::DefaultDict(data)) if data.items.contains_key(&key)
-        );
-        if already_present {
-            return Ok(());
-        }
-        let factory = match state.variables.get(&var_name) {
-            Some(Value::DefaultDict(data)) => data.factory.clone(),
-            _ => return Ok(()),
         };
+        let key = crate::eval::literals::value_to_key(&eval_expr(state, &sub.slice, tools).await?)?;
+        // Read the base defaultdict's factory iff the key is absent.
+        let factory = {
+            let root = state
+                .variables
+                .get_mut(&place.root)
+                .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&place.root)))?;
+            place::with_navigate_mut(root, &place.steps, |slot| match slot {
+                Value::DefaultDict(data) if !data.items.contains_key(&key) => {
+                    Some(data.factory.clone())
+                }
+                _ => None,
+            })?
+        };
+        let Some(factory) = factory else { return Ok(()) };
         let synth = crate::eval::names::invoke_factory_pub(state, &factory, tools).await?;
-        if let Some(Value::DefaultDict(data)) = state.variables.get(&var_name).cloned() {
-            let mut new_data = *data;
-            new_data.items.insert(key, synth);
-            state
-                .set_variable(&var_name, Value::DefaultDict(Box::new(new_data)))
-                .map_err(EvalError::Interpreter)?;
-        }
+        let mut synth = Some(synth);
+        let root = state
+            .variables
+            .get_mut(&place.root)
+            .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&place.root)))?;
+        place::with_navigate_mut(root, &place.steps, |slot| {
+            if let (Value::DefaultDict(data), Some(s)) = (slot, synth.take()) {
+                data.items.insert(key.clone(), s);
+            }
+        })?;
         Ok(())
     })
 }
