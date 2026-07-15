@@ -1,0 +1,12 @@
+print((3.0).is_integer())
+print((3.5).is_integer())
+print((0.5).as_integer_ratio())
+print((2.5).as_integer_ratio())
+print((1.5).hex())
+print(float.fromhex("0x1.8p0"))
+print((10.0).__round__())
+print((3.14).__trunc__())
+print((-2.7).__floor__())
+print((-2.7).__ceil__())
+import math
+print(math.isclose(0.1 + 0.2, 0.3))

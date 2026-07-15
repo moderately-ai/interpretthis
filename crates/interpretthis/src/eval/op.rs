@@ -523,6 +523,22 @@ pub async fn compare(
     if let Some(r) = dataclass_order_compare(state, op, left, right) {
         return Ok((r?, None, None));
     }
+    // An ordering comparison involving a user-class instance that resolved no
+    // ordering slot raises directly — CPython does NOT derive `<=`/`>=` from
+    // `__lt__`/`__eq__` (only @total_ordering does), so falling through to the
+    // builtin kernel (which would derive it, and mislabel `<=` as `<`) is wrong.
+    if matches!(op, CmpOp::Lt | CmpOp::LtE | CmpOp::Gt | CmpOp::GtE)
+        && (matches!(left, Value::Instance(_)) || matches!(right, Value::Instance(_)))
+    {
+        let sym = match op {
+            CmpOp::Lt => "<",
+            CmpOp::LtE => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::GtE => ">=",
+            _ => unreachable!("guarded by the matches! above"),
+        };
+        return Err(crate::types::type_error_unsupported(sym, left, right));
+    }
     let r = crate::eval::operations::compare_builtin(state, op, left, right)?;
     Ok((r, None, None))
 }

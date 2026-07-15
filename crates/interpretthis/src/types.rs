@@ -3510,10 +3510,16 @@ fn enummember_get_attr(value: &Value, name: &str) -> EvalResult {
 /// Mirrors CPython's message wording so user-visible errors stay stable
 /// across the dispatch migration.
 pub fn type_error_unsupported(op: &str, lhs: &Value, rhs: &Value) -> EvalError {
+    // A user-class instance reports its own class name, not the generic
+    // "object" that its static TypeObject carries.
+    let type_name = |v: &Value| match v {
+        Value::Instance(inst) => inst.class_name.clone(),
+        other => type_of(other).name.to_string(),
+    };
     InterpreterError::TypeError(format!(
         "'{op}' not supported between instances of '{}' and '{}'",
-        type_of(lhs).name,
-        type_of(rhs).name,
+        type_name(lhs),
+        type_name(rhs),
     ))
     .into()
 }

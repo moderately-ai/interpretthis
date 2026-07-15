@@ -1,0 +1,13 @@
+z = 3 + 4j
+print(z.real, z.imag)
+print(z.conjugate())
+print(abs(z))
+print((1+2j) + (3+4j))
+print((1+2j) * (3+4j))
+print((1+1j) ** 2)
+print(complex(2, 3))
+print(complex("1+2j"))
+print((2+3j) == (2+3j))
+print((1+0j) == 1)
+print(repr(1j))
+print((6+8j) / 2)
