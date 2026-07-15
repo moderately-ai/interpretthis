@@ -27,6 +27,34 @@ use crate::{
 /// applying CPython's `errors` handler to each unencodable character. Supports
 /// the standard built-in handlers; an unknown handler raises `LookupError` as
 /// CPython does.
+/// Python's `unicode-escape` codec: printable ASCII passes through; the common
+/// control chars use their short escapes; everything else becomes
+/// `\xXX`/`\uXXXX`/`\UXXXXXXXX`. The result is ASCII bytes.
+fn unicode_escape_encode(s: &str) -> Vec<u8> {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // Printable ASCII (space through `~`), backslash handled above.
+            c if (' '..='~').contains(&c) => out.push(c),
+            c => {
+                let u = c as u32;
+                if u <= 0xff {
+                    out.push_str(&format!("\\x{u:02x}"));
+                } else if u <= 0xffff {
+                    out.push_str(&format!("\\u{u:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{u:08x}"));
+                }
+            }
+        }
+    }
+    out.into_bytes()
+}
+
 fn encode_narrow(s: &str, max: u32, codec: &str, errors: &str) -> Result<Vec<u8>, EvalError> {
     let mut out = Vec::with_capacity(s.len());
     for ch in s.chars() {
@@ -320,6 +348,7 @@ pub(crate) fn dispatch_string_method(
                     }
                     Ok(Value::Bytes(out))
                 }
+                "unicode-escape" | "unicode_escape" => Ok(Value::Bytes(unicode_escape_encode(s))),
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
                 }
