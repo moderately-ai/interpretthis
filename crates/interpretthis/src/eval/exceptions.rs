@@ -399,7 +399,20 @@ pub(crate) fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool
         cur = match cur {
             "ZeroDivisionError" | "OverflowError" | "FloatingPointError" => "ArithmeticError",
             "KeyError" | "IndexError" => "LookupError",
-            "FileNotFoundError" | "PermissionError" | "TimeoutError" | "IOError" => "OSError",
+            // The OSError family: the direct subclasses collapse to OSError, and
+            // the connection errors go through the intermediate ConnectionError.
+            "FileNotFoundError" | "PermissionError" | "TimeoutError" | "IOError"
+            | "BlockingIOError" | "ChildProcessError" | "FileExistsError" | "InterruptedError"
+            | "IsADirectoryError" | "NotADirectoryError" | "ProcessLookupError"
+            | "ConnectionError" => "OSError",
+            "BrokenPipeError"
+            | "ConnectionAbortedError"
+            | "ConnectionRefusedError"
+            | "ConnectionResetError" => "ConnectionError",
+            "ModuleNotFoundError" => "ImportError",
+            "ImportError" => "Exception",
+            "IndentationError" | "TabError" => "SyntaxError",
+            "SyntaxError" => "Exception",
             "UnicodeDecodeError" | "UnicodeEncodeError" | "UnicodeTranslateError" => "UnicodeError",
             "UnicodeError" => "ValueError",
             // Stdlib module exception types. Stored module-qualified (the
