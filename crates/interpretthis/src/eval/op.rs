@@ -373,6 +373,14 @@ pub async fn aug_binop(
             invoke_slot(state, left, &method, std::slice::from_ref(right), tools).await?;
         return Ok(returned);
     }
+    // `list += iterable` extends the list in place and returns the *same*
+    // handle, so `id(lst)` is preserved (CPython's `list.__iadd__`). Falling
+    // through to `binop` would build a fresh list and change identity.
+    if let (rustpython_parser::ast::Operator::Add, Value::List(items)) = (op, left) {
+        let extension = crate::eval::op::iter(state, right, tools).await?;
+        items.lock().extend(extension);
+        return Ok(left.clone());
+    }
     binop(state, op, left, right, tools).await
 }
 
@@ -1013,6 +1021,18 @@ pub async fn contains(
         let (returned, _self) =
             invoke_slot(state, container, &method, std::slice::from_ref(item), tools).await?;
         return Ok(returned.is_truthy());
+    }
+    // An instance without `__contains__` falls back to iterating the container
+    // (via `__iter__`, or the `__getitem__` sequence protocol) and comparing
+    // each element — CPython's default membership test.
+    if matches!(container, Value::Instance(_)) {
+        let items = crate::eval::op::iter(state, container, tools).await?;
+        for stored in &items {
+            if eq(state, stored, item, tools).await? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
     }
     if matches!(item, Value::Instance(_)) {
         if let Value::Dict(map) = container {
