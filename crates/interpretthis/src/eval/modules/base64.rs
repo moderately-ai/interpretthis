@@ -18,7 +18,17 @@ use crate::{
 };
 
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "b64encode" | "b64decode" | "urlsafe_b64encode" | "urlsafe_b64decode")
+    matches!(
+        name,
+        "b64encode"
+            | "b64decode"
+            | "urlsafe_b64encode"
+            | "urlsafe_b64decode"
+            | "b16encode"
+            | "b16decode"
+            | "b32encode"
+            | "b32decode"
+    )
 }
 
 pub fn call(func: &str, args: &[Value]) -> EvalResult {
@@ -34,6 +44,13 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         "urlsafe_b64decode" => base64::engine::general_purpose::URL_SAFE
             .decode(&input)
             .map_err(|e| value_error(format!("Invalid base64-encoded string: {e}")))?,
+        // Base16 is uppercase hex (CPython b16encode); b16decode accepts the
+        // uppercase form CPython produces (and, leniently, lowercase).
+        "b16encode" => hex::encode_upper(&input).into_bytes(),
+        "b16decode" => hex::decode(String::from_utf8_lossy(&input).to_uppercase())
+            .map_err(|e| value_error(format!("Non-base16 digit found: {e}")))?,
+        "b32encode" => b32encode(&input).into_bytes(),
+        "b32decode" => b32decode(&String::from_utf8_lossy(&input))?,
         _ => {
             return Err(InterpreterError::AttributeError(format!(
                 "module 'base64' has no attribute '{func}'"
@@ -42,6 +59,61 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         }
     };
     Ok(Value::Bytes(result))
+}
+
+const B32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// RFC 4648 base32 encode: 5-byte groups → 8 chars, `=`-padded.
+fn b32encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(5) * 8);
+    for chunk in input.chunks(5) {
+        let mut buf = [0u8; 5];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        // Pack the (up to) 40 bits, then emit 8 5-bit groups MSB-first.
+        let bits = (u64::from(buf[0]) << 32)
+            | (u64::from(buf[1]) << 24)
+            | (u64::from(buf[2]) << 16)
+            | (u64::from(buf[3]) << 8)
+            | u64::from(buf[4]);
+        // Number of output chars that carry data for a partial final chunk.
+        let out_chars = match chunk.len() {
+            1 => 2,
+            2 => 4,
+            3 => 5,
+            4 => 7,
+            _ => 8,
+        };
+        for i in 0..8 {
+            if i < out_chars {
+                let idx = ((bits >> (35 - i * 5)) & 0x1f) as usize;
+                out.push(B32_ALPHABET[idx] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// RFC 4648 base32 decode (uppercase, `=`-padded).
+fn b32decode(input: &str) -> Result<Vec<u8>, EvalError> {
+    let trimmed: Vec<u8> = input.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(trimmed.len() * 5 / 8);
+    let mut bits: u64 = 0;
+    let mut nbits = 0u32;
+    for &c in &trimmed {
+        let val = B32_ALPHABET
+            .iter()
+            .position(|&a| a == c)
+            .ok_or_else(|| value_error("Non-base32 digit found".to_string()))?;
+        bits = (bits << 5) | val as u64;
+        nbits += 5;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((bits >> nbits) as u8);
+        }
+    }
+    Ok(out)
 }
 
 fn arg_bytes(func: &str, args: &[Value]) -> Result<Vec<u8>, EvalError> {
