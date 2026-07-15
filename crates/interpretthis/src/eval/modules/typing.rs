@@ -33,7 +33,8 @@ pub fn constant(name: &str) -> Option<Value> {
         | "Iterable" | "Iterator" | "Generator" | "Callable" | "Mapping" | "MutableMapping"
         | "Sequence" | "MutableSequence" | "Collection" | "Container" | "Hashable" | "Sized"
         | "Type" | "Final" | "Literal" | "ClassVar" | "Annotated" | "NoReturn" | "Never"
-        | "Self" | "TypeAlias" | "TypeGuard" | "Concatenate" | "ParamSpec" | "TypeVar" => {
+        | "Self" | "TypeAlias" | "TypeGuard" | "Concatenate" | "ParamSpec" | "TypeVar"
+        | "NamedTuple" | "TypedDict" | "Protocol" | "Generic" => {
             Some(Value::Type(format!("typing.{name}")))
         }
         _ => None,

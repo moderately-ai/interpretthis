@@ -94,6 +94,9 @@ pub async fn eval_class_def(
     // recognised here for enum-kind detection.
     let mut bases: Vec<String> = Vec::new();
     let mut enum_kind: Option<crate::value::EnumKind> = None;
+    // `class P(NamedTuple):` — a typing.NamedTuple class becomes a namedtuple
+    // built from its annotations (with defaults) after the body is processed.
+    let mut is_typing_namedtuple = false;
     for base in &node.bases {
         // Resolve bare names from the environment, or evaluate computed
         // base expressions (`collections.UserList`, `mod.Base`, …).
@@ -131,6 +134,7 @@ pub async fn eval_class_def(
                 "enum.Flag" => enum_kind = Some(crate::value::EnumKind::Flag),
                 "enum.IntFlag" => enum_kind = Some(crate::value::EnumKind::IntFlag),
                 "enum.StrEnum" => enum_kind = Some(crate::value::EnumKind::Str),
+                "typing.NamedTuple" => is_typing_namedtuple = true,
                 _ => {}
             }
             continue;
@@ -355,6 +359,13 @@ pub async fn eval_class_def(
     state
         .set_variable(class_name, Value::Class(class_name.to_string()))
         .map_err(EvalError::Interpreter)?;
+
+    // `class P(NamedTuple)` — turn the annotated class into a namedtuple,
+    // reusing the collections.namedtuple builder and layering on field
+    // defaults and the user-defined methods from the class body.
+    if is_typing_namedtuple {
+        finalize_typing_namedtuple(state, class_name)?;
+    }
 
     // Metaclass `__new__` / `__init__` (PEP 3115 subset).
     if let Some(meta) = metaclass_name {
@@ -671,6 +682,49 @@ async fn invoke_set_name(
 /// Call `Base.__init_subclass__(cls)` for each direct base that defines it.
 /// CPython always treats `__init_subclass__` as a classmethod; the new
 /// subclass is passed as the first argument (`cls`).
+/// Turn an annotated `class P(NamedTuple)` into a namedtuple: build the field
+/// machinery via the collections.namedtuple builder, then restore the field
+/// defaults and the user-defined methods that were on the class body.
+fn finalize_typing_namedtuple(
+    state: &mut InterpreterState,
+    class_name: &str,
+) -> Result<(), EvalError> {
+    let (field_vals, default_values, user_methods) = {
+        let class = state
+            .classes
+            .get(class_name)
+            .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
+        let fields = class.annotations.clone();
+        // Defaults come from the class attribute matching each field name; they
+        // must be trailing (CPython requires it), so collecting only the ones
+        // present yields the right suffix of default values.
+        let default_values: Vec<Value> =
+            fields.iter().filter_map(|f| class.class_attrs.get(f).cloned()).collect();
+        let field_vals: Vec<Value> =
+            fields.iter().map(|f| Value::String(f.as_str().into())).collect();
+        (field_vals, default_values, class.methods.clone())
+    };
+    // Build the namedtuple machinery (this replaces the class registration).
+    crate::eval::modules::collections::call_namedtuple_with_state(
+        state,
+        &[Value::String(class_name.into()), Value::Tuple(field_vals)],
+    )?;
+    // Restore the user's own methods and apply the field defaults to __init__.
+    if let Some(class) = state.classes.get_mut(class_name) {
+        for (name, def) in user_methods {
+            class.methods.entry(name).or_insert(def);
+        }
+        if let Some(init) = class.methods.get_mut("__init__") {
+            // bind_params counts trailing defaults from `defaults` (source
+            // strings); `default_values` supplies the actual values and wins,
+            // so the placeholders are never re-parsed.
+            init.params.defaults = vec!["None".to_string(); default_values.len()];
+            init.params.default_values = default_values;
+        }
+    }
+    Ok(())
+}
+
 async fn invoke_init_subclass(
     state: &mut InterpreterState,
     class_name: &str,
