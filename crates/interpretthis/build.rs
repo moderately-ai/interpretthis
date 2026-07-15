@@ -29,10 +29,11 @@ fn main() -> BuildResult {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let corpus_root = manifest_dir.join("tests/integration/parity_corpus");
 
-    // Re-run when the corpus tree changes. We watch the root explicitly so
-    // newly-added topic directories trigger regeneration; the `.py` watchers
-    // are added per-file inside the walk.
-    println!("cargo:rerun-if-changed=tests/integration/parity_corpus");
+    // Re-run when the corpus tree changes. Every directory in the tree is
+    // watched (inside `walk`), not just the root: adding a `.py` file to an
+    // existing topic dir changes only *that* dir's mtime, so a root-only watcher
+    // would miss it and the new snippet would never generate a test until an
+    // unrelated touch. Per-file watchers (also in `walk`) catch content edits.
     println!("cargo:rerun-if-changed=build.rs");
 
     let mut tree = TopicTree::default();
@@ -94,6 +95,10 @@ impl TopicTree {
 }
 
 fn walk(root: &Path, current: &Path, tree: &mut TopicTree) -> BuildResult {
+    // Watch this directory: its mtime changes when a `.py` file is added or
+    // removed here, which is what regenerates the test list. Absolute paths are
+    // accepted by `cargo:rerun-if-changed`.
+    println!("cargo:rerun-if-changed={}", current.to_string_lossy().replace('\\', "/"));
     let read = fs::read_dir(current)?;
     // Propagate a read error rather than filter_map(Result::ok), which would
     // silently drop an unreadable entry and lose that snippet's test.
