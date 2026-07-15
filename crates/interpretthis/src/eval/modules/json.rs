@@ -227,7 +227,9 @@ fn json_key(key: &ValueKey) -> String {
         | ValueKey::Date(_)
         | ValueKey::Time(_)
         | ValueKey::TimeDelta(_)
-        | ValueKey::DateTime { .. } => {
+        | ValueKey::DateTime { .. }
+        | ValueKey::Decimal(_)
+        | ValueKey::Fraction(_) => {
             format!("{key}")
         }
     }

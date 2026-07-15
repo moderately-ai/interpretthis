@@ -224,6 +224,25 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
         Value::DateTime { dt, tz_offset_secs } => {
             Ok(ValueKey::DateTime { dt: *dt, tz_offset_secs: *tz_offset_secs })
         }
+        // Decimal / Fraction are hashable in CPython. An integer-valued one
+        // folds to the int key so `Decimal('2')` / `Fraction(4, 2)` shares a
+        // dict/set slot with `2` (CPython unifies numeric hashes); a
+        // non-integral one keeps a dedicated, value-based key.
+        Value::Decimal(d, _) => {
+            if d.normalized().fractional_digit_count() <= 0 {
+                let n = d.with_scale(0).as_bigint_and_exponent().0;
+                Ok(bigint_to_key(n))
+            } else {
+                Ok(ValueKey::Decimal(Box::new((**d).clone())))
+            }
+        }
+        Value::Fraction(fr) => {
+            if fr.is_integer() {
+                Ok(bigint_to_key(fr.to_integer()))
+            } else {
+                Ok(ValueKey::Fraction(Box::new((**fr).clone())))
+            }
+        }
         _ => Err(crate::error::InterpreterError::TypeError(format!(
             "unhashable type: '{}'",
             val.type_name()
@@ -270,4 +289,13 @@ fn float_to_key(f: f64) -> ValueKey {
         }
     }
     ValueKey::Float(f.to_bits())
+}
+
+/// Fold a `BigInt` into the narrowest integer key so it collides with an equal
+/// `Int`/`Bool` key of the same magnitude (the `NUMERIC_TAG` hash bucket).
+fn bigint_to_key(n: num_bigint::BigInt) -> ValueKey {
+    match i64::try_from(&n) {
+        Ok(i) => ValueKey::Int(i),
+        Err(_) => ValueKey::BigInt(n),
+    }
 }

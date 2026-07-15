@@ -1437,7 +1437,7 @@ static TIMEZONE_TYPE: TypeObject = TypeObject {
 static DECIMAL_TYPE: TypeObject = TypeObject {
     name: "Decimal",
     eq_slot: decimal_eq,
-    hash_slot: None,
+    hash_slot: Some(decimal_hash_slot),
     lt_slot: decimal_lt,
     contains_slot: None,
     arith_slot: decimal_arith,
@@ -1457,7 +1457,7 @@ static DECIMAL_TYPE: TypeObject = TypeObject {
 static FRACTION_TYPE: TypeObject = TypeObject {
     name: "Fraction",
     eq_slot: fraction_eq,
-    hash_slot: None,
+    hash_slot: Some(fraction_hash_slot),
     lt_slot: fraction_lt,
     contains_slot: None,
     arith_slot: fraction_arith,
@@ -2306,6 +2306,84 @@ const fn int_hash_impl(n: i64) -> i64 {
 fn float_hash_slot(value: &Value) -> Result<i64, EvalError> {
     let Value::Float(f) = value else { unreachable!("float_hash_slot sees only Value::Float") };
     Ok(finalize_hash(float_hash_impl(*f)))
+}
+
+// --- Rational numeric hash (Decimal / Fraction) ---------------------------
+// CPython hashes every exact number through the same rational formula so that
+// equal values across int/float/Decimal/Fraction share a hash
+// (`hash(Decimal('2')) == hash(2) == hash(2.0) == hash(Fraction(2, 1))`).
+// HASH_MODULUS (2^61 - 1) is a Mersenne prime, so a modular inverse exists via
+// Fermat's little theorem and all arithmetic stays in modular space — no giant
+// `10^scale` intermediate that a hostile Decimal exponent could blow up.
+
+fn mulmod(a: u64, b: u64, m: u64) -> u64 {
+    ((u128::from(a) * u128::from(b)) % u128::from(m)) as u64
+}
+
+fn powmod(base: u64, mut exp: u64, m: u64) -> u64 {
+    let mut base = base % m;
+    let mut result = 1u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = mulmod(result, base, m);
+        }
+        base = mulmod(base, base, m);
+        exp >>= 1;
+    }
+    result
+}
+
+/// Assemble CPython's rational hash from the absolute numerator and denominator
+/// already reduced modulo `HASH_MODULUS`, applying the numerator's sign.
+fn rational_hash(n_abs_mod: u64, d_mod: u64, negative: bool) -> i64 {
+    let hash_abs = if d_mod == 0 {
+        // Denominator is a multiple of the modulus: CPython yields _PyHASH_INF.
+        HASH_INF
+    } else {
+        // d^(p-2) is the modular inverse of d for prime p (Fermat).
+        let d_inv = powmod(d_mod, HASH_MODULUS - 2, HASH_MODULUS);
+        mulmod(n_abs_mod, d_inv, HASH_MODULUS) as i64
+    };
+    finalize_hash(if negative { -hash_abs } else { hash_abs })
+}
+
+/// Reduce a `BigInt`'s absolute value modulo `HASH_MODULUS` to a `u64`.
+fn bigint_abs_mod(n: &num_bigint::BigInt) -> u64 {
+    use num_traits::{Signed as _, ToPrimitive as _};
+    (n.abs() % num_bigint::BigInt::from(HASH_MODULUS)).to_u64().unwrap_or(0)
+}
+
+fn decimal_hash_slot(value: &Value) -> Result<i64, EvalError> {
+    use num_traits::Signed as _;
+    let Value::Decimal(d, _) = value else { unreachable!("decimal_hash_slot sees only Decimal") };
+    // value == mantissa * 10^(-scale); represent as numerator / denominator and
+    // hash the rational. A signed zero hashes like +0 (mantissa is zero).
+    let (mantissa, scale) = d.as_bigint_and_exponent();
+    let m_mod = bigint_abs_mod(&mantissa);
+    let (n_abs_mod, d_mod) = if scale >= 0 {
+        // denominator = 10^scale
+        (m_mod, powmod(10, u64::try_from(scale).unwrap_or(0), HASH_MODULUS))
+    } else {
+        // numerator = mantissa * 10^(-scale), denominator = 1
+        (
+            mulmod(
+                m_mod,
+                powmod(10, u64::try_from(-scale).unwrap_or(0), HASH_MODULUS),
+                HASH_MODULUS,
+            ),
+            1,
+        )
+    };
+    Ok(rational_hash(n_abs_mod, d_mod, mantissa.is_negative()))
+}
+
+fn fraction_hash_slot(value: &Value) -> Result<i64, EvalError> {
+    use num_traits::Signed as _;
+    let Value::Fraction(fr) = value else { unreachable!("fraction_hash_slot sees only Fraction") };
+    // BigRational is already in lowest terms with a positive denominator.
+    let n_abs_mod = bigint_abs_mod(fr.numer());
+    let d_mod = bigint_abs_mod(fr.denom());
+    Ok(rational_hash(n_abs_mod, d_mod, fr.numer().is_negative()))
 }
 
 /// `_Py_HashDouble` for `f64`. Operates on the magnitude via `frexp`,

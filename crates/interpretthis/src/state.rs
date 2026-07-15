@@ -713,5 +713,6 @@ pub fn estimate_key_size(key: &crate::value::ValueKey) -> usize {
         ValueKey::Instance { value, .. } => 8 + estimate_value_size(value),
         ValueKey::Date(_) | ValueKey::Time(_) | ValueKey::TimeDelta(_) => 8,
         ValueKey::DateTime { .. } => 16,
+        ValueKey::Decimal(_) | ValueKey::Fraction(_) => 48,
     }
 }

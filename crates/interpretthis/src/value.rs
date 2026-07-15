@@ -1118,6 +1118,18 @@ pub enum ValueKey {
     },
     /// `timedelta` key — the whole duration as microseconds.
     TimeDelta(i64),
+    /// Non-integral `Decimal` key. Integer-valued decimals fold to `Int` /
+    /// `BigInt` in `value_to_key` (so `Decimal('2')` shares a slot with `2`, as
+    /// CPython's `hash(Decimal('2')) == hash(2)` requires), so only non-integral
+    /// decimals reach this variant. Equality is value-based
+    /// (`Decimal('1.5') == Decimal('1.50')`) and the hash normalises the scale to
+    /// agree. Cross-type collision with an equal `float` / `Fraction` is not
+    /// modelled — the same stored-key vs lookup-key limitation that folds
+    /// integral floats to `Int` (see `float_to_key`).
+    Decimal(Box<bigdecimal::BigDecimal>),
+    /// Non-integral `Fraction` key. Integer-valued fractions fold to `Int` /
+    /// `BigInt`; see [`ValueKey::Decimal`] for the cross-type caveat.
+    Fraction(Box<num_rational::BigRational>),
 }
 
 impl PartialEq for ValueKey {
@@ -1172,6 +1184,10 @@ impl PartialEq for ValueKey {
             (Self::Date(a), Self::Date(b)) => a == b,
             (Self::Time(a), Self::Time(b)) => a == b,
             (Self::TimeDelta(a), Self::TimeDelta(b)) => a == b,
+            // Value-based (scale-independent for Decimal, already-reduced for
+            // Fraction). Integer-valued numbers never reach here (folded to Int).
+            (Self::Decimal(a), Self::Decimal(b)) => a == b,
+            (Self::Fraction(a), Self::Fraction(b)) => a == b,
             (
                 Self::DateTime { dt: a, tz_offset_secs: ta },
                 Self::DateTime { dt: b, tz_offset_secs: tb },
@@ -1211,6 +1227,8 @@ impl core::hash::Hash for ValueKey {
         const TIME_TAG: u8 = 10;
         const DATETIME_TAG: u8 = 11;
         const TIMEDELTA_TAG: u8 = 12;
+        const DECIMAL_TAG: u8 = 13;
+        const FRACTION_TAG: u8 = 14;
         match self {
             Self::None => NONE_TAG.hash(state),
             Self::Ellipsis => ELLIPSIS_TAG.hash(state),
@@ -1276,6 +1294,20 @@ impl core::hash::Hash for ValueKey {
             Self::TimeDelta(m) => {
                 TIMEDELTA_TAG.hash(state);
                 m.hash(state);
+            }
+            Self::Decimal(d) => {
+                DECIMAL_TAG.hash(state);
+                // Normalise so equal values with different scales
+                // (`1.5` vs `1.50`) hash alike, agreeing with the value-based
+                // PartialEq above.
+                let (mantissa, scale) = d.normalized().as_bigint_and_exponent();
+                mantissa.hash(state);
+                scale.hash(state);
+            }
+            Self::Fraction(fr) => {
+                FRACTION_TAG.hash(state);
+                fr.numer().hash(state);
+                fr.denom().hash(state);
             }
             Self::DateTime { dt, tz_offset_secs } => {
                 DATETIME_TAG.hash(state);
@@ -2756,6 +2788,10 @@ impl ValueKey {
             Self::DateTime { dt, tz_offset_secs } => {
                 Value::DateTime { dt: *dt, tz_offset_secs: *tz_offset_secs }
             }
+            // A non-integral decimal key is never a negative zero (zero is
+            // integer-valued and folds to Int), so the neg-zero flag is false.
+            Self::Decimal(d) => Value::Decimal(d.clone(), false),
+            Self::Fraction(fr) => Value::Fraction(fr.clone()),
         }
     }
 }
@@ -2811,7 +2847,12 @@ impl fmt::Display for ValueKey {
             Self::Instance { value, .. } => write!(f, "{value}"),
             // Render through the corresponding Value so temporal keys display
             // identically to the standalone values.
-            Self::Date(_) | Self::Time(_) | Self::TimeDelta(_) | Self::DateTime { .. } => {
+            Self::Date(_)
+            | Self::Time(_)
+            | Self::TimeDelta(_)
+            | Self::DateTime { .. }
+            | Self::Decimal(_)
+            | Self::Fraction(_) => {
                 write!(f, "{}", self.to_value())
             }
         }
