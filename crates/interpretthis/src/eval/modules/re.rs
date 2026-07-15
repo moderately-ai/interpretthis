@@ -36,6 +36,7 @@ pub fn has_function(name: &str) -> bool {
             | "search"
             | "fullmatch"
             | "compile"
+            | "escape"
     )
 }
 
@@ -44,6 +45,20 @@ pub fn has_function(name: &str) -> bool {
 pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     match func {
         "compile" => compile_pattern(func, args),
+        "escape" => {
+            // CPython 3.7+ escapes only the regex special characters; ordinary
+            // text (letters, digits, most punctuation) passes through.
+            let s = arg_str("escape", args, 0)?;
+            const SPECIAL: &str = "()[]{}?*+-|^$\\.&~# \t\n\r\x0b\x0c";
+            let mut out = String::with_capacity(s.len());
+            for ch in s.chars() {
+                if SPECIAL.contains(ch) {
+                    out.push('\\');
+                }
+                out.push(ch);
+            }
+            Ok(Value::String(out.into()))
+        }
         "findall" => findall(args),
         "finditer" => finditer(args),
         "sub" => sub(func, args, kwargs),
@@ -479,12 +494,79 @@ impl crate::eval::modules::Module for ReModule {
     }
     async fn call(
         &self,
-        _state: &mut crate::state::InterpreterState,
+        state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
         kwargs: &IndexMap<String, Value>,
-        _tools: &crate::tools::Tools,
+        tools: &crate::tools::Tools,
     ) -> EvalResult {
+        // sub/subn accept a callable replacement invoked with each match; that
+        // needs the async eval path (the sync `call` only handles string repl).
+        if matches!(func, "sub" | "subn")
+            && args.get(1).is_some_and(|r| !matches!(r, Value::String(_)))
+        {
+            return sub_with_callable(state, func, args, kwargs, tools).await;
+        }
         call(func, args, kwargs)
+    }
+}
+
+/// `re.sub`/`re.subn` with a callable replacement: invoke it with the
+/// `re.Match` for each non-overlapping match and splice in the returned string.
+async fn sub_with_callable(
+    state: &mut crate::state::InterpreterState,
+    func: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let pattern = arg_str(func, args, 0)?;
+    let repl = args.get(1).cloned().ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError("sub() missing replacement".into()))
+    })?;
+    let text = arg_str(func, args, 2)?;
+    let count = count_arg(args, 3, kwargs, "count");
+    let re = compile(pattern)?;
+
+    let mut out = String::new();
+    let mut last = 0usize;
+    let mut made: i64 = 0;
+    // A negative count performs zero replacements (matching the sync path).
+    if count >= 0 {
+        for caps in re.captures_iter(text) {
+            if count > 0 && made >= count {
+                break;
+            }
+            let Some(whole) = caps.get(0) else { continue };
+            out.push_str(&text[last..whole.start()]);
+            let match_obj = Value::ReMatch(Box::new(build_match(&caps, &re, text)));
+            let replaced = crate::eval::functions::call_value_as_function(
+                state,
+                &repl,
+                &[match_obj],
+                &IndexMap::new(),
+                tools,
+            )
+            .await?;
+            match replaced {
+                Value::String(s) => out.push_str(&s),
+                other => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "expected str instance, {} found",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            }
+            last = whole.end();
+            made += 1;
+        }
+    }
+    out.push_str(&text[last..]);
+
+    if func == "subn" {
+        Ok(Value::Tuple(vec![Value::String(out.into()), Value::Int(made)]))
+    } else {
+        Ok(Value::String(out.into()))
     }
 }
