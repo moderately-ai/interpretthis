@@ -819,7 +819,7 @@ static BYTES_TYPE: TypeObject = TypeObject {
     eq_slot: bytes_eq,
     hash_slot: Some(fallback_hash_slot),
     lt_slot: bytes_lt,
-    contains_slot: None,
+    contains_slot: Some(bytes_contains),
     arith_slot: bytes_arith,
     iter_slot: Some(bytes_iter),
     get_item_slot: Some(bytes_get_item),
@@ -838,7 +838,7 @@ static BYTEARRAY_TYPE: TypeObject = TypeObject {
     eq_slot: bytes_eq,
     hash_slot: None,
     lt_slot: bytes_lt,
-    contains_slot: None,
+    contains_slot: Some(bytes_contains),
     arith_slot: bytes_arith,
     iter_slot: Some(bytes_iter),
     get_item_slot: Some(bytes_get_item),
@@ -857,7 +857,7 @@ static MEMORYVIEW_TYPE: TypeObject = TypeObject {
     eq_slot: bytes_eq,
     hash_slot: Some(fallback_hash_slot),
     lt_slot: bytes_lt,
-    contains_slot: None,
+    contains_slot: Some(bytes_contains),
     arith_slot: noimpl_arith,
     iter_slot: Some(bytes_iter),
     get_item_slot: Some(bytes_get_item),
@@ -2012,6 +2012,39 @@ fn str_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
         .into());
     };
     Ok(s.contains(needle.as_str()))
+}
+
+/// `item in bytes/bytearray/memoryview`. An int (or bool) tests membership of
+/// that byte value (raising if outside `range(0, 256)`), a bytes-like tests for
+/// a contiguous subsequence (the empty sequence is always present), and any
+/// other type raises — matching CPython's `bytes.__contains__`.
+fn bytes_contains(container: &Value, item: &Value) -> Result<bool, EvalError> {
+    let haystack = bytes_view(container).unwrap_or_default();
+    match item {
+        Value::Int(_) | Value::Bool(_) => {
+            let n = match item {
+                Value::Int(i) => *i,
+                Value::Bool(b) => i64::from(*b),
+                _ => unreachable!(),
+            };
+            if !(0..=255).contains(&n) {
+                return Err(
+                    InterpreterError::ValueError("byte must be in range(0, 256)".into()).into()
+                );
+            }
+            Ok(haystack.iter().any(|&b| i64::from(b) == n))
+        }
+        Value::Bytes(_) | Value::ByteArray(_) | Value::MemoryView(_) => {
+            let needle = bytes_view(item).unwrap_or_default();
+            Ok(needle.is_empty()
+                || haystack.windows(needle.len()).any(|window| window == needle.as_slice()))
+        }
+        other => Err(InterpreterError::TypeError(format!(
+            "a bytes-like object is required, not '{}'",
+            other.type_name()
+        ))
+        .into()),
+    }
 }
 
 /// Catch-all contains for non-iterable variants (Function, Lambda,

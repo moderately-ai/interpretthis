@@ -588,7 +588,14 @@ pub(crate) async fn call_value_as_function(
                 return dict_fromkeys(state, args, tools).await;
             }
             if (type_name == "bytes" || type_name == "bytearray") && method == "fromhex" {
-                return bytes_fromhex(args);
+                let parsed = bytes_fromhex(args)?;
+                // `bytearray.fromhex` returns a bytearray; `bytes.fromhex` bytes.
+                return Ok(match (type_name.as_str(), parsed) {
+                    ("bytearray", Value::Bytes(b)) => {
+                        Value::ByteArray(crate::value::shared_bytes(b))
+                    }
+                    (_, other) => other,
+                });
             }
             if type_name == "int" && method == "from_bytes" {
                 return crate::eval::functions::helpers::int_from_bytes(args, kwargs);
