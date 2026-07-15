@@ -98,6 +98,20 @@ fn into_iter_value(state: &mut InterpreterState, items: Vec<Value>) -> Value {
     state.alloc_lazy(items)
 }
 
+/// `ord()` over a bytes-like: a length-1 buffer yields its single byte as an
+/// int; any other length raises CPython's "expected a character" TypeError.
+fn ord_single_byte(bytes: &[u8]) -> Result<Option<Value>, EvalError> {
+    if bytes.len() == 1 {
+        Ok(Some(Value::Int(i64::from(bytes[0]))))
+    } else {
+        Err(InterpreterError::TypeError(format!(
+            "ord() expected a character, but string of length {} found",
+            bytes.len()
+        ))
+        .into())
+    }
+}
+
 /// Remove Python's `_` numeric digit separators, returning `None` when one is
 /// not flanked by two digits (CPython rejects `_1`, `1_`, `1__0`, `1_.0`).
 fn clean_numeric_underscores(s: &str) -> Option<String> {
@@ -950,6 +964,12 @@ pub(super) async fn try_builtin(
         }
         "round" => {
             check_arg_count(name, args, 1, 2)?;
+            // A user-class instance rounds through its own `__round__`.
+            if let Some(result) =
+                crate::eval::op::instance_round_dunder(state, &args[0], args.get(1), tools).await
+            {
+                return Ok(Some(result?));
+            }
             let ndigits = if args.len() >= 2 { Some(value_to_i64(&args[1])?) } else { None };
             match &args[0] {
                 // CPython's `round(int, n)` returns an int rounded to the
@@ -1216,26 +1236,30 @@ pub(super) async fn try_builtin(
         }
         "ord" => {
             check_arg_count(name, args, 1, 1)?;
-            if let Value::String(s) = &args[0] {
-                let chars: Vec<char> = s.chars().collect();
-                if chars.len() != 1 {
-                    return Err(EvalError::Exception(ExceptionValue::new(
-                        "TypeError",
-                        format!(
-                            "ord() expected a character, but string of length {} found",
-                            chars.len()
-                        ),
-                    )));
+            match &args[0] {
+                Value::String(s) => {
+                    let chars: Vec<char> = s.chars().collect();
+                    if chars.len() != 1 {
+                        return Err(EvalError::Exception(ExceptionValue::new(
+                            "TypeError",
+                            format!(
+                                "ord() expected a character, but string of length {} found",
+                                chars.len()
+                            ),
+                        )));
+                    }
+                    // char is at most 21 bits (U+10FFFF), so u32 -> i64 via
+                    // i64::from is lossless and cleaner than `as`.
+                    Ok(Some(Value::Int(i64::from(u32::from(chars[0])))))
                 }
-                // char is at most 21 bits (U+10FFFF), so u32 -> i64 via
-                // i64::from is lossless and cleaner than `as`.
-                Ok(Some(Value::Int(i64::from(u32::from(chars[0])))))
-            } else {
-                Err(InterpreterError::TypeError(format!(
+                // A length-1 bytes/bytearray yields its single byte value.
+                Value::Bytes(b) => ord_single_byte(b),
+                Value::ByteArray(b) => ord_single_byte(&b.lock()),
+                other => Err(InterpreterError::TypeError(format!(
                     "ord() expected string of length 1, but {} found",
-                    args[0].type_name()
+                    other.type_name()
                 ))
-                .into())
+                .into()),
             }
         }
         "list" => {
