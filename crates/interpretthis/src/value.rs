@@ -1545,6 +1545,15 @@ impl ExceptionValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDef {
     pub name: String,
+    /// Unique key under which this def's body AST is cached in
+    /// `InterpreterState::function_bodies`. Distinct from `name` so two
+    /// same-named nested functions in different scopes (`def make1(): def
+    /// helper()...` vs `def make2(): def helper()...`) don't collide on one
+    /// cache slot. Not serialized: after a state import it is empty and
+    /// `body_cache_key` falls back to `name`, matching the by-name source
+    /// re-parse that rebuilds `function_bodies`.
+    #[serde(skip)]
+    pub body_key: String,
     pub params: FunctionParams,
     pub closure: BTreeMap<String, Value>,
     /// Original Python source for the `def` — re-parsed on state import
@@ -1607,6 +1616,16 @@ pub struct FunctionDef {
     /// captured value.
     #[serde(default)]
     pub is_module_level: bool,
+}
+
+impl FunctionDef {
+    /// Key for this def's body in `InterpreterState::function_bodies`: the
+    /// unique `body_key` when set, else the (possibly-qualified) `name` for
+    /// methods/synthesised functions and old state imports.
+    #[must_use]
+    pub fn body_cache_key(&self) -> &str {
+        if self.body_key.is_empty() { &self.name } else { &self.body_key }
+    }
 }
 
 /// Stored representation of a lambda.

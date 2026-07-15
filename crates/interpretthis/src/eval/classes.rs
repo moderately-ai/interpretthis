@@ -456,6 +456,7 @@ fn classify_decorated_method(
         state.function_bodies.insert(key.clone(), Arc::new(body));
         FunctionDef {
             name: key,
+            body_key: String::new(),
             wraps_name: None,
             params: params.clone(),
             closure: BTreeMap::new(),

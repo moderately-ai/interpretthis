@@ -64,8 +64,12 @@ pub async fn eval_function_def(
     // breaks libraries that rely on it).
     evaluate_param_defaults(state, &mut params, tools).await?;
 
-    // Populate the parse cache for call-time lookup.
-    state.function_bodies.insert(name.to_string(), Arc::new(node.body.clone()));
+    // Populate the parse cache under a unique key so two same-named nested
+    // functions in different scopes (`make1`/`make2` each with a `helper`)
+    // don't overwrite each other's cached body.
+    let body_key = format!("{name}#{}", state.next_cursor_id);
+    state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
+    state.function_bodies.insert(body_key.clone(), Arc::new(node.body.clone()));
 
     // Extract the `def …:` text from current_source so the source of truth
     // for the body travels on the struct itself (no side channel).
@@ -124,6 +128,7 @@ pub async fn eval_function_def(
 
     let mut func = Value::Function(std::sync::Arc::new(FunctionDef {
         name: name.to_string(),
+        body_key,
         wraps_name: None,
         params,
         closure,

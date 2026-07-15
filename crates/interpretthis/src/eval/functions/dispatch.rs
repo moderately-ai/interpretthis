@@ -110,7 +110,7 @@ async fn call_user_function_inner(
         // globals via LEGB, so their closure needs no overlay.
         && (func_def.closure.is_empty() || func_def.is_module_level)
     {
-        let func_name = func_def.name.clone();
+        let func_name = func_def.body_cache_key().to_string();
         let body = state.function_bodies.get(&func_name).cloned();
 
         // Trivially-sync body inline (G4-lite): pattern-match the body
@@ -226,7 +226,7 @@ async fn call_user_function_inner(
     // `execute_body(...).await` below as part of the async fn's
     // captured-locals set, so keeping it pointer-sized is what stops
     // per-frame stack pressure scaling with function body size.
-    let func_name = func_def.name.clone();
+    let func_name = func_def.body_cache_key().to_string();
     let body = state.function_bodies.get(&func_name).cloned();
 
     // Push the function's source onto the body-source stack so

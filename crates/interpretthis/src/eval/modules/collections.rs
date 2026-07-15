@@ -378,6 +378,7 @@ pub(crate) fn call_namedtuple_with_state(
     state.function_bodies.insert(init_key.clone(), std::sync::Arc::new(body));
     let init_def = FunctionDef {
         name: init_key,
+        body_key: String::new(),
         wraps_name: None,
         params: init_params,
         closure: BTreeMap::new(),
@@ -439,6 +440,7 @@ pub(crate) fn call_namedtuple_with_state(
         "_asdict".to_string(),
         FunctionDef {
             name: asdict_key,
+            body_key: String::new(),
             wraps_name: None,
             params: FunctionParams {
                 args: vec![Param { name: "self".to_string() }],
@@ -478,6 +480,7 @@ pub(crate) fn call_namedtuple_with_state(
     // FunctionDef builder shared by the two synthesized wrappers.
     let mk_def = |key: String, params: FunctionParams| FunctionDef {
         name: key,
+        body_key: String::new(),
         wraps_name: None,
         params,
         closure: BTreeMap::new(),
