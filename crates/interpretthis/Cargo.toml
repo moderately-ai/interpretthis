@@ -61,6 +61,7 @@ stacker = { workspace = true }
 tikv-jemallocator = { workspace = true, optional = true }
 tikv-jemalloc-ctl = { workspace = true, optional = true }
 mimalloc = { workspace = true, optional = true }
+unicode-general-category = "1.1.0"
 
 [features]
 # Use jemalloc as the global allocator in this crate's bench binaries.

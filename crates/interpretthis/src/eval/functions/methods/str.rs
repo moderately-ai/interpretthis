@@ -12,6 +12,7 @@
 //! demand pinned by parity probes.
 
 use indexmap::IndexMap;
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 use super::super::{
     bind_method_params, opt_index_arg, reject_kwargs, to_index, to_len_i64, value_to_i64,
@@ -21,6 +22,33 @@ use crate::{
     eval::control_flow::iterate_value,
     value::{ExceptionValue, Value, shared_list},
 };
+
+/// CPython `str.isdigit()`: a char with Numeric_Type Decimal or Digit. That is
+/// every Unicode decimal digit (general category Nd) plus the Digit-typed
+/// presentation forms (superscripts, subscripts, circled/parenthesised digits,
+/// Ethiopic units) — but not the Numeric-only forms (fractions, Roman numerals)
+/// that only `isnumeric` accepts. The general category can't tell Digit from
+/// Numeric within No, so the Digit-typed No ranges are listed explicitly.
+fn is_unicode_digit(c: char) -> bool {
+    if get_general_category(c) == GeneralCategory::DecimalNumber {
+        return true;
+    }
+    matches!(c,
+        '\u{00B2}' | '\u{00B3}' | '\u{00B9}'      // superscript 2, 3, 1
+        | '\u{1369}'..='\u{1371}'                 // Ethiopic digit 1–9
+        | '\u{2070}' | '\u{2074}'..='\u{2079}'    // superscript 0, 4–9
+        | '\u{2080}'..='\u{2089}'                 // subscript 0–9
+        | '\u{2460}'..='\u{2468}'                 // circled 1–9
+        | '\u{2474}'..='\u{247C}'                 // parenthesised 1–9
+        | '\u{2488}'..='\u{2490}'                 // digit 1–9 full stop
+        | '\u{24EA}'                              // circled 0
+        | '\u{24F5}'..='\u{24FD}'                 // double circled 1–9
+        | '\u{24FF}'                              // negative circled 0
+        | '\u{2776}'..='\u{277E}'                 // dingbat negative circled 1–9
+        | '\u{2780}'..='\u{2788}'                 // dingbat circled sans-serif 1–9
+        | '\u{278A}'..='\u{2792}'                 // dingbat negative circled sans-serif 1–9
+    )
+}
 
 pub(crate) fn dispatch_string_method(
     s: &str,
@@ -400,7 +428,7 @@ pub(crate) fn dispatch_string_method(
             let (_, bs, be) = resolve_window(s, start, end);
             Ok(Value::Int(to_len_i64(s[bs..be].matches(sub).count())?))
         }
-        "isdigit" => Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))),
+        "isdigit" => Ok(Value::Bool(!s.is_empty() && s.chars().all(is_unicode_digit))),
         "isalpha" => Ok(Value::Bool(!s.is_empty() && s.chars().all(char::is_alphabetic))),
         "isalnum" => Ok(Value::Bool(!s.is_empty() && s.chars().all(char::is_alphanumeric))),
         "isspace" => Ok(Value::Bool(!s.is_empty() && s.chars().all(char::is_whitespace))),
@@ -578,11 +606,30 @@ pub(crate) fn dispatch_string_method(
             Ok(Value::Bool(s.chars().all(|c| c == ' ' || (!c.is_control() && !c.is_whitespace()))))
         }
         "isascii" => Ok(Value::Bool(s.is_ascii())),
-        "isdecimal" | "isnumeric" => {
-            // Approximate CPython's Unicode decimal/numeric categories with the
-            // ASCII-digit test plus Unicode numeric detection; adequate for the
-            // common ASCII cases the sandbox sees.
-            Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_numeric())))
+        "isdecimal" => {
+            // CPython str.isdecimal(): every char is a Unicode decimal digit
+            // (general category Nd) — excludes superscripts, fractions, and
+            // Roman numerals that isdigit/isnumeric accept.
+            Ok(Value::Bool(
+                !s.is_empty()
+                    && s.chars().all(|c| get_general_category(c) == GeneralCategory::DecimalNumber),
+            ))
+        }
+        "isnumeric" => {
+            // CPython str.isnumeric(): every char has a Unicode numeric value —
+            // general categories Nd, Nl (letter numbers, e.g. Roman numerals),
+            // or No (other numbers, e.g. fractions and superscripts).
+            Ok(Value::Bool(
+                !s.is_empty()
+                    && s.chars().all(|c| {
+                        matches!(
+                            get_general_category(c),
+                            GeneralCategory::DecimalNumber
+                                | GeneralCategory::LetterNumber
+                                | GeneralCategory::OtherNumber
+                        )
+                    }),
+            ))
         }
         "translate" => {
             let Some(table) = args.first() else {
