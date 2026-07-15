@@ -2050,6 +2050,80 @@ fn write_timedelta(f: &mut fmt::Formatter<'_>, micros: i64) -> fmt::Result {
     Ok(())
 }
 
+/// `repr(timedelta)` — `datetime.timedelta(days=.., seconds=.., microseconds=..)`
+/// with only the non-zero of the three normalised components (CPython keeps
+/// seconds/microseconds non-negative, so days absorbs the sign); all-zero is
+/// `datetime.timedelta(0)`.
+fn timedelta_repr(micros: i64) -> String {
+    let secs_total = micros.div_euclid(1_000_000);
+    let us = micros.rem_euclid(1_000_000);
+    let days = secs_total.div_euclid(86_400);
+    let seconds = secs_total.rem_euclid(86_400);
+    let mut parts = Vec::new();
+    if days != 0 {
+        parts.push(format!("days={days}"));
+    }
+    if seconds != 0 {
+        parts.push(format!("seconds={seconds}"));
+    }
+    if us != 0 {
+        parts.push(format!("microseconds={us}"));
+    }
+    let inner = if parts.is_empty() { "0".to_string() } else { parts.join(", ") };
+    format!("datetime.timedelta({inner})")
+}
+
+/// `repr(timezone)` — `datetime.timezone.utc` for offset 0, else
+/// `datetime.timezone(<timedelta repr of the offset>)`.
+fn timezone_repr(offset_secs: i32) -> String {
+    if offset_secs == 0 {
+        "datetime.timezone.utc".to_string()
+    } else {
+        format!("datetime.timezone({})", timedelta_repr(i64::from(offset_secs) * 1_000_000))
+    }
+}
+
+/// `repr(time)` — `datetime.time(H, M[, S[, US]])`; seconds appear when seconds
+/// or microseconds are non-zero, microseconds only when non-zero.
+fn time_repr(t: &chrono::NaiveTime) -> String {
+    use chrono::Timelike as _;
+    let (h, m, s, us) = (t.hour(), t.minute(), t.second(), t.nanosecond() / 1000);
+    let mut out = format!("datetime.time({h}, {m}");
+    if s != 0 || us != 0 {
+        out.push_str(&format!(", {s}"));
+        if us != 0 {
+            out.push_str(&format!(", {us}"));
+        }
+    }
+    out.push(')');
+    out
+}
+
+/// `repr(datetime)` — `datetime.datetime(Y, M, D, H, MI[, S[, US]][, tzinfo=..])`.
+fn datetime_repr(dt: &chrono::NaiveDateTime, tz_offset_secs: Option<i32>) -> String {
+    use chrono::{Datelike as _, Timelike as _};
+    let mut out = format!(
+        "datetime.datetime({}, {}, {}, {}, {}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute()
+    );
+    let (s, us) = (dt.second(), dt.nanosecond() / 1000);
+    if s != 0 || us != 0 {
+        out.push_str(&format!(", {s}"));
+        if us != 0 {
+            out.push_str(&format!(", {us}"));
+        }
+    }
+    if let Some(secs) = tz_offset_secs {
+        out.push_str(&format!(", tzinfo={}", timezone_repr(secs)));
+    }
+    out.push(')');
+    out
+}
+
 fn counter_value_as_i64(value: &Value) -> i64 {
     match value {
         Value::Int(n) => *n,
@@ -2606,6 +2680,18 @@ impl Value {
             // `repr(Fraction(3, 2))` == "Fraction(3, 2)"; the denominator is
             // always shown, even when it is 1 (`Fraction(5, 1)`).
             Self::Fraction(fr) => format!("Fraction({}, {})", fr.numer(), fr.denom()),
+            // The temporal types repr as their constructor call, distinct from
+            // their `str()` (which is the ISO-ish Display form) — e.g.
+            // `repr(time(14, 30))` is `datetime.time(14, 30)`, not `14:30:00`.
+            Self::Time(t) => time_repr(t),
+            Self::DateTime { dt, tz_offset_secs } => datetime_repr(dt, *tz_offset_secs),
+            Self::TimeDelta(micros) => timedelta_repr(*micros),
+            Self::TimeZone(secs) => timezone_repr(*secs),
+            // Everything else reprs identically to its `str()` (Display): the
+            // numeric scalars, `bytes`/`bytearray`, and the containers (whose
+            // Display already recurses through element `repr`). A NEW variant
+            // whose CPython repr differs from str MUST get an explicit arm above
+            // rather than silently inheriting Display here.
             other => format!("{other}"),
         }
     }
