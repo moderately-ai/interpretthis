@@ -613,6 +613,21 @@ fn mod_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let Value::String(template) = left {
         return crate::eval::strings::str_percent_format(template, right);
     }
+    // `bytes % args` / `bytearray % args` — printf-style bytes formatting.
+    match left {
+        Value::Bytes(template) => {
+            return crate::eval::strings::bytes_percent_format(template, right);
+        }
+        Value::ByteArray(template) => {
+            let snapshot = template.lock().clone();
+            return crate::eval::strings::bytes_percent_format(&snapshot, right).map(|v| match v {
+                // bytearray % args yields a bytearray.
+                Value::Bytes(b) => Value::ByteArray(crate::value::shared_bytes(b)),
+                other => other,
+            });
+        }
+        _ => {}
+    }
 
     if either_is_float(left, right) {
         let l = to_float(left)?;

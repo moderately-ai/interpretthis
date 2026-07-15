@@ -2061,6 +2061,8 @@ fn bytes_arith(
         BinOp::Mul if matches!(rhs, Value::Int(_) | Value::Bool(_)) => {
             Some(crate::eval::operations::apply_binop_builtin(op, lhs, rhs))
         }
+        // `bytes % args` / `bytearray % args` — printf-style bytes formatting.
+        BinOp::Mod => Some(crate::eval::operations::apply_binop_builtin(op, lhs, rhs)),
         _ => None,
     }
 }

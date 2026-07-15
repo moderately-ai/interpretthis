@@ -1034,6 +1034,90 @@ fn EvalError_value_error(message: String) -> EvalError {
 /// Each conversion is translated into the `{}`-mini-language and rendered by
 /// [`apply_format_spec`] so numeric padding/precision/sign behaviour is shared
 /// with f-strings and `str.format`.
+/// `bytes % args` (and `bytearray % args`) — printf-style bytes formatting.
+///
+/// Implemented by decoding the template as latin-1 (lossless, byte↔codepoint),
+/// converting bytes-like arguments to latin-1 strings so `%s`/`%b` insert their
+/// raw bytes, reusing [`str_percent_format`], then re-encoding the result as
+/// latin-1. Numeric/text conversions and flags/width/precision are identical to
+/// str formatting. Known minor divergences: `%r`/`%a` render the object's *str*
+/// repr rather than the bytes repr, and a str argument to `%s` is accepted
+/// rather than rejected — both rare in real bytes formatting.
+pub fn bytes_percent_format(template: &[u8], arg: &Value) -> EvalResult {
+    let tmpl = decode_and_normalize_bytes_template(template);
+    let converted = latin1_bytes_args(arg);
+    let Value::String(result) = str_percent_format(&tmpl, &converted)? else {
+        return Err(InterpreterError::Runtime("bytes format produced non-string".into()).into());
+    };
+    // latin-1 encode: every char is U+0000..=U+00FF from the decode/format above.
+    Ok(Value::Bytes(result.chars().map(|c| c as u8).collect()))
+}
+
+/// Decode a bytes format template as latin-1 and rewrite each `%b` conversion to
+/// `%s` (equivalent for bytes formatting) so the shared str formatter accepts it.
+fn decode_and_normalize_bytes_template(template: &[u8]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < template.len() {
+        let c = template[i] as char;
+        i += 1;
+        out.push(c);
+        if c != '%' {
+            continue;
+        }
+        // `%%` — a literal percent, no conversion follows.
+        if template.get(i) == Some(&b'%') {
+            out.push('%');
+            i += 1;
+            continue;
+        }
+        // Optional `(mapping key)` — copy verbatim (its letters are not a conv).
+        if template.get(i) == Some(&b'(') {
+            while i < template.len() {
+                let ch = template[i] as char;
+                out.push(ch);
+                i += 1;
+                if ch == ')' {
+                    break;
+                }
+            }
+        }
+        // Copy flags/width/.precision/length-mods up to the conversion letter.
+        while i < template.len() {
+            let ch = template[i] as char;
+            i += 1;
+            if ch.is_ascii_alphabetic() && !matches!(ch, 'l' | 'h' | 'L') {
+                out.push(if ch == 'b' { 's' } else { ch });
+                break;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Convert bytes-like positional arguments to latin-1 strings so `%s`/`%b`
+/// insert their raw bytes through the shared str formatter.
+fn latin1_bytes_args(arg: &Value) -> Value {
+    fn conv(v: &Value) -> Value {
+        match v {
+            Value::Bytes(b) => {
+                Value::String(b.iter().map(|&x| x as char).collect::<String>().into())
+            }
+            Value::ByteArray(b) => {
+                Value::String(b.lock().iter().map(|&x| x as char).collect::<String>().into())
+            }
+            other => other.clone(),
+        }
+    }
+    match arg {
+        Value::Tuple(items) => Value::Tuple(items.iter().map(conv).collect()),
+        // A mapping's bytes values are left as-is (a rare corner).
+        Value::Dict(_) => arg.clone(),
+        other => conv(other),
+    }
+}
+
 pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
     let chars: Vec<char> = template.chars().collect();
     let positional: Vec<Value> = match arg {
