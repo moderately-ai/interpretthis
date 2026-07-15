@@ -60,12 +60,29 @@ pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Valu
         "is_signed" => Ok(Value::Bool(d.is_negative())),
         "is_nan" | "is_infinite" | "is_qnan" | "is_snan" => Ok(Value::Bool(false)),
         "normalize" => Ok(Value::Decimal(Box::new(d.normalized()))),
-        "sqrt" => d.sqrt().map(|r| Value::Decimal(Box::new(r))).ok_or_else(|| {
+        // Rounded to the default context precision (28 significant digits),
+        // matching CPython — bigdecimal's raw sqrt keeps ~100 digits.
+        "sqrt" => d.sqrt().map(|r| Value::Decimal(Box::new(r.with_prec(28)))).ok_or_else(|| {
             EvalError::Exception(crate::value::ExceptionValue::new(
                 "InvalidOperation",
                 "sqrt of negative Decimal",
             ))
         }),
+        // `compare(other)` yields Decimal(-1 / 0 / 1) (not a bare int).
+        "compare" => {
+            let Some(Value::Decimal(other)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "compare() requires a Decimal argument".into(),
+                )
+                .into());
+            };
+            let sign = match d.cmp(other) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(Value::Decimal(Box::new(BigDecimal::from(sign))))
+        }
         "to_integral_value" | "to_integral" => {
             Ok(Value::Decimal(Box::new(d.with_scale_round(0, bigdecimal::RoundingMode::HalfEven))))
         }
