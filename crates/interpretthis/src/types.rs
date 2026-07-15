@@ -486,6 +486,18 @@ pub fn dispatch_contains(container: &Value, item: &Value) -> Result<bool, EvalEr
 /// CPython, which explicitly sets `__hash__ = None`. Regular user classes
 /// fall through to the standard identity-shaped hash on the type's slot.
 pub fn dispatch_hash(state: &InterpreterState, value: &Value) -> Result<i64, EvalError> {
+    // An IntEnum / IntFlag / StrEnum member hashes exactly as its underlying
+    // int / str (`hash(P.HIGH) == hash(10)`), so dispatch on the inner value's
+    // type slot rather than the generic enum fallback hash.
+    if let Value::EnumMember {
+        value: inner,
+        kind:
+            crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag | crate::value::EnumKind::Str,
+        ..
+    } = value
+    {
+        return dispatch_hash(state, inner);
+    }
     if let Value::Instance(inst) = value {
         let registered = state.classes.get(&inst.class_name);
         // Does the class (or any MRO ancestor) define this dunder?
@@ -2785,6 +2797,14 @@ fn int_index(index: &Value, container_name: &str) -> Result<i64, EvalError> {
     match index {
         Value::Int(i) => Ok(*i),
         Value::Bool(b) => Ok(i64::from(*b)),
+        // An IntEnum / IntFlag member has int's `__index__`, so it indexes as its
+        // underlying int (`seq[P.LOW]`). A plain Enum / Flag has no `__index__`
+        // and keeps the TypeError.
+        Value::EnumMember {
+            value,
+            kind: crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag,
+            ..
+        } => int_index(value, container_name),
         other => Err(InterpreterError::TypeError(format!(
             "{container_name} indices must be integers, not '{}'",
             other.type_name()

@@ -823,36 +823,20 @@ pub(super) fn pow_three_arg(
     exp: &Value,
     modulus: &Value,
 ) -> Result<Value, EvalError> {
-    let base_i = match base {
-        Value::Int(b) => *b,
-        Value::Bool(b) => i64::from(*b),
-        _ => {
-            return Err(InterpreterError::TypeError(
+    // Accept int / bool / i64-range BigInt / IntEnum member (value_as_bigint
+    // unwraps int-backed enums); anything else — float, str, plain Enum — makes
+    // the 3-arg form illegal, matching CPython.
+    let as_int = |v: &Value| -> Result<i64, EvalError> {
+        crate::value::value_as_bigint(v).and_then(|b| i64::try_from(&b).ok()).ok_or_else(|| {
+            InterpreterError::TypeError(
                 "pow() 3rd argument not allowed unless all arguments are integers".into(),
             )
-            .into());
-        }
+            .into()
+        })
     };
-    let exp_i = match exp {
-        Value::Int(e) => *e,
-        Value::Bool(e) => i64::from(*e),
-        _ => {
-            return Err(InterpreterError::TypeError(
-                "pow() 3rd argument not allowed unless all arguments are integers".into(),
-            )
-            .into());
-        }
-    };
-    let mod_i = match modulus {
-        Value::Int(m) => *m,
-        Value::Bool(m) => i64::from(*m),
-        _ => {
-            return Err(InterpreterError::TypeError(
-                "pow() 3rd argument not allowed unless all arguments are integers".into(),
-            )
-            .into());
-        }
-    };
+    let base_i = as_int(base)?;
+    let exp_i = as_int(exp)?;
+    let mod_i = as_int(modulus)?;
     if mod_i == 0 {
         return Err(EvalError::Exception(ExceptionValue::new(
             "ValueError",

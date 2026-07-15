@@ -261,6 +261,30 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
                 Ok(ValueKey::Fraction(Box::new((**fr).clone())))
             }
         }
+        // Enum members are hashable in CPython. An IntEnum / IntFlag / StrEnum
+        // member hashes and keys as its underlying int / str (so `hash(P.HIGH)
+        // == hash(10)` and `{P.HIGH: 1}[10]` hits the same slot). A plain Enum /
+        // Flag hashes by member identity (class + member name), matching
+        // CPython's default object hash while staying deterministic across runs.
+        Value::EnumMember { value: inner, kind, class_name, member_name } => match kind {
+            crate::value::EnumKind::Int
+            | crate::value::EnumKind::IntFlag
+            | crate::value::EnumKind::Str => value_to_key(inner),
+            crate::value::EnumKind::Plain | crate::value::EnumKind::Flag => {
+                use std::hash::{Hash as _, Hasher as _};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                class_name.hash(&mut hasher);
+                member_name.hash(&mut hasher);
+                #[expect(
+                    clippy::cast_possible_wrap,
+                    reason = "hash bits reinterpreted as i64 — CPython hashes are also signed"
+                )]
+                Ok(ValueKey::Instance {
+                    hash: hasher.finish() as i64,
+                    value: Box::new(val.clone()),
+                })
+            }
+        },
         _ => Err(crate::error::InterpreterError::TypeError(format!(
             "unhashable type: '{}'",
             val.type_name()

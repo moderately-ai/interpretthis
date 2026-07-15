@@ -990,6 +990,18 @@ pub async fn apply_unaryop(
     operand: &Value,
     tools: &Tools,
 ) -> EvalResult {
+    // An IntEnum / IntFlag member behaves as its underlying int under unary
+    // `+`/`-`/`~` (`~P.LOW == -4`), so unwrap before dispatch. A plain Enum /
+    // Flag is not numeric and keeps its EnumMember form, hitting the TypeError
+    // arms below exactly as CPython raises.
+    let operand = match operand {
+        Value::EnumMember {
+            value,
+            kind: crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag,
+            ..
+        } => value.as_ref(),
+        other => other,
+    };
     match op {
         // Unary `+` is identity on every numeric type (`bool` promotes to int).
         ast::UnaryOp::UAdd => match operand {

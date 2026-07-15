@@ -922,6 +922,24 @@ pub(super) async fn try_builtin(
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
                 Value::Decimal(d, _) => Ok(Some(round_decimal(d, ndigits))),
                 Value::Fraction(fr) => Ok(Some(round_fraction(fr, ndigits))),
+                // round(IntEnum/IntFlag) rounds the underlying int (a no-op for
+                // ndigits >= 0). Plain Enum/Flag has no __round__, so it errors.
+                Value::EnumMember {
+                    value: inner,
+                    kind: crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag,
+                    ..
+                } => match &**inner {
+                    Value::Int(i) => Ok(Some(round_int(*i, ndigits))),
+                    Value::BigInt(b) => {
+                        Ok(Some(crate::value::int_from_bigint(round_bigint(b, ndigits))))
+                    }
+                    Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
+                    _ => Err(InterpreterError::TypeError(format!(
+                        "type '{}' doesn't define __round__",
+                        args[0].type_name()
+                    ))
+                    .into()),
+                },
                 _ => Err(InterpreterError::TypeError(format!(
                     "type '{}' doesn't define __round__",
                     args[0].type_name()
