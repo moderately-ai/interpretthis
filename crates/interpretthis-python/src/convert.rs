@@ -300,7 +300,7 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
         let big = ob.extract::<BigDecimal>()?;
         // `bigdecimal` drops the sign of a zero; recover CPython's negative
         // zero (`Decimal('-0.0')`) from the repr so it round-trips.
-        let is_zero = big == BigDecimal::from(0i64);
+        let is_zero = bigdecimal::Zero::is_zero(&big);
         let neg_zero = is_zero && ob.str()?.to_str()?.trim_start().starts_with('-');
         return Ok(Value::Decimal(Box::new(big), neg_zero));
     }
