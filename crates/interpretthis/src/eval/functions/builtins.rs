@@ -15,7 +15,8 @@ use super::{
         parse_int_str, pow_three_arg, type_arg_name,
     },
     method_dispatch::CallArgs,
-    resolve_proxy, round_bigint, round_float, round_int, to_len_i64, value_to_i64,
+    resolve_proxy, round_bigint, round_decimal, round_float, round_fraction, round_int, to_len_i64,
+    value_to_i64,
 };
 use crate::{
     error::{EvalError, InterpreterError},
@@ -770,6 +771,8 @@ pub(super) async fn try_builtin(
                 // `round_ties_even()` which implements the IEEE rule.
                 Value::Float(f) => Ok(Some(round_float(*f, ndigits)?)),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
+                Value::Decimal(d, _) => Ok(Some(round_decimal(d, ndigits))),
+                Value::Fraction(fr) => Ok(Some(round_fraction(fr, ndigits))),
                 _ => Err(InterpreterError::TypeError(format!(
                     "type '{}' doesn't define __round__",
                     args[0].type_name()

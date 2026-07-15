@@ -231,6 +231,61 @@ pub(crate) fn round_float(f: f64, ndigits: Option<i64>) -> Result<Value, EvalErr
     Ok(Value::Float((f / pow10).round_ties_even() * pow10))
 }
 
+/// Round a reduced `BigRational` to the nearest integer with round-half-to-even,
+/// mirroring `Fraction.__round__(None)`.
+fn round_ratio_bankers(r: &num_rational::BigRational) -> num_bigint::BigInt {
+    use num_integer::Integer as _;
+    // `div_mod_floor` gives a remainder in `[0, denom)` since the denominator is
+    // positive, so the tie test `2*rem == denom` is sign-agnostic.
+    let (floor, rem) = r.numer().div_mod_floor(r.denom());
+    let twice = &rem * 2u32;
+    match twice.cmp(r.denom()) {
+        std::cmp::Ordering::Less => floor,
+        std::cmp::Ordering::Greater => floor + 1,
+        std::cmp::Ordering::Equal => {
+            if floor.is_even() {
+                floor
+            } else {
+                floor + 1
+            }
+        }
+    }
+}
+
+/// `round(Fraction, ndigits)` — `None` yields an int (round-half-to-even), any
+/// `ndigits` yields a `Fraction` rounded to that many decimal places.
+pub(crate) fn round_fraction(fr: &num_rational::BigRational, ndigits: Option<i64>) -> Value {
+    use num_rational::BigRational;
+    let Some(n) = ndigits else {
+        return crate::value::int_from_bigint(round_ratio_bankers(fr));
+    };
+    let ten = num_bigint::BigInt::from(10);
+    if n >= 0 {
+        let pow = ten.pow(u32::try_from(n).unwrap_or(u32::MAX));
+        let scaled = fr * BigRational::from_integer(pow.clone());
+        let rounded = round_ratio_bankers(&scaled);
+        Value::Fraction(Box::new(BigRational::new(rounded, pow)))
+    } else {
+        let pow = ten.pow(u32::try_from(-n).unwrap_or(u32::MAX));
+        let scaled = fr / BigRational::from_integer(pow.clone());
+        let rounded = round_ratio_bankers(&scaled);
+        Value::Fraction(Box::new(BigRational::from_integer(rounded * pow)))
+    }
+}
+
+/// `round(Decimal, ndigits)` — `None` yields an int (round-half-to-even), any
+/// `ndigits` yields a `Decimal` rounded to that scale.
+pub(crate) fn round_decimal(d: &bigdecimal::BigDecimal, ndigits: Option<i64>) -> Value {
+    use bigdecimal::RoundingMode::HalfEven;
+    match ndigits {
+        None => {
+            let rounded = d.with_scale_round(0, HalfEven);
+            crate::value::int_from_bigint(rounded.as_bigint_and_exponent().0)
+        }
+        Some(n) => Value::Decimal(Box::new(d.with_scale_round(n, HalfEven)), false),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Proxy resolution
 // ---------------------------------------------------------------------------

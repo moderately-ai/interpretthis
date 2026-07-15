@@ -1,0 +1,11 @@
+import itertools
+print(list(itertools.accumulate([1,2,3,4])))
+print(list(itertools.accumulate([1,2,3,4], initial=100)))
+print(list(itertools.takewhile(lambda x: x<3, [1,2,3,1])))
+print(list(itertools.dropwhile(lambda x: x<3, [1,2,3,1])))
+print(list(itertools.starmap(pow, [(2,3),(3,2)])))
+print(list(itertools.compress("ABCDEF", [1,0,1,0,1,1])))
+print(list(itertools.zip_longest([1,2],[3,4,5], fillvalue=0)))
+print(list(itertools.pairwise([1,2,3,4])))
+print(list(itertools.islice(itertools.count(10), 3)))
+print(list(itertools.groupby("aabbcc"))[0][0])
