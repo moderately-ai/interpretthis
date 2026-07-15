@@ -35,6 +35,8 @@ pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
         ("datetime", "strptime") => Some("strptime"),
         ("date", "fromisoformat") => Some("date.fromisoformat"),
         ("datetime", "fromisoformat") => Some("datetime.fromisoformat"),
+        ("date", "fromordinal") => Some("date.fromordinal"),
+        ("datetime", "fromordinal") => Some("datetime.fromordinal"),
         _ => None,
     }
 }
@@ -223,6 +225,31 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
                     "Invalid isoformat string: '{s}'"
                 )))
             })
+        }
+        // `date.fromordinal(n)` / `datetime.fromordinal(n)`: proleptic Gregorian
+        // ordinal where day 1 is 0001-01-01 — exactly chrono's
+        // `num_days_from_ce`. `datetime.fromordinal` sets the time to midnight.
+        "date.fromordinal" | "datetime.fromordinal" => {
+            let n = args
+                .first()
+                .and_then(crate::value::value_as_i64)
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(
+                        "fromordinal() argument must be an integer".into(),
+                    ))
+                })?;
+            let date = NaiveDate::from_num_days_from_ce_opt(n).ok_or_else(|| {
+                EvalError::from(InterpreterError::ValueError("ordinal out of range".into()))
+            })?;
+            if func == "date.fromordinal" {
+                Ok(Value::Date(date))
+            } else {
+                Ok(Value::DateTime {
+                    dt: date.and_hms_opt(0, 0, 0).unwrap_or_default(),
+                    tz_offset_secs: None,
+                })
+            }
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'datetime' has no attribute '{func}'"
@@ -529,10 +556,34 @@ pub fn dispatch_datetime_method(
             }
             Ok(Value::Float(ts))
         }
+        // `utcoffset()` returns the fixed offset as a timedelta for an aware
+        // datetime, None for a naive one. Our timezones are fixed offsets, so
+        // `dst()` is always None (no daylight-saving transitions modelled).
+        "utcoffset" => Ok(tz_offset_secs
+            .map_or(Value::None, |secs| Value::TimeDelta(i64::from(secs) * 1_000_000))),
+        "dst" => Ok(Value::None),
+        "tzname" => Ok(tz_offset_secs
+            .map_or(Value::None, |secs| Value::String(format_fixed_tzname(secs).into()))),
         _ => Err(InterpreterError::AttributeError(format!(
             "'datetime' object has no attribute '{method}'"
         ))
         .into()),
+    }
+}
+
+/// CPython's `tzname()` for a fixed offset: `UTC`, or `UTC±HH:MM` (further
+/// `:SS` only when the offset has a sub-minute part).
+fn format_fixed_tzname(offset_secs: i32) -> String {
+    if offset_secs == 0 {
+        return "UTC".to_string();
+    }
+    let sign = if offset_secs < 0 { '-' } else { '+' };
+    let secs = offset_secs.unsigned_abs();
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if s == 0 {
+        format!("UTC{sign}{h:02}:{m:02}")
+    } else {
+        format!("UTC{sign}{h:02}:{m:02}:{s:02}")
     }
 }
 
@@ -651,10 +702,55 @@ pub fn try_arith(op: &str, lhs: &Value, rhs: &Value) -> Option<EvalResult> {
         ("*", Value::TimeDelta(a), Value::Int(n)) | ("*", Value::Int(n), Value::TimeDelta(a)) => {
             Some(Ok(Value::TimeDelta(a.checked_mul(*n)?)))
         }
-        // timedelta / int -> timedelta (integer microseconds)
+        // timedelta // int -> timedelta (integer microseconds)
         ("//", Value::TimeDelta(a), Value::Int(n)) if *n != 0 => Some(Ok(Value::TimeDelta(a / n))),
+        // timedelta / timedelta -> float ratio (`timedelta(days=1) / timedelta(hours=1)` == 24.0).
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "CPython's timedelta.__truediv__ returns the float ratio, lossy for durations \
+                      beyond 2^53 microseconds just as CPython is"
+        )]
+        ("/", Value::TimeDelta(a), Value::TimeDelta(b)) if *b != 0 => {
+            Some(Ok(Value::Float(*a as f64 / *b as f64)))
+        }
+        // timedelta // timedelta -> int floor ratio.
+        ("//", Value::TimeDelta(a), Value::TimeDelta(b)) if *b != 0 => {
+            Some(Ok(Value::Int(td_floordiv(*a, *b))))
+        }
+        // timedelta % timedelta -> timedelta remainder (Python floor semantics).
+        ("%", Value::TimeDelta(a), Value::TimeDelta(b)) if *b != 0 => {
+            Some(Ok(Value::TimeDelta(a - td_floordiv(*a, *b) * b)))
+        }
+        // timedelta / int -> timedelta, rounding to the nearest microsecond
+        // (ties to even, matching CPython's `_divide_and_round`).
+        ("/", Value::TimeDelta(a), Value::Int(n)) if *n != 0 => {
+            Some(Ok(Value::TimeDelta(td_divide_and_round(*a, *n))))
+        }
         _ => None,
     }
+}
+
+/// Python floor division on microsecond counts (rounds toward negative
+/// infinity, unlike Rust's truncating `/`).
+const fn td_floordiv(a: i64, b: i64) -> i64 {
+    let q = a / b;
+    let r = a % b;
+    if (r != 0) && ((r < 0) != (b < 0)) { q - 1 } else { q }
+}
+
+/// CPython's `datetime._divide_and_round`: `a / b` rounded to the nearest
+/// integer, ties broken toward the even neighbour.
+const fn td_divide_and_round(a: i64, b: i64) -> i64 {
+    let mut q = td_floordiv(a, b);
+    // Remainder with the sign of `b` (Python's `divmod`), so `2*r` vs `b`
+    // compares magnitudes correctly for either sign of the divisor.
+    let r = a - q * b;
+    let r2 = r * 2;
+    let greater_than_half = if b > 0 { r2 > b } else { r2 < b };
+    if greater_than_half || (r2 == b && q % 2 != 0) {
+        q += 1;
+    }
+    q
 }
 
 fn int_arg(value: &Value, func: &str, index: usize) -> Result<i64, EvalError> {

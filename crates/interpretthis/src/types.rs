@@ -3942,6 +3942,9 @@ const fn binop_to_sym(op: BinOp) -> &'static str {
         BinOp::Sub => "-",
         BinOp::Mul => "*",
         BinOp::FloorDiv => "//",
+        // `timedelta / timedelta` (ratio) and `timedelta / int` both route here.
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
         _ => "",
     }
 }
