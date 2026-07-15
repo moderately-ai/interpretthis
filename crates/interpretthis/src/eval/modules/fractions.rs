@@ -83,7 +83,10 @@ fn from_pair(numer: &Value, denom: &Value) -> EvalResult {
     let n = value_to_bigint(numer, "numerator")?;
     let d = value_to_bigint(denom, "denominator")?;
     if d.sign() == num_bigint::Sign::NoSign {
-        return Err(InterpreterError::Runtime("Fraction(_, 0) — denominator is zero".into()).into());
+        return Err(crate::value::ExceptionValue::zero_division_error(
+            "Fraction(_, 0): denominator is zero",
+        )
+        .into());
     }
     Ok(Value::Fraction(Box::new(BigRational::new(n, d))))
 }
@@ -102,25 +105,89 @@ fn value_to_bigint(value: &Value, field: &str) -> Result<BigInt, EvalError> {
 
 fn parse_fraction_str(s: &str) -> Result<BigRational, EvalError> {
     let trimmed = s.trim();
+    let invalid = || {
+        EvalError::from(InterpreterError::ValueError(format!(
+            "Invalid literal for Fraction: {s:?}"
+        )))
+    };
+    // `numerator/denominator` form: the numerator is a signed integer, the
+    // denominator an unsigned integer (CPython rejects `"10/-4"` and any decimal
+    // in either side, e.g. `"1.5/2"`). Whitespace/underscores around each are
+    // tolerated. A zero denominator raises ZeroDivisionError, not ValueError.
     if let Some((n_str, d_str)) = trimmed.split_once('/') {
-        let n = BigInt::from_str(n_str.trim()).map_err(|e| {
-            EvalError::from(InterpreterError::ValueError(format!("Fraction numerator parse: {e}")))
-        })?;
-        let d = BigInt::from_str(d_str.trim()).map_err(|e| {
-            EvalError::from(InterpreterError::ValueError(format!(
-                "Fraction denominator parse: {e}"
-            )))
-        })?;
+        let n = parse_int_literal(n_str.trim(), true).ok_or_else(invalid)?;
+        let d = parse_int_literal(d_str.trim(), false).ok_or_else(invalid)?;
         if d.sign() == num_bigint::Sign::NoSign {
-            return Err(InterpreterError::Runtime("Fraction denominator is zero".into()).into());
+            return Err(crate::value::ExceptionValue::zero_division_error(
+                "Fraction(_, 0): denominator is zero",
+            )
+            .into());
         }
         Ok(BigRational::new(n, d))
     } else {
-        let n = BigInt::from_str(trimmed).map_err(|e| {
-            EvalError::from(InterpreterError::ValueError(format!("Fraction literal parse: {e}")))
-        })?;
-        Ok(BigRational::from_integer(n))
+        parse_decimal_to_rational(trimmed).ok_or_else(invalid)
     }
+}
+
+/// Parse a plain integer literal (optional `_` digit separators). A leading
+/// `+`/`-` is accepted only when `allow_sign` is set — the Fraction slash form's
+/// denominator forbids a sign. Returns `None` on any non-digit content.
+fn parse_int_literal(s: &str, allow_sign: bool) -> Option<BigInt> {
+    let cleaned = s.replace('_', "");
+    let (neg, digits) = if let Some(rest) = cleaned.strip_prefix('-') {
+        allow_sign.then_some((true, rest))?
+    } else if let Some(rest) = cleaned.strip_prefix('+') {
+        allow_sign.then_some((false, rest))?
+    } else {
+        (false, cleaned.as_str())
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n = BigInt::from_str(digits).ok()?;
+    Some(if neg { -n } else { n })
+}
+
+/// Parse a decimal literal (`"3"`, `"0.25"`, `"-1.5"`, `"1e3"`, `"2.5e-1"`,
+/// with optional `_` digit separators) into the exact rational it denotes.
+/// Returns `None` on any malformed input so the caller raises the CPython
+/// `Invalid literal for Fraction` error.
+fn parse_decimal_to_rational(s: &str) -> Option<BigRational> {
+    let s = s.trim().replace('_', "");
+    if s.is_empty() {
+        return None;
+    }
+    // Split off an optional exponent.
+    let (mantissa, exp): (&str, i64) = match s.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse().ok()?),
+        None => (s.as_str(), 0),
+    };
+    // Sign, then integer and fractional digit runs.
+    let (negative, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa.strip_prefix('+').unwrap_or(mantissa)),
+    };
+    let (int_str, frac_str) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if int_str.is_empty() && frac_str.is_empty() {
+        return None;
+    }
+    if !int_str.bytes().all(|b| b.is_ascii_digit()) || !frac_str.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut numer = BigInt::from_str(&format!("0{int_str}{frac_str}")).ok()?;
+    if negative {
+        numer = -numer;
+    }
+    // Value = numer * 10^(exp - frac_len). A non-negative net exponent scales the
+    // numerator; a negative one becomes the denominator.
+    let net_exp = exp - i64::try_from(frac_str.len()).ok()?;
+    let pow10 = |k: u32| BigInt::from(10).pow(k);
+    Some(if net_exp >= 0 {
+        BigRational::from_integer(numer * pow10(u32::try_from(net_exp).ok()?))
+    } else {
+        BigRational::new(numer, pow10(u32::try_from(-net_exp).ok()?))
+    })
 }
 
 /// `fractions` module registration.

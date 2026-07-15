@@ -1,0 +1,10 @@
+from fractions import Fraction
+print(Fraction("0.25"), Fraction("1.5"), Fraction("-3.14"))
+print(Fraction("1e3"), Fraction("2.5e-1"), Fraction("0.001"))
+print(Fraction("22/7"), Fraction("+3/4"), Fraction("-6/8"))
+print(Fraction("1_0/2_0"), Fraction("  3 / 4 "))
+print(Fraction(0.5), Fraction(0.25), Fraction(0.1))
+print(Fraction("100"), Fraction("1_000"))
+print(Fraction("0.25") + Fraction("0.75"))
+print(sorted([Fraction("0.5"), Fraction("0.1"), Fraction("0.9")]))
+print(Fraction(3, 4), Fraction(3), Fraction())
