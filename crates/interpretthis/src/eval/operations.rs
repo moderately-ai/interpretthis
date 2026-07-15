@@ -571,16 +571,32 @@ fn floordiv_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         }
         Ok(Value::Float((l / r).floor()))
     } else {
-        let l = to_int(left)?;
-        let r = to_int(right)?;
-        if r == 0 {
+        // Fast path stays in i64; large or overflowing operands promote to
+        // BigInt so `10**30 // 7` matches CPython's unbounded integers.
+        if let (Value::Int(a), Value::Int(b)) = (left, right) {
+            if *b == 0 {
+                return Err(crate::value::ExceptionValue::zero_division_error(
+                    "integer division or modulo by zero",
+                )
+                .into());
+            }
+            // `i64::MIN / -1` is the sole overflowing case; it promotes below.
+            if !(*a == i64::MIN && *b == -1) {
+                return Ok(Value::Int(python_floordiv(*a, *b)));
+            }
+        }
+        use num_integer::Integer as _;
+        use num_traits::Zero as _;
+        let l = to_bigint(left)?;
+        let r = to_bigint(right)?;
+        if r.is_zero() {
             return Err(crate::value::ExceptionValue::zero_division_error(
                 "integer division or modulo by zero",
             )
             .into());
         }
-        // Python floor division rounds towards negative infinity
-        Ok(Value::Int(python_floordiv(l, r)))
+        // BigInt::div_floor rounds towards negative infinity, as Python does.
+        Ok(crate::value::int_from_bigint(l.div_floor(&r)))
     }
 }
 
@@ -607,15 +623,31 @@ fn mod_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         // Python modulo: result has same sign as divisor
         Ok(Value::Float(r.mul_add(-(l / r).floor(), l)))
     } else {
-        let l = to_int(left)?;
-        let r = to_int(right)?;
-        if r == 0 {
+        // Fast path in i64; promote to BigInt for large/overflowing operands.
+        if let (Value::Int(a), Value::Int(b)) = (left, right) {
+            if *b == 0 {
+                return Err(crate::value::ExceptionValue::zero_division_error(
+                    "integer division or modulo by zero",
+                )
+                .into());
+            }
+            // `i64::MIN % -1` overflows in debug; route it through BigInt.
+            if !(*a == i64::MIN && *b == -1) {
+                return Ok(Value::Int(python_mod(*a, *b)));
+            }
+        }
+        use num_integer::Integer as _;
+        use num_traits::Zero as _;
+        let l = to_bigint(left)?;
+        let r = to_bigint(right)?;
+        if r.is_zero() {
             return Err(crate::value::ExceptionValue::zero_division_error(
                 "integer division or modulo by zero",
             )
             .into());
         }
-        Ok(Value::Int(python_mod(l, r)))
+        // BigInt::mod_floor gives a remainder with the divisor's sign, as Python.
+        Ok(crate::value::int_from_bigint(l.mod_floor(&r)))
     }
 }
 
