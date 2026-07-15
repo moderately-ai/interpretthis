@@ -65,9 +65,11 @@ pub async fn eval_for(
             let Some(next) = i.checked_add(step) else { break };
             i = next;
         }
-    } else if matches!(iterable, Value::BuiltinIter { .. }) {
-        // Infinite `itertools` producers cannot be materialised — step
-        // them lazily so `for x in count(): ... break` terminates.
+    } else if matches!(iterable, Value::BuiltinIter { .. } | Value::Generator { .. }) {
+        // Step generators / infinite producers lazily rather than
+        // draining them up front: `for x in count(): ... break`
+        // terminates, and a generator's `try/finally` cleanup runs after
+        // the loop body consumes each item (not before the loop starts).
         let empty = indexmap::IndexMap::new();
         loop {
             let item = match crate::eval::functions::dispatch_generator_method(
@@ -357,6 +359,13 @@ async fn call_context_method(
     // contextlib.nullcontext / suppress — marker instances without Python methods.
     if let Some(result) =
         crate::eval::modules::contextlib_mod::try_contextlib_method(state, receiver, method, args)
+    {
+        return result;
+    }
+    // `@contextmanager` instances step a suspended generator (async).
+    if let Some(result) =
+        crate::eval::modules::contextlib_mod::try_gencm_method(state, receiver, method, args, tools)
+            .await
     {
         return result;
     }

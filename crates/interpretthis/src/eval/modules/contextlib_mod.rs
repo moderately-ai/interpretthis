@@ -16,7 +16,7 @@
 use indexmap::IndexMap;
 
 use crate::{
-    error::{EvalResult, InterpreterError},
+    error::{EvalError, EvalResult, InterpreterError},
     eval::exceptions::matches_user_exception,
     state::InterpreterState,
     tools::Tools,
@@ -26,6 +26,9 @@ use crate::{
 /// Class names used as markers for `call_context_method` special-cases.
 pub const NULLCONTEXT_CLASS: &str = "contextlib.nullcontext";
 pub const SUPPRESS_CLASS: &str = "contextlib.suppress";
+/// Marker class for a `@contextmanager`-produced context manager; the
+/// wrapped generator lives in its `gen` field.
+pub const GENCM_CLASS: &str = "contextlib._GeneratorContextManager";
 
 pub fn has_function(name: &str) -> bool {
     matches!(name, "nullcontext" | "suppress" | "contextmanager")
@@ -97,13 +100,20 @@ async fn call(
                 fields: crate::value::shared_fields(fields),
             }))
         }
-        "contextmanager" => Err(InterpreterError::TypeError(
-            "@contextmanager is not supported (requires suspended generators; \
-             see CONFORMANCE.md#unsupported-language-features); use a class with \
-             __enter__/__exit__ instead"
-                .into(),
-        )
-        .into()),
+        // `@contextmanager` wraps a generator function. Calling the
+        // wrapped function must produce a fresh context manager, so
+        // return a Partial over the internal `__gen_contextmanager__`
+        // builtin bound to the decorated generator function; invoking it
+        // runs the generator and boxes it in a `_GeneratorContextManager`
+        // instance.
+        "contextmanager" => {
+            let func = args.first().cloned().unwrap_or(Value::None);
+            Ok(Value::Partial(Box::new(crate::value::PartialData {
+                func: Value::BuiltinName("__gen_contextmanager__".into()),
+                args: vec![func],
+                keywords: IndexMap::new(),
+            })))
+        }
         other => Err(InterpreterError::AttributeError(format!(
             "module 'contextlib' has no attribute '{other}'"
         ))
@@ -111,10 +121,112 @@ async fn call(
     }
 }
 
+/// Box a running generator (from a `@contextmanager` function) into a
+/// `_GeneratorContextManager` instance for the `with` machinery.
+pub fn wrap_generator_cm(state: &mut InterpreterState, generator: Value) -> Value {
+    ensure_marker_classes(state);
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("gen".into(), generator);
+    Value::Instance(InstanceValue {
+        class_name: GENCM_CLASS.into(),
+        fields: crate::value::shared_fields(fields),
+    })
+}
+
+/// Async `__enter__` / `__exit__` for a `@contextmanager` instance —
+/// steps the wrapped generator (which `try_contextlib_method` can't do,
+/// being sync). Returns `None` when `receiver` isn't a generator CM.
+pub(crate) async fn try_gencm_method(
+    state: &mut InterpreterState,
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    tools: &Tools,
+) -> Option<EvalResult> {
+    let Value::Instance(inst) = receiver else { return None };
+    if inst.class_name != GENCM_CLASS {
+        return None;
+    }
+    let generator = inst.fields.lock().get("gen").cloned()?;
+    let empty = IndexMap::new();
+    match method {
+        "__enter__" => {
+            let stepped = crate::eval::functions::dispatch_generator_method(
+                state,
+                &generator,
+                "__next__",
+                &[],
+                &empty,
+                tools,
+            )
+            .await;
+            Some(match stepped {
+                Ok(v) => Ok(v),
+                Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => {
+                    Err(InterpreterError::Runtime("generator didn't yield".into()).into())
+                }
+                Err(e) => Err(e),
+            })
+        }
+        "__exit__" => {
+            // args = (exc_type, exc_val, traceback).
+            let has_exc = !matches!(args.first(), None | Some(Value::None));
+            if has_exc {
+                // Exception exit: throw it in. Swallowed (returns →
+                // StopIteration) suppresses; a re-raise / new raise
+                // propagates; yielding again is an error.
+                let exc = args
+                    .get(1)
+                    .filter(|v| !matches!(v, Value::None))
+                    .or_else(|| args.first())
+                    .cloned()
+                    .unwrap_or(Value::None);
+                let thrown = crate::eval::functions::dispatch_generator_method(
+                    state,
+                    &generator,
+                    "throw",
+                    std::slice::from_ref(&exc),
+                    &empty,
+                    tools,
+                )
+                .await;
+                return Some(match thrown {
+                    Ok(_) => {
+                        Err(InterpreterError::Runtime("generator didn't stop after throw".into())
+                            .into())
+                    }
+                    Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => {
+                        Ok(Value::Bool(true))
+                    }
+                    Err(e) => Err(e),
+                });
+            }
+            // Normal exit: resume; it must stop (StopIteration).
+            let stepped = crate::eval::functions::dispatch_generator_method(
+                state,
+                &generator,
+                "__next__",
+                &[],
+                &empty,
+                tools,
+            )
+            .await;
+            Some(match stepped {
+                Ok(_) => Err(InterpreterError::Runtime("generator didn't stop".into()).into()),
+                Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => {
+                    Ok(Value::Bool(false))
+                }
+                Err(e) => Err(e),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Register empty marker classes so Instance lookups don't NameError.
 fn ensure_marker_classes(state: &mut InterpreterState) {
     use crate::value::ClassValue;
-    for name in [NULLCONTEXT_CLASS, SUPPRESS_CLASS] {
+    for name in [NULLCONTEXT_CLASS, SUPPRESS_CLASS, GENCM_CLASS] {
         if state.classes.contains_key(name) {
             continue;
         }

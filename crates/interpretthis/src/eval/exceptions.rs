@@ -5,7 +5,7 @@
 use rustpython_parser::ast;
 
 use crate::{
-    error::{EvalError, EvalResult, InterpreterError},
+    error::{ControlFlow, EvalError, EvalResult, InterpreterError},
     eval::{eval_body, eval_expr},
     state::InterpreterState,
     tools::Tools,
@@ -48,6 +48,11 @@ async fn eval_try_star_inner(
                 Ok(val) => result = val,
                 Err(e) => pending_error = Some(e),
             }
+        }
+        // A `yield` suspend must defer `finally` to the resumed exit
+        // (same reasoning as `eval_try`).
+        Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+            return Err(EvalError::Signal(ControlFlow::Yield(v)));
         }
         Err(EvalError::Signal(sig)) => {
             pending_error = Some(EvalError::Signal(sig));
@@ -194,9 +199,18 @@ pub async fn eval_try(
                 Err(e) => pending_error = Some(e),
             }
         }
+        Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+            // A `yield` suspending out of the try body is a suspend, not
+            // an exit: `finally` (and `else`) must NOT run now — teardown
+            // happens when the generator resumes and the try body
+            // actually completes or exits. Propagate the suspend directly,
+            // skipping the finally block below. (A generator resumed with
+            // `throw`/`next` re-enters the try body and runs finally then.)
+            return Err(EvalError::Signal(ControlFlow::Yield(v)));
+        }
         Err(EvalError::Signal(sig)) => {
-            // Signals propagate through try/except — NOT caught
-            // But finally still runs
+            // break/continue/return propagate through try/except (NOT
+            // caught) but finally still runs.
             pending_error = Some(EvalError::Signal(sig));
         }
         Err(EvalError::Exception(exc)) => {

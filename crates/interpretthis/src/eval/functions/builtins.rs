@@ -313,6 +313,19 @@ pub(super) async fn try_builtin(
                 other => Ok(Some(other.clone())),
             }
         }
+        // Internal: `@contextmanager`'s Partial dispatches here. args[0]
+        // is the decorated generator function, args[1..] the call args.
+        // Run the generator and box it in a `_GeneratorContextManager`.
+        "__gen_contextmanager__" => {
+            let Some((func, call_args)) = args.split_first() else {
+                return Err(InterpreterError::TypeError(
+                    "@contextmanager wrapper called without its function".into(),
+                )
+                .into());
+            };
+            let generator = call_value_as_function(state, func, call_args, kwargs, tools).await?;
+            Ok(Some(crate::eval::modules::contextlib_mod::wrap_generator_cm(state, generator)))
+        }
         "memoryview" => {
             check_arg_count(name, args, 1, 1)?;
             match &args[0] {

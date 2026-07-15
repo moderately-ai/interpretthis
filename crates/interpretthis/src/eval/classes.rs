@@ -571,6 +571,19 @@ pub(crate) async fn apply_decorator(
             let maxsize = if name == "cache" { None } else { Some(128) };
             Ok(crate::eval::modules::functools::make_lru_cache_pub(target, maxsize))
         }
+        // General bare ModuleFunction decorator (`@contextmanager`,
+        // `@functools.wraps`-style, …): call `module.name(target)`.
+        Value::ModuleFunction { module, name } => {
+            crate::eval::modules::call_function(
+                state,
+                module,
+                name,
+                std::slice::from_ref(&target),
+                &kwargs,
+                tools,
+            )
+            .await
+        }
         // Partial: `@dataclass(frozen=True)` carries kwargs; `@lru_cache(n)`
         // carries maxsize. Generic path: call the partial with the target.
         Value::Partial(data) => {
