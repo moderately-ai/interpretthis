@@ -1051,6 +1051,34 @@ pub async fn instantiate(
             return Ok(Value::Exception(Box::new(instance_to_exception(class_name, &inst))));
         }
     }
+    // A user-defined `__new__` customizes construction: CPython calls
+    // `cls.__new__(cls, *args)`, then `__init__` on the result — but only when
+    // the result is an instance of `cls`. Only fires when the class actually
+    // defines `__new__`; the default `object.__new__` (a blank instance) is the
+    // path below and is what `super().__new__(cls)` inside a user `__new__`
+    // resolves to.
+    if let Some((_, new_def)) = lookup_method_in_mro(state, class_name, "__new__") {
+        let call = CallArgs { positional: args, keyword: kwargs };
+        let (obj, _) =
+            call_method(state, &new_def, Value::Class(class_name.to_string()), call, tools).await?;
+        if let Value::Instance(inst) = &obj {
+            let returns_cls = inst.class_name == class_name
+                || state
+                    .classes
+                    .get(&inst.class_name)
+                    .is_some_and(|c| c.mro.iter().any(|a| a == class_name));
+            if returns_cls {
+                if let Some((_, init_def)) = lookup_method_in_mro(state, class_name, "__init__") {
+                    let call = CallArgs { positional: args, keyword: kwargs };
+                    let (_r, configured) =
+                        call_method(state, &init_def, obj.clone(), call, tools).await?;
+                    return Ok(configured);
+                }
+            }
+        }
+        return Ok(obj);
+    }
+
     let instance = Value::Instance(InstanceValue {
         class_name: class_name.to_string(),
         fields: crate::value::shared_fields(BTreeMap::new()),
@@ -1827,6 +1855,19 @@ pub async fn super_class_method_call(
             let (returned, _self) =
                 call_method(state, &def, Value::Class(class_name.to_string()), call, tools).await?;
             Ok(returned)
+        }
+        // `super().__new__(cls)` at the object level: the default
+        // `object.__new__` — a blank instance of the class being constructed.
+        // The `cls` argument names it (defaulting to the running class).
+        None if method_name == "__new__" => {
+            let target = match call.positional.first() {
+                Some(Value::Class(c)) => c.clone(),
+                _ => class_name.to_string(),
+            };
+            Ok(Value::Instance(InstanceValue {
+                class_name: target,
+                fields: crate::value::shared_fields(BTreeMap::new()),
+            }))
         }
         // Object-level defaults: the class-creation hooks are no-ops.
         None if matches!(method_name, "__init_subclass__" | "__set_name__" | "__init__") => {
