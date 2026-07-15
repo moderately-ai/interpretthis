@@ -140,14 +140,14 @@ async fn try_match_star_handlers(
                 .map_err(EvalError::Interpreter)?;
         }
 
-        state.active_exception_stack.push(group);
+        state.active_exception_stack.push(group.clone());
         let body_result = eval_body(state, &h.body, tools).await;
         state.active_exception_stack.pop();
 
         match body_result {
             Ok(val) => last_value = val,
             Err(err) => {
-                handler_error = Some(err);
+                handler_error = Some(chain_context(err, &group));
                 break;
             }
         }
