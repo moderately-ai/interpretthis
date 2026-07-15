@@ -53,7 +53,7 @@ tokio = { version = "=1.50.0", features = [
 # closure-capture is reference-share (O(N) storage) instead of
 # deep-clone (O(2^N)).
 serde = { version = "=1.0.228", features = ["derive", "rc"] }
-serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "=2.0.18"
 indexmap = { version = "=2.13.0", features = ["serde"] }
 async-trait = "=0.1.89"
