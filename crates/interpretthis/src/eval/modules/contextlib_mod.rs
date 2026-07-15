@@ -31,9 +31,12 @@ pub const GENCM_CLASS: &str = "contextlib._GeneratorContextManager";
 /// Marker for `contextlib.redirect_stdout(target)`; its `target` field holds
 /// the StringIO that receives `print` output while the block is active.
 pub const REDIRECT_STDOUT_CLASS: &str = "contextlib.redirect_stdout";
+/// Marker for `contextlib.ExitStack`; its `registered` field is a list of
+/// deferred cleanups (context managers and callbacks) unwound on exit.
+pub const EXITSTACK_CLASS: &str = "contextlib.ExitStack";
 
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "nullcontext" | "suppress" | "contextmanager" | "redirect_stdout")
+    matches!(name, "nullcontext" | "suppress" | "contextmanager" | "redirect_stdout" | "ExitStack")
 }
 
 /// `contextlib` module registration.
@@ -131,6 +134,14 @@ async fn call(
             fields.insert("target".into(), target);
             Ok(Value::Instance(InstanceValue {
                 class_name: REDIRECT_STDOUT_CLASS.into(),
+                fields: crate::value::shared_fields(fields),
+            }))
+        }
+        "ExitStack" => {
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("registered".into(), Value::List(crate::value::shared_list(Vec::new())));
+            Ok(Value::Instance(InstanceValue {
+                class_name: EXITSTACK_CLASS.into(),
                 fields: crate::value::shared_fields(fields),
             }))
         }
@@ -243,10 +254,121 @@ pub(crate) async fn try_gencm_method(
     }
 }
 
+/// `contextlib.ExitStack` methods. Handles the method calls made inside the
+/// block (`enter_context`, `callback`, `close`) as well as the `with`
+/// protocol (`__enter__`/`__exit__`), unwinding registered cleanups in LIFO
+/// order. Returns `None` when `receiver` is not an ExitStack.
+pub(crate) async fn try_exitstack_method(
+    state: &mut InterpreterState,
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    tools: &Tools,
+) -> Option<EvalResult> {
+    let Value::Instance(inst) = receiver else { return None };
+    if inst.class_name != EXITSTACK_CLASS {
+        return None;
+    }
+    // The `registered` field is a shared list of cleanups, each a
+    // `("cm", manager)` or `("cb", func, (args…))` tuple.
+    let registered = match inst.fields.lock().get("registered").cloned() {
+        Some(Value::List(l)) => l,
+        _ => return Some(Err(InterpreterError::Runtime("ExitStack state lost".into()).into())),
+    };
+    match method {
+        "__enter__" => Some(Ok(receiver.clone())),
+        "enter_context" => {
+            let cm = args.first().cloned().unwrap_or(Value::None);
+            let enter_result = match Box::pin(crate::eval::control_flow::call_context_method(
+                state,
+                &cm,
+                "__enter__",
+                &[],
+                tools,
+            ))
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            registered.lock().push(Value::Tuple(vec![Value::String("cm".into()), cm]));
+            Some(Ok(enter_result))
+        }
+        "callback" => {
+            let func = args.first().cloned().unwrap_or(Value::None);
+            let cb_args = Value::Tuple(args.get(1..).unwrap_or(&[]).to_vec());
+            registered.lock().push(Value::Tuple(vec![
+                Value::String("cb".into()),
+                func.clone(),
+                cb_args,
+            ]));
+            // ExitStack.callback returns the callback so it can be used as a
+            // decorator.
+            Some(Ok(func))
+        }
+        "close" | "__exit__" => {
+            // Unwind in reverse; on `__exit__`, args = (exc_type, exc_val, tb).
+            let exit_args: [Value; 3] = [
+                args.first().cloned().unwrap_or(Value::None),
+                args.get(1).cloned().unwrap_or(Value::None),
+                args.get(2).cloned().unwrap_or(Value::None),
+            ];
+            let items: Vec<Value> = {
+                let mut guard = registered.lock();
+                let out = guard.clone();
+                guard.clear();
+                out
+            };
+            let mut suppressed = false;
+            for item in items.into_iter().rev() {
+                let Value::Tuple(parts) = item else { continue };
+                match parts.first() {
+                    Some(Value::String(tag)) if tag.as_str() == "cm" => {
+                        let cm = parts.get(1).cloned().unwrap_or(Value::None);
+                        match Box::pin(crate::eval::control_flow::call_context_method(
+                            state, &cm, "__exit__", &exit_args, tools,
+                        ))
+                        .await
+                        {
+                            Ok(v) if v.is_truthy() => suppressed = true,
+                            Ok(_) => {}
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    Some(Value::String(tag)) if tag.as_str() == "cb" => {
+                        let func = parts.get(1).cloned().unwrap_or(Value::None);
+                        let cb_args = match parts.get(2) {
+                            Some(Value::Tuple(a)) => a.clone(),
+                            _ => Vec::new(),
+                        };
+                        let empty = IndexMap::new();
+                        if let Err(e) = crate::eval::functions::call_value_as_function(
+                            state, &func, &cb_args, &empty, tools,
+                        )
+                        .await
+                        {
+                            return Some(Err(e));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if method == "close" {
+                Some(Ok(Value::None))
+            } else {
+                Some(Ok(Value::Bool(suppressed)))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Register empty marker classes so Instance lookups don't NameError.
 fn ensure_marker_classes(state: &mut InterpreterState) {
     use crate::value::ClassValue;
-    for name in [NULLCONTEXT_CLASS, SUPPRESS_CLASS, GENCM_CLASS, REDIRECT_STDOUT_CLASS] {
+    for name in
+        [NULLCONTEXT_CLASS, SUPPRESS_CLASS, GENCM_CLASS, REDIRECT_STDOUT_CLASS, EXITSTACK_CLASS]
+    {
         if state.classes.contains_key(name) {
             continue;
         }

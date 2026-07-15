@@ -1369,6 +1369,21 @@ pub async fn instance_method_call(
             InterpreterError::Runtime("instance_method_call on a non-instance".into()).into()
         );
     };
+    // `contextlib.ExitStack` methods (enter_context/callback/close) run user
+    // context managers/callbacks, so they need the async state path here.
+    if inst.class_name == crate::eval::modules::contextlib_mod::EXITSTACK_CLASS {
+        if let Some(result) = crate::eval::modules::contextlib_mod::try_exitstack_method(
+            state,
+            &instance,
+            method_name,
+            call.positional,
+            tools,
+        )
+        .await
+        {
+            return Ok((result?, instance));
+        }
+    }
     let class_name = inst.class_name.clone();
     // staticmethod beats regular method per CPython's
     // __getattribute__ order. A staticmethod is called without

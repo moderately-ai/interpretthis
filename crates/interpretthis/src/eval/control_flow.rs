@@ -349,7 +349,7 @@ fn build_exit_args(current_error: Option<&EvalError>) -> (bool, Vec<Value>) {
 /// types don't have native context-manager support in this
 /// implementation; if support is needed for `with open(...)`-style
 /// patterns, register a per-type dispatch here.
-async fn call_context_method(
+pub(crate) async fn call_context_method(
     state: &mut InterpreterState,
     receiver: &Value,
     method: &str,
@@ -395,6 +395,14 @@ async fn call_context_method(
     if let Some(result) =
         crate::eval::modules::contextlib_mod::try_gencm_method(state, receiver, method, args, tools)
             .await
+    {
+        return result;
+    }
+    // `ExitStack` __enter__/__exit__ (unwinds its registered cleanups).
+    if let Some(result) = crate::eval::modules::contextlib_mod::try_exitstack_method(
+        state, receiver, method, args, tools,
+    )
+    .await
     {
         return result;
     }
