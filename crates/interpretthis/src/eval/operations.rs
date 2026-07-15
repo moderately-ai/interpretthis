@@ -1229,9 +1229,12 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         // ValueError`, which `values_is` routes here). The variant a name
         // resolves to (Type vs ExceptionType) is context-dependent, so a
         // cross-variant name match still counts.
+        // A bare builtin type/function name is a `BuiltinName`, while `type(x)`
+        // yields a `Type` — so `int is int`, `type(42) is int`, `int == int`,
+        // and `len is len` all match here by name across the variants.
         (
-            Value::ExceptionType(a) | Value::Type(a) | Value::Class(a),
-            Value::ExceptionType(b) | Value::Type(b) | Value::Class(b),
+            Value::ExceptionType(a) | Value::Type(a) | Value::Class(a) | Value::BuiltinName(a),
+            Value::ExceptionType(b) | Value::Type(b) | Value::Class(b) | Value::BuiltinName(b),
         ) => a == b,
         // Temporal types: value-based equality (missing arms previously fell to
         // `_ => false`, so `date == date`, `[date] == [date]`, and `date in

@@ -41,6 +41,7 @@ pub fn has_function(name: &str) -> bool {
             | "pairwise"
             | "filterfalse"
             | "tee"
+            | "batched"
             | "chain.from_iterable"
     )
 }
@@ -63,6 +64,17 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
                 out.extend(iterate_value(&sub)?);
             }
             Ok(Value::List(shared_list(out)))
+        }
+        "batched" => {
+            // batched(iterable, n) — consecutive n-length tuples; the final
+            // batch is short. n must be at least 1 (CPython 3.12+).
+            let items = iterate_value(need_arg("batched", args, 0)?)?;
+            let n = arg_usize("batched", args, 1)?;
+            if n == 0 {
+                return Err(InterpreterError::ValueError("n must be at least one".into()).into());
+            }
+            let batches = items.chunks(n).map(|c| Value::Tuple(c.to_vec())).collect::<Vec<_>>();
+            Ok(Value::List(shared_list(batches)))
         }
         "tee" => {
             // tee(iterable, n=2) — n independent iterators over the same items.
