@@ -524,6 +524,11 @@ pub enum Value {
     /// the parent's implementation while staying on the original
     /// receiver.
     Super { defining_class: String, instance: Box<InstanceValue> },
+    /// Class-bound `super()` — the proxy `super()` returns inside a
+    /// classmethod (including `__init_subclass__`). Method calls walk `cls`'s
+    /// MRO starting after `defining_class` and dispatch the matching classmethod
+    /// with `cls` (`class_name`) as the receiver.
+    SuperClass { defining_class: String, class_name: String },
     /// `collections.Counter`. Models CPython's
     /// `Counter(dict)` subclass: same key-value storage as `Dict` but
     /// with `__missing__` returning `0` (no insert), a distinct repr
@@ -1604,6 +1609,7 @@ impl Value {
             | Self::RePattern(_)
             | Self::Slice(_)
             | Self::Super { .. }
+            | Self::SuperClass { .. }
             | Self::DateTime { .. }
             | Self::Time(_)
             | Self::TimeZone(_)
@@ -1698,7 +1704,7 @@ impl Value {
             Self::ReMatch(_) => "re.Match",
             Self::RePattern(_) => "re.Pattern",
             Self::Slice(_) => "slice",
-            Self::Super { .. } => "super",
+            Self::Super { .. } | Self::SuperClass { .. } => "super",
             Self::Counter(_) => "Counter",
             Self::DateTime { .. } => "datetime",
             Self::Time(_) => "time",
@@ -1990,6 +1996,9 @@ impl fmt::Display for Value {
             // immediately via `.method(...)` and rarely printed.
             Self::Super { defining_class, instance } => {
                 write!(f, "<super: <class '{defining_class}'>, <{} object>>", instance.class_name)
+            }
+            Self::SuperClass { defining_class, class_name } => {
+                write!(f, "<super: <class '{defining_class}'>, <{class_name} object>>")
             }
             // CPython: `2026-01-15 14:30:00` for naive datetime;
             // `2026-01-15 14:30:00+00:00` for aware.

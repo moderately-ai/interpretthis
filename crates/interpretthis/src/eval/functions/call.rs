@@ -494,6 +494,19 @@ pub async fn eval_call(
                         .await?;
                 return Ok(returned);
             }
+            // Class-bound super (inside a classmethod / __init_subclass__).
+            if let Value::SuperClass { defining_class, class_name } = &temp {
+                let call = CallArgs { positional: &resolved_args, keyword: &kwargs };
+                return crate::eval::classes::super_class_method_call(
+                    state,
+                    defining_class,
+                    class_name,
+                    method_name,
+                    call,
+                    tools,
+                )
+                .await;
+            }
             if let Value::Module(module) = &temp {
                 let module_name = module.clone();
                 return crate::eval::modules::call_function(

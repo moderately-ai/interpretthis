@@ -602,6 +602,9 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::Super { defining_class, instance } => {
             16 + defining_class.len() + estimate_value_size(&Value::Instance((**instance).clone()))
         }
+        Value::SuperClass { defining_class, class_name } => {
+            16 + defining_class.len() + class_name.len()
+        }
         Value::Counter(map) => {
             48 + map.len() * (INDEXMAP_PER_ENTRY_BYTES + VALUE_SLOT_BYTES)
                 + map

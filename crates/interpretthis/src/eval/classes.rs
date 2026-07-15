@@ -63,29 +63,27 @@ pub async fn eval_class_def(
         class_name,
     )?;
 
-    // Optional `metaclass=`. Other class keywords remain rejected;
-    // parity is tracked by gap-class-keyword-arguments-init-subclass.
+    // Optional `metaclass=`; every other class keyword (`class C(Base,
+    // prefix="x")`) is forwarded to `__init_subclass__` per PEP 487.
     let mut metaclass_name: Option<String> = None;
+    let mut init_subclass_kwargs: IndexMap<String, Value> = IndexMap::new();
     for kw in &node.keywords {
         let key = kw.arg.as_ref().map(|a| a.as_str());
-        if key != Some("metaclass") {
-            return Err(InterpreterError::TypeError(format!(
-                "class keyword argument '{}' is not supported (see CONFORMANCE.md#unsupported-language-features)",
-                key.unwrap_or("<unknown>")
-            ))
-            .into());
-        }
         let val = eval_expr(state, &kw.value, tools).await?;
-        match val {
-            Value::BuiltinName(n) | Value::Type(n) if n == "type" => {}
-            Value::Class(n) => metaclass_name = Some(n),
-            other => {
-                return Err(InterpreterError::TypeError(format!(
-                    "metaclass must be a type, not '{}'",
-                    other.type_name()
-                ))
-                .into());
+        if key == Some("metaclass") {
+            match val {
+                Value::BuiltinName(n) | Value::Type(n) if n == "type" => {}
+                Value::Class(n) => metaclass_name = Some(n),
+                other => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "metaclass must be a type, not '{}'",
+                        other.type_name()
+                    ))
+                    .into());
+                }
             }
+        } else if let Some(name) = key {
+            init_subclass_kwargs.insert(name.to_string(), val);
         }
     }
 
@@ -390,7 +388,7 @@ pub async fn eval_class_def(
     // PEP 487: invoke each base's `__init_subclass__` (classmethod-style)
     // with the newly created class. Walk direct bases only; each base
     // is responsible for chaining to its own parents if needed.
-    invoke_init_subclass(state, class_name, &bases_for_hook, tools).await?;
+    invoke_init_subclass(state, class_name, &bases_for_hook, &init_subclass_kwargs, tools).await?;
 
     // Apply class-level decorators in REVERSE order (bottom-up,
     // matching CPython): the innermost decorator wraps the class
@@ -677,9 +675,9 @@ async fn invoke_init_subclass(
     state: &mut InterpreterState,
     class_name: &str,
     bases: &[String],
+    kwargs: &IndexMap<String, Value>,
     tools: &Tools,
 ) -> Result<(), EvalError> {
-    let empty_kwargs = IndexMap::new();
     let new_cls = Value::Class(class_name.to_string());
     for base in bases {
         // Look on the base's own MRO for __init_subclass__ (classmethod or plain).
@@ -688,10 +686,13 @@ async fn invoke_init_subclass(
         let Some(def) = method else {
             continue;
         };
-        // Receiver = new subclass so classmethod binding yields
-        // `__init_subclass__(cls=NewSubclass)`.
-        let call = CallArgs { positional: &[], keyword: &empty_kwargs };
+        // CPython invokes exactly one `__init_subclass__` (the nearest in the
+        // new class's MRO) with the class keyword arguments; its own
+        // `super().__init_subclass__(**kwargs)` chains to the rest. Invoke the
+        // first defining base and stop so those kwargs aren't consumed twice.
+        let call = CallArgs { positional: &[], keyword: kwargs };
         let (_ret, _self) = call_method(state, &def, new_cls.clone(), call, tools).await?;
+        break;
     }
     Ok(())
 }
@@ -1260,7 +1261,9 @@ async fn call_method_inner(
     let defining_class =
         method.name.split_once('.').map_or_else(|| method.name.clone(), |(cls, _)| cls.to_string());
     let self_local_name = method.params.args.first().map(|p| p.name.clone());
-    let frame_pushed = if let Value::Instance(_) = &self_value {
+    // Push a frame for an instance OR class receiver so zero-arg `super()`
+    // works inside both instance methods and classmethods (`__init_subclass__`).
+    let frame_pushed = if matches!(&self_value, Value::Instance(_) | Value::Class(_)) {
         state.method_frame_stack.push(crate::state::MethodFrame {
             defining_class,
             self_value: self_value.clone(),
@@ -1683,6 +1686,63 @@ pub async fn super_method_call(
         let _ = state.set_variable(&name, configured_self.clone());
     }
     Ok((returned, configured_self))
+}
+
+/// Call a method via class-bound `super()` (inside a classmethod /
+/// `__init_subclass__`): find the next classmethod/method named `method_name`
+/// in `class_name`'s MRO after `defining_class` and run it with the class as
+/// the receiver. When the MRO is exhausted, the object-level defaults for the
+/// class-creation hooks (`__init_subclass__` / `__set_name__`) are no-ops,
+/// matching CPython — so `super().__init_subclass__(**kwargs)` boilerplate just
+/// returns None.
+pub async fn super_class_method_call(
+    state: &mut InterpreterState,
+    defining_class: &str,
+    class_name: &str,
+    method_name: &str,
+    call: CallArgs<'_>,
+    tools: &Tools,
+) -> EvalResult {
+    let Some(class) = state.classes.get(class_name) else {
+        return Err(InterpreterError::Runtime(format!(
+            "super(): class '{class_name}' is not registered"
+        ))
+        .into());
+    };
+    let start = class.mro.iter().position(|c| c == defining_class).ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "super(): '{defining_class}' is not in MRO of '{class_name}'"
+        )))
+    })?;
+    let mut found = None;
+    for ancestor_name in class.mro.iter().skip(start + 1) {
+        if let Some(ancestor) = state.classes.get(ancestor_name) {
+            let def = ancestor
+                .class_methods
+                .get(method_name)
+                .or_else(|| ancestor.static_methods.get(method_name))
+                .or_else(|| ancestor.methods.get(method_name));
+            if let Some(def) = def {
+                found = Some(def.clone());
+                break;
+            }
+        }
+    }
+    match found {
+        Some(def) => {
+            let (returned, _self) =
+                call_method(state, &def, Value::Class(class_name.to_string()), call, tools).await?;
+            Ok(returned)
+        }
+        // Object-level defaults: the class-creation hooks are no-ops.
+        None if matches!(method_name, "__init_subclass__" | "__set_name__" | "__init__") => {
+            Ok(Value::None)
+        }
+        None => Err(InterpreterError::AttributeError(format!(
+            "'super' object has no attribute '{method_name}'"
+        ))
+        .into()),
+    }
 }
 
 /// Walk `class_name`'s MRO looking for a method definition. Used by the

@@ -460,13 +460,22 @@ pub(super) async fn try_builtin(
                         .as_deref()
                         .and_then(|n| state.get_variable(n).cloned())
                         .unwrap_or_else(|| frame.self_value.clone());
-                    let Value::Instance(inst) = &live_self else {
-                        return Err(InterpreterError::Runtime(
+                    match &live_self {
+                        Value::Instance(inst) => Ok(Some(Value::Super {
+                            defining_class,
+                            instance: Box::new(inst.clone()),
+                        })),
+                        // Classmethod context (`cls` receiver), e.g. inside
+                        // `__init_subclass__`: a class-bound super proxy.
+                        Value::Class(class_name) => Ok(Some(Value::SuperClass {
+                            defining_class,
+                            class_name: class_name.clone(),
+                        })),
+                        _ => Err(InterpreterError::Runtime(
                             "super(): current self is not an instance".into(),
                         )
-                        .into());
-                    };
-                    Ok(Some(Value::Super { defining_class, instance: Box::new(inst.clone()) }))
+                        .into()),
+                    }
                 }
                 2 => {
                     let Value::Class(cls_name) = &args[0] else {
