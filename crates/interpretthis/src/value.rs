@@ -995,6 +995,11 @@ pub struct ClassValue {
     /// Names allowed when `slots` is true (from `__slots__` or dataclass fields).
     #[serde(default)]
     pub slot_names: Vec<String>,
+    /// `@abstractmethod`-decorated method names still lacking a concrete
+    /// implementation across this class's MRO (CPython's `__abstractmethods__`).
+    /// Non-empty means the class is abstract and cannot be instantiated.
+    #[serde(default)]
+    pub abstract_methods: Vec<String>,
 }
 
 impl ClassValue {
@@ -1020,6 +1025,7 @@ impl ClassValue {
             total_ordering: false,
             slots: false,
             slot_names: Vec::new(),
+            abstract_methods: Vec::new(),
         }
     }
 }

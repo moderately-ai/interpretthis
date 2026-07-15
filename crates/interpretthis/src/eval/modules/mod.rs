@@ -12,6 +12,7 @@
 //! or clock access, so everything here stays deterministic and
 //! sandbox-safe.
 
+pub mod abc_mod;
 pub mod array_mod;
 pub mod base64;
 pub mod bisect;
@@ -102,7 +103,7 @@ pub trait Module: Sync + Send {
 /// plus one `pub struct XModule;` + `impl Module for XModule` in its
 /// own file. Lookup is O(1) hashed by module name.
 static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock::new(|| {
-    let modules: [&'static dyn Module; 25] = [
+    let modules: [&'static dyn Module; 26] = [
         &math::MathModule,
         &cmath::CmathModule,
         &bisect::BisectModule,
@@ -128,6 +129,7 @@ static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock:
         &fractions::FractionsModule,
         &copy_mod::CopyModule,
         &contextlib_mod::ContextlibModule,
+        &abc_mod::AbcModule,
     ];
     modules.into_iter().map(|m| (m.name(), m)).collect()
 });

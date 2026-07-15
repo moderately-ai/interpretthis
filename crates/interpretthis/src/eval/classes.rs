@@ -135,6 +135,10 @@ pub async fn eval_class_def(
                 "enum.IntFlag" => enum_kind = Some(crate::value::EnumKind::IntFlag),
                 "enum.StrEnum" => enum_kind = Some(crate::value::EnumKind::Str),
                 "typing.NamedTuple" => is_typing_namedtuple = true,
+                // `abc.ABC`/`ABCMeta` are abstract-base markers with no
+                // registered ClassValue — the abstract-method tracking below
+                // makes the class abstract, so the sentinel itself is skipped.
+                "abc.ABC" | "abc.ABCMeta" => {}
                 _ => {}
             }
             continue;
@@ -170,6 +174,8 @@ pub async fn eval_class_def(
     let mut enum_members: Vec<String> = Vec::new();
     // Next value an `auto()` member resolves to (see `wrap_enum_member`).
     let mut enum_auto_next: i64 = 1;
+    // Method names decorated `@abstractmethod` in this class body.
+    let mut abstract_here: Vec<String> = Vec::new();
 
     // PEP 3115: Meta.__prepare__(name, bases) may supply the initial namespace.
     if let Some(ref meta) = metaclass_name {
@@ -210,13 +216,28 @@ pub async fn eval_class_def(
                         .await?;
                     let source = extract_function_source(&state.current_source, method);
                     let method_name = method.name.as_str().to_string();
+                    // `@abstractmethod` (and its `abc.`-qualified / property
+                    // variants) flags the method as abstract and is stripped
+                    // before classification so the remaining decorators
+                    // (property/classmethod/staticmethod/none) process normally.
+                    let has_abstract =
+                        method.decorator_list.iter().any(is_abstractmethod_decorator);
+                    if has_abstract {
+                        abstract_here.push(method_name.clone());
+                    }
+                    let decorators: Vec<Expr> = method
+                        .decorator_list
+                        .iter()
+                        .filter(|d| !is_abstractmethod_decorator(d))
+                        .cloned()
+                        .collect();
                     // The body cache key gets a per-decorator suffix so
                     // `@property def x` / `@x.setter def x` / `@x.deleter
                     // def x` don't collide. Regular methods use the plain
                     // `Class.name` key.
                     classify_decorated_method(
                         state,
-                        &method.decorator_list,
+                        &decorators,
                         class_name,
                         method_name,
                         params,
@@ -340,6 +361,29 @@ pub async fn eval_class_def(
         }
     }
 
+    // CPython's `__abstractmethods__`: names still abstract after this class.
+    // Start from this body's `@abstractmethod`s plus any inherited-but-
+    // unresolved ones, then drop every name given a concrete definition here.
+    let abstract_methods: Vec<String> = {
+        let mut unresolved: std::collections::BTreeSet<String> =
+            abstract_here.iter().cloned().collect();
+        for base in &bases {
+            if let Some(bc) = state.classes.get(base) {
+                unresolved.extend(bc.abstract_methods.iter().cloned());
+            }
+        }
+        // A concrete (non-abstract) definition in this body resolves the name.
+        unresolved.retain(|n| {
+            abstract_here.iter().any(|a| a == n)
+                || !(methods.contains_key(n)
+                    || properties.contains_key(n)
+                    || static_methods.contains_key(n)
+                    || class_methods.contains_key(n)
+                    || class_attrs.contains_key(n))
+        });
+        unresolved.into_iter().collect()
+    };
+
     state.classes.insert(class_name.to_string(), {
         let mut cv = ClassValue::new(class_name);
         cv.methods = methods;
@@ -354,6 +398,7 @@ pub async fn eval_class_def(
         cv.annotations = annotations;
         cv.slots = slots;
         cv.slot_names = slot_names;
+        cv.abstract_methods = abstract_methods;
         cv
     });
     state
@@ -416,6 +461,18 @@ pub async fn eval_class_def(
     }
 
     Ok(Value::None)
+}
+
+/// Whether a decorator is `@abstractmethod` — as a bare name, `abc.`-qualified,
+/// or one of the deprecated `abstractproperty`/`abstractclassmethod`/
+/// `abstractstaticmethod` variants.
+fn is_abstractmethod_decorator(decorator: &Expr) -> bool {
+    let name = match decorator {
+        Expr::Name(n) => n.id.as_str(),
+        Expr::Attribute(a) => a.attr.as_str(),
+        _ => return false,
+    };
+    crate::eval::modules::abc_mod::ABSTRACT_DECORATORS.contains(&name)
 }
 
 /// Dispatch a method's decorator list to the right ClassValue bucket
@@ -1001,6 +1058,24 @@ pub async fn instantiate(
     kwargs: &IndexMap<String, Value>,
     tools: &Tools,
 ) -> EvalResult {
+    // An abstract class (unresolved `@abstractmethod`s) can't be instantiated.
+    if let Some(class) = state.classes.get(class_name) {
+        if !class.abstract_methods.is_empty() {
+            let names = class
+                .abstract_methods
+                .iter()
+                .map(|m| format!("'{m}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let noun = if class.abstract_methods.len() == 1 { "method" } else { "methods" };
+            return Err(crate::error::EvalError::Exception(crate::value::ExceptionValue::new(
+                "TypeError",
+                format!(
+                    "Can't instantiate abstract class {class_name} without an implementation for abstract {noun} {names}"
+                ),
+            )));
+        }
+    }
     // Enum value-construction: `Color(1)` returns the member whose
     // value equals the arg. Customer pattern is
     // `Color.from_value = Color(value)`; matching CPython's
