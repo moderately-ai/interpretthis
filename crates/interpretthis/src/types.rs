@@ -3493,6 +3493,16 @@ fn decimal_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 }
 
 fn decimal_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    // `Decimal` vs `float`/`Fraction` (either operand can be the Decimal, since
+    // the dispatcher tries this slot for both positions) compares by exact
+    // value, matching CPython (`Decimal(3) < 3.5` is legal, unlike arithmetic).
+    let mixed = (matches!(lhs, Value::Decimal(..))
+        && matches!(rhs, Value::Float(_) | Value::Fraction(..)))
+        || (matches!(rhs, Value::Decimal(..))
+            && matches!(lhs, Value::Float(_) | Value::Fraction(..)));
+    if mixed {
+        return Some(Ok(tower_partial_cmp(lhs, rhs) == Some(std::cmp::Ordering::Less)));
+    }
     Some(Ok(decimal_to_bigdecimal(lhs)? < decimal_to_bigdecimal(rhs)?))
 }
 
@@ -3636,6 +3646,35 @@ fn exact_rational(value: &Value) -> Option<num_rational::BigRational> {
     }
 }
 
+/// Order two numeric-tower values by exact value, handling a non-finite float
+/// operand: a NaN yields `None` (every ordering with NaN is false), and ±inf
+/// ranks above/below every finite value. `None` if either operand is not a
+/// tower number. Used by the Decimal/Fraction `lt` slots for mixed comparisons,
+/// where either operand may be the Decimal/Fraction.
+fn tower_partial_cmp(lhs: &Value, rhs: &Value) -> Option<std::cmp::Ordering> {
+    // NaN is unordered against everything.
+    if matches!(lhs, Value::Float(f) if f.is_nan()) || matches!(rhs, Value::Float(f) if f.is_nan())
+    {
+        return None;
+    }
+    // Rank ±inf outside the finite rationals; a finite value ranks 0 and is
+    // then compared exactly.
+    let rank = |v: &Value| match v {
+        Value::Float(f) if f.is_infinite() => {
+            if *f > 0.0 {
+                1
+            } else {
+                -1
+            }
+        }
+        _ => 0,
+    };
+    match (rank(lhs), rank(rhs)) {
+        (0, 0) => Some(exact_rational(lhs)?.cmp(&exact_rational(rhs)?)),
+        (a, b) => Some(a.cmp(&b)),
+    }
+}
+
 fn fraction_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     let a = fraction_to_bigrational(lhs)?;
     // `Fraction == float` / `Fraction == Decimal` compares exact rationals,
@@ -3648,6 +3687,14 @@ fn fraction_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 }
 
 fn fraction_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    // `Fraction` vs `float`/`Decimal` (either position) compares exact values.
+    let mixed = (matches!(lhs, Value::Fraction(..))
+        && matches!(rhs, Value::Float(_) | Value::Decimal(..)))
+        || (matches!(rhs, Value::Fraction(..))
+            && matches!(lhs, Value::Float(_) | Value::Decimal(..)));
+    if mixed {
+        return Some(Ok(tower_partial_cmp(lhs, rhs) == Some(std::cmp::Ordering::Less)));
+    }
     Some(Ok(fraction_to_bigrational(lhs)? < fraction_to_bigrational(rhs)?))
 }
 
