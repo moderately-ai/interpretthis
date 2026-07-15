@@ -95,21 +95,14 @@ pub(crate) fn generator_suspendable(stmts: &[Stmt]) -> bool {
 fn while_yields_are_direct(body: &[Stmt]) -> bool {
     body.iter().all(|stmt| {
         match stmt {
-            // An `if` re-enters cleanly on resume: `run_while_suspendable`
-            // re-runs the whole `if` (re-evaluating its condition, the same way a
-            // top-level `if cond: yield` already resumes) and the yield's
-            // `resume_at_yield` flag returns the send value instead of
-            // re-yielding — so `while True: if cond: yield` suspends correctly (a
-            // filtered infinite stream) rather than eager-buffering. This is only
-            // sound when the yield sits at the *head* of its branch, so no
-            // statement before it re-executes (`if c: log(); yield` would log
-            // twice); otherwise fall back to eager.
-            Stmt::If(node) => {
-                if_branch_yield_safe(&node.body) && if_branch_yield_safe(&node.orelse)
-            }
-            // Loops / try / with cannot resume via whole-statement re-entry (it
-            // would re-run earlier iterations or the try body from the top), so a
-            // yield inside them still forces the eager fallback.
+            // An `if` steps through `run_if_suspendable`, which resumes exactly
+            // at the yield (via `if_stack`) without re-running the branch or the
+            // condition — so `while True: if cond: log(); yield` suspends
+            // correctly, side effects and all. Its branches must themselves be
+            // suspendable (yields only in direct statements or nested ifs).
+            Stmt::If(node) => branch_suspendable(&node.body) && branch_suspendable(&node.orelse),
+            // Loops / try / with cannot resume mid-way through the while-body
+            // stepper, so a yield inside them still forces the eager fallback.
             Stmt::For(_)
             | Stmt::While(_)
             | Stmt::With(_)
@@ -125,29 +118,22 @@ fn while_yields_are_direct(body: &[Stmt]) -> bool {
     })
 }
 
-/// Whether an `if` branch's yields are all resume-safe: the branch either has
-/// no yield, or its first statement leads straight to the yield (a bare `yield`,
-/// a `x = yield`, or a nested resume-safe `if`) with no other yield in the rest.
-/// This guarantees whole-`if` re-entry re-executes nothing before the yield.
-fn if_branch_yield_safe(branch: &[Stmt]) -> bool {
-    use rustpython_parser::ast::Expr;
-    if !super::definitions::contains_yield_stmts(branch) {
-        return true;
-    }
-    let Some((first, rest)) = branch.split_first() else {
-        return true;
-    };
-    let expr_is_yield = |e: &Expr| matches!(e, Expr::Yield(_) | Expr::YieldFrom(_));
-    let leads_to_yield = match first {
-        Stmt::Expr(e) => expr_is_yield(&e.value),
-        Stmt::Assign(a) => expr_is_yield(&a.value),
-        Stmt::AugAssign(a) => expr_is_yield(&a.value),
-        Stmt::AnnAssign(a) => a.value.as_deref().is_some_and(expr_is_yield),
-        Stmt::If(node) => if_branch_yield_safe(&node.body) && if_branch_yield_safe(&node.orelse),
-        _ => false,
-    };
-    // Every yield must live in that leading statement, so the rest stays yield-free.
-    leads_to_yield && !super::definitions::contains_yield_stmts(rest)
+/// Whether a statement list's yields can all be suspended by the `if`/`while`
+/// steppers: yields may sit in direct statements or nested `if` branches (which
+/// resume via `if_stack`), but not inside a `for`/`while`/`with`/`match`/`try` —
+/// those can't resume mid-way here, so a yield within one forces the eager
+/// fallback.
+fn branch_suspendable(stmts: &[Stmt]) -> bool {
+    stmts.iter().all(|stmt| match stmt {
+        Stmt::If(node) => branch_suspendable(&node.body) && branch_suspendable(&node.orelse),
+        Stmt::For(_)
+        | Stmt::While(_)
+        | Stmt::With(_)
+        | Stmt::Try(_)
+        | Stmt::TryStar(_)
+        | Stmt::Match(_) => !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)),
+        _ => true,
+    })
 }
 
 /// Create a suspended generator from a just-bound function frame.
@@ -178,6 +164,7 @@ pub(crate) fn create_generator(
             for_stack: Vec::new(),
             while_resume: None,
             try_stack: Vec::new(),
+            if_stack: Vec::new(),
             yield_from_return: None,
             delegating_to: None,
         },
@@ -622,6 +609,25 @@ async fn run_generator_body(
                 Err(e) => return Err(e),
             }
         }
+        // Top-level `if` containing a (suspendable) yield: step it so a yield
+        // after side-effecting statements resumes at the yield, not the top.
+        if let Stmt::If(if_node) = stmt {
+            if branch_suspendable(&if_node.body)
+                && branch_suspendable(&if_node.orelse)
+                && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
+            {
+                match run_if_suspendable(state, if_node, tools).await {
+                    Ok(()) => {
+                        *stmt_index += 1;
+                        continue;
+                    }
+                    Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                        return Err(EvalError::Signal(ControlFlow::Yield(v)));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
 
         match eval_stmt(state, stmt, tools).await {
             Ok(_) => {
@@ -701,7 +707,19 @@ async fn run_for_suspendable(
         }
         while body_index < node.body.len() {
             let stmt = &node.body[body_index];
-            match eval_stmt(state, stmt, tools).await {
+            // An `if` steps through `run_if_suspendable` so a yield inside its
+            // branch resumes at the yield (via `if_stack`), not the branch top.
+            let (result, is_if) = match stmt {
+                Stmt::If(if_node)
+                    if branch_suspendable(&if_node.body)
+                        && branch_suspendable(&if_node.orelse)
+                        && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)) =>
+                {
+                    (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+                }
+                _ => (eval_stmt(state, stmt, tools).await, false),
+            };
+            match result {
                 Ok(_) => {
                     body_index += 1;
                     if let Some(&id) = state.active_generator_stack.last() {
@@ -724,7 +742,11 @@ async fn run_for_suspendable(
                 Err(EvalError::Signal(ControlFlow::Yield(v))) => {
                     if let Some(&id) = state.active_generator_stack.last() {
                         if let Some(frame) = state.generators.get_mut(&id) {
-                            frame.resume_at_yield = true;
+                            // `run_if_suspendable` recorded its own resume; only a
+                            // direct yield needs `resume_at_yield` set here.
+                            if !is_if {
+                                frame.resume_at_yield = true;
+                            }
                             let entry = GeneratorForState {
                                 items: items.clone(),
                                 pos,
@@ -829,7 +851,15 @@ async fn run_while_suspendable(
         resuming = false;
         while body_index < node.body.len() {
             let stmt = &node.body[body_index];
-            match eval_stmt(state, stmt, tools).await {
+            // An `if` steps through `run_if_suspendable` so a yield inside its
+            // branch (even after side-effecting statements) resumes exactly at
+            // the yield via `if_stack`, rather than re-running the branch.
+            let (result, is_if) = if let Stmt::If(if_node) = stmt {
+                (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+            } else {
+                (eval_stmt(state, stmt, tools).await, false)
+            };
+            match result {
                 Ok(_) => {
                     body_index += 1;
                     if let Some(&id) = state.active_generator_stack.last() {
@@ -848,7 +878,12 @@ async fn run_while_suspendable(
                 Err(EvalError::Signal(ControlFlow::Yield(v))) => {
                     if let Some(&id) = state.active_generator_stack.last() {
                         if let Some(frame) = state.generators.get_mut(&id) {
-                            frame.resume_at_yield = true;
+                            // `run_if_suspendable` already recorded its own
+                            // resume position; only a direct yield needs
+                            // `resume_at_yield` set here.
+                            if !is_if {
+                                frame.resume_at_yield = true;
+                            }
                             frame.while_resume = Some(body_index); // re-enter this stmt
                         }
                     }
@@ -955,6 +990,78 @@ async fn run_try_suspendable_inner(
     }
 }
 
+fn push_if_resume(state: &mut InterpreterState, resume: crate::state::IfResume) {
+    if let Some(&id) = state.active_generator_stack.last() {
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.if_stack.push(resume);
+        }
+    }
+}
+
+fn pop_if_resume(state: &mut InterpreterState) -> Option<crate::state::IfResume> {
+    let id = *state.active_generator_stack.last()?;
+    state.generators.get_mut(&id)?.if_stack.pop()
+}
+
+/// Run an `if` inside a generator, stepping the taken branch
+/// statement-by-statement so a `yield` — even one after side-effecting
+/// statements — suspends at its own position and resumes there without
+/// re-running the branch or re-evaluating the condition. Nested `if`/`try`
+/// recurse (their resume positions push onto the respective stacks). A yield
+/// buried in a nested `for`/`while` is not resumable this way, so the
+/// suspendable gate keeps those on the eager fallback.
+fn run_if_suspendable<'a>(
+    state: &'a mut InterpreterState,
+    node: &'a rustpython_parser::ast::StmtIf,
+    tools: &'a crate::tools::Tools,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EvalError>> + Send + 'a>> {
+    Box::pin(run_if_suspendable_inner(state, node, tools))
+}
+
+async fn run_if_suspendable_inner(
+    state: &mut InterpreterState,
+    node: &rustpython_parser::ast::StmtIf,
+    tools: &crate::tools::Tools,
+) -> Result<(), EvalError> {
+    // Resuming into a recorded branch skips the condition; a fresh entry
+    // evaluates it once (CPython semantics) and picks the branch.
+    let (in_orelse, start) = match pop_if_resume(state) {
+        Some(r) => (r.in_orelse, r.index),
+        None => {
+            let cond = crate::eval::eval_expr(state, &node.test, tools).await?;
+            let took_else = !crate::eval::op::truthy(state, &cond, tools).await?;
+            (took_else, 0)
+        }
+    };
+    let branch: Vec<Stmt> = if in_orelse { node.orelse.clone() } else { node.body.clone() };
+
+    let mut i = start;
+    while i < branch.len() {
+        let (result, nested) = match &branch[i] {
+            Stmt::Try(t) => {
+                (run_try_suspendable(state, t, tools).await.map(|()| Value::None), true)
+            }
+            Stmt::If(n) => (run_if_suspendable(state, n, tools).await.map(|()| Value::None), true),
+            _ => (eval_stmt(state, &branch[i], tools).await, false),
+        };
+        match result {
+            Ok(_) => {
+                i += 1;
+                clear_resume_at_yield(state);
+            }
+            Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                push_if_resume(state, crate::state::IfResume { in_orelse, index: i });
+                if !nested {
+                    set_resume_at_yield(state);
+                }
+                return Err(EvalError::Signal(ControlFlow::Yield(v)));
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(())
+}
+
 /// Outcome of stepping one phase of a suspendable `try`.
 enum TryStep {
     Completed,
@@ -978,10 +1085,20 @@ async fn step_try_phase(
         // position is pushed by the recursive call). A direct statement
         // runs via `eval_stmt` and, if it yields, sets `resume_at_yield`
         // so re-entering that statement delivers the sent value.
-        let (result, nested) = if let Stmt::Try(nested_try) = &stmts[i] {
-            (run_try_suspendable(state, nested_try, tools).await.map(|()| Value::None), true)
-        } else {
-            (eval_stmt(state, &stmts[i], tools).await, false)
+        let (result, nested) = match &stmts[i] {
+            Stmt::Try(nested_try) => {
+                (run_try_suspendable(state, nested_try, tools).await.map(|()| Value::None), true)
+            }
+            Stmt::If(if_node)
+                if branch_suspendable(&if_node.body)
+                    && branch_suspendable(&if_node.orelse)
+                    && super::definitions::contains_yield_stmts(std::slice::from_ref(
+                        &stmts[i],
+                    )) =>
+            {
+                (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+            }
+            _ => (eval_stmt(state, &stmts[i], tools).await, false),
         };
         match result {
             Ok(_) => {

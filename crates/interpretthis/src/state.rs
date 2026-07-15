@@ -103,6 +103,12 @@ pub struct GeneratorFrame {
     /// exactly where it suspended rather than re-running the statement.
     /// Empty means no try is mid-suspension.
     pub try_stack: Vec<TryResume>,
+    /// Resume positions for the stack of `if` statements the generator is
+    /// suspended inside (outermost first, LIFO like `try_stack`). Lets a yield
+    /// buried in an `if` branch — even after side-effecting statements — resume
+    /// exactly at the yield without re-running the branch or re-evaluating the
+    /// condition. Empty when no `if` is mid-suspension.
+    pub if_stack: Vec<IfResume>,
     /// Value a delegated (`yield from`) sub-generator returned, captured when
     /// the sub-generator was drained on the first pass and handed back as the
     /// value of the `yield from` expression when this frame resumes past it.
@@ -119,6 +125,15 @@ pub struct GeneratorFrame {
 pub struct TryResume {
     pub phase: TryPhase,
     /// Statement index within the current phase's body.
+    pub index: usize,
+}
+
+/// Where a suspended generator is inside an `if` statement.
+#[derive(Debug, Clone, Copy)]
+pub struct IfResume {
+    /// `true` when suspended in the `else` branch, `false` in the `then` branch.
+    pub in_orelse: bool,
+    /// Statement index within that branch.
     pub index: usize,
 }
 

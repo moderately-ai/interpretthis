@@ -1,26 +1,27 @@
 ---
 id: gap-generator-while-loop-suspend-state
-title: "Gap: mid-if generator suspension for side-effect-before-yield in loops"
+title: "Gap: generator suspension for yields inside nested loops"
 status: ready
 priority: p4
 dependencies: []
 related: []
 scopes: []
 shared_scopes: []
-paths: [crates/interpretthis/src/eval/functions/generators.rs, crates/interpretthis/src/state.rs]
+paths: [crates/interpretthis/src/eval/functions/generators.rs]
 tags: [gap, generators, parity]
 ---
-Largely resolved: `while` loops with direct-statement yields, and `while` loops
-whose bodies contain `if cond: yield` (the yield at the head of its branch, incl.
-nested ifs and if/else) now suspend lazily — a filtered infinite stream like
-`while True: (if n%2==0: yield n); n+=1` consumed via `islice` works, and
-statements after the yield run exactly once.
+Largely resolved. Generators now suspend correctly for yields inside `if`
+statements at every level (top-level, and inside `while`/`for`/`try` bodies),
+including yields *after* side-effecting statements in a branch — a dedicated
+`if_stack` records the resume position so the branch is not re-run and the
+condition is not re-evaluated. `while True: if cond: log(); yield` consumed via
+`islice` suspends lazily with correct side-effect ordering.
 
-Residual: a yield preceded by a *side-effecting* statement inside a conditional
-branch of a loop (`while True: if cond: log(); yield`) still falls back to eager
-buffering, because whole-`if` re-entry on resume would re-execute `log()`. For a
-finite generator this is correct; for an infinite one it hits the loop-iteration
-limit instead of suspending. A fully general fix needs true mid-statement
-continuation state (freeze inside the `if` branch without re-running preceding
-statements or the condition), i.e. a per-nesting resume stack that also covers
-loops/try nested inside the while. Rare pattern; deferred.
+Residual: a yield inside a `for`/`while`/`with`/`match` that is itself nested
+inside an `if` branch (or a second `while` nested in a `while`) still forces the
+eager fallback — those constructs can't resume mid-way through the current
+steppers, and their whole-statement re-entry would restart earlier iterations.
+For a finite generator this is correct; only an *infinite* generator with that
+specific deep nesting hits the loop-iteration limit. Closing it needs the same
+per-nesting resume-stack treatment extended to `for`/`while` when they appear
+inside another suspendable construct. Rare pattern; deferred.
