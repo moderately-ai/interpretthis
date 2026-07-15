@@ -1,0 +1,18 @@
+from fractions import Fraction
+from decimal import Decimal
+print(Fraction(1, 3) + Fraction(1, 6))
+print(Fraction(2, 4))
+print(Fraction(10, 5))
+print(Fraction(1, 2) ** 3)
+print(Fraction(-3, 4))
+print(Fraction(22, 7).limit_denominator(10))
+print(Decimal("1.1") + Decimal("2.2"))
+print(Decimal("10") / Decimal("4"))
+print(Decimal("2.00").normalize())
+print(Decimal("0.1") * 3)
+print(Fraction(3, 4) + Fraction(1, 4))
+print(sum([Fraction(1, 3)] * 3))
+print(float(Fraction(1, 8)))
+print(Fraction(0.25))
+print(int(Decimal("7.9")))
+print(Decimal("100").scaleb(2))

@@ -592,6 +592,84 @@ fn re_pattern_methods(
         .map(MethodOutcome::pure)
 }
 
+fn fraction_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Fraction(f) = obj else {
+        return Err(type_mismatch("Fraction"));
+    };
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    match method {
+        "limit_denominator" => {
+            let max_denom = match args.first() {
+                None => num_bigint::BigInt::from(1_000_000),
+                Some(v) => crate::value::value_as_bigint(v).ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(
+                        "limit_denominator() argument must be an integer".into(),
+                    ))
+                })?,
+            };
+            Ok(MethodOutcome::pure(Value::Fraction(Box::new(limit_denominator(f, &max_denom)))))
+        }
+        "as_integer_ratio" => Ok(MethodOutcome::pure(Value::Tuple(vec![
+            crate::value::int_from_bigint(f.numer().clone()),
+            crate::value::int_from_bigint(f.denom().clone()),
+        ]))),
+        "__floor__" | "__ceil__" | "__trunc__" => {
+            let r = match method {
+                "__floor__" => f.floor(),
+                "__ceil__" => f.ceil(),
+                _ => f.trunc(),
+            };
+            Ok(MethodOutcome::pure(crate::value::int_from_bigint(r.to_integer())))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'Fraction' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
+/// CPython's `Fraction.limit_denominator` — the closest fraction with a
+/// denominator not exceeding `max_denominator`, via the continued-fraction
+/// convergents.
+fn limit_denominator(
+    f: &num_rational::BigRational,
+    max_denominator: &num_bigint::BigInt,
+) -> num_rational::BigRational {
+    use num_bigint::BigInt;
+    use num_rational::BigRational;
+    use num_traits::{One as _, Signed as _, Zero as _};
+    if max_denominator < &BigInt::one() {
+        return f.clone();
+    }
+    if f.denom() <= max_denominator {
+        return f.clone();
+    }
+    let (mut p0, mut q0, mut p1, mut q1) =
+        (BigInt::zero(), BigInt::one(), BigInt::one(), BigInt::zero());
+    let (mut n, mut d) = (f.numer().clone(), f.denom().clone());
+    loop {
+        let a = &n / &d;
+        let q2 = &q0 + &a * &q1;
+        if &q2 > max_denominator {
+            break;
+        }
+        let new_p1 = &p0 + &a * &p1;
+        p0 = std::mem::replace(&mut p1, new_p1);
+        q0 = std::mem::replace(&mut q1, q2);
+        let new_d = &n - &a * &d;
+        n = std::mem::replace(&mut d, new_d);
+    }
+    let k = (max_denominator - &q0) / &q1;
+    let bound1 = BigRational::new(&p0 + &k * &p1, &q0 + &k * &q1);
+    let bound2 = BigRational::new(p1, q1);
+    if (&bound2 - f).abs() <= (&bound1 - f).abs() { bound2 } else { bound1 }
+}
+
 fn decimal_methods(
     obj: &mut Value,
     method: &str,
@@ -670,6 +748,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::ReMatch(_) => Some(re_match_methods),
         Value::RePattern(_) => Some(re_pattern_methods),
         Value::Decimal(_) => Some(decimal_methods),
+        Value::Fraction(_) => Some(fraction_methods),
         Value::HashDigest { .. } => Some(hash_digest_methods),
         _ => None,
     }

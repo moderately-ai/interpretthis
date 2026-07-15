@@ -83,6 +83,25 @@ pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Valu
             };
             Ok(Value::Decimal(Box::new(BigDecimal::from(sign))))
         }
+        // `scaleb(n)` shifts the decimal exponent by `n` (multiply by 10**n)
+        // while preserving the coefficient, so the E-notation is retained.
+        "scaleb" => {
+            let n = match args.first() {
+                Some(Value::Int(i)) => *i,
+                Some(Value::Decimal(dec)) => {
+                    use num_traits::ToPrimitive as _;
+                    dec.to_i64().unwrap_or(0)
+                }
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "scaleb() requires an integer or Decimal argument".into(),
+                    )
+                    .into());
+                }
+            };
+            let (mantissa, scale) = d.as_bigint_and_exponent();
+            Ok(Value::Decimal(Box::new(BigDecimal::new(mantissa, scale - n))))
+        }
         "to_integral_value" | "to_integral" => {
             Ok(Value::Decimal(Box::new(d.with_scale_round(0, bigdecimal::RoundingMode::HalfEven))))
         }
