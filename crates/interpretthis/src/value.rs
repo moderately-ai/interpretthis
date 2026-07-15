@@ -142,6 +142,43 @@ pub fn value_as_bigint(v: &Value) -> Option<num_bigint::BigInt> {
     }
 }
 
+/// Whether a bare builtin name refers to a *type* (which reprs as
+/// `<class 'name'>`) rather than a plain builtin *function* (`<built-in
+/// function name>`). Covers the scalar/container types plus the builtin
+/// iterator/wrapper types that CPython also exposes as classes.
+#[must_use]
+pub fn is_builtin_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "float"
+            | "complex"
+            | "bool"
+            | "str"
+            | "bytes"
+            | "bytearray"
+            | "list"
+            | "tuple"
+            | "dict"
+            | "set"
+            | "frozenset"
+            | "range"
+            | "type"
+            | "object"
+            | "slice"
+            | "memoryview"
+            | "enumerate"
+            | "zip"
+            | "map"
+            | "filter"
+            | "reversed"
+            | "property"
+            | "super"
+            | "staticmethod"
+            | "classmethod"
+    )
+}
+
 /// Narrow to i64 when the value is a small int (or bool).
 #[must_use]
 pub fn value_as_i64(v: &Value) -> Option<i64> {
@@ -2334,6 +2371,12 @@ impl fmt::Display for Value {
             Self::Type(n) | Self::Class(n) => write!(f, "<class '{n}'>"),
             Self::Module(n) => write!(f, "<module '{n}'>"),
             Self::Instance(inst) => write!(f, "<{} object>", inst.class_name),
+            // A bare builtin *type* name (`int`, `list`, `zip`, …) reprs as
+            // `<class 'name'>` in CPython, while a true builtin *function*
+            // (`len`, `print`, `sorted`) reprs as `<built-in function name>`.
+            Self::BuiltinName(name) if is_builtin_type_name(name) => {
+                write!(f, "<class '{name}'>")
+            }
             Self::ModuleFunction { name, .. } | Self::BuiltinName(name) => {
                 write!(f, "<built-in function {name}>")
             }
