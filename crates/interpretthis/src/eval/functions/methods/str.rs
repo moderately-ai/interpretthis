@@ -297,6 +297,29 @@ pub(crate) fn dispatch_string_method(
                     }
                     Ok(Value::Bytes(out))
                 }
+                // UTF-32: 4 bytes per code point. Plain name prepends a
+                // little-endian BOM; -le/-be omit it.
+                "utf-32" | "utf32" => {
+                    let mut out = vec![0xFF, 0xFE, 0x00, 0x00];
+                    for c in s.chars() {
+                        out.extend_from_slice(&(c as u32).to_le_bytes());
+                    }
+                    Ok(Value::Bytes(out))
+                }
+                "utf-32-le" | "utf-32le" | "utf_32_le" => {
+                    let mut out = Vec::with_capacity(s.len() * 4);
+                    for c in s.chars() {
+                        out.extend_from_slice(&(c as u32).to_le_bytes());
+                    }
+                    Ok(Value::Bytes(out))
+                }
+                "utf-32-be" | "utf-32be" | "utf_32_be" => {
+                    let mut out = Vec::with_capacity(s.len() * 4);
+                    for c in s.chars() {
+                        out.extend_from_slice(&(c as u32).to_be_bytes());
+                    }
+                    Ok(Value::Bytes(out))
+                }
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
                 }

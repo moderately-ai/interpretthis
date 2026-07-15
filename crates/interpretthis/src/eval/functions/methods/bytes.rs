@@ -336,6 +336,41 @@ pub(crate) fn dispatch_bytes_method(
                         EvalError::from(InterpreterError::ValueError("invalid utf-16 data".into()))
                     })
                 }
+                // UTF-32: 4 bytes per code point; the plain name reads/strips a
+                // leading BOM to pick byte order (default little-endian).
+                "utf-32" | "utf32" | "utf-32-le" | "utf-32le" | "utf_32_le" | "utf-32-be"
+                | "utf-32be" | "utf_32_be" => {
+                    let lname = encoding.to_ascii_lowercase();
+                    let (little_endian, body): (bool, &[u8]) = if lname.contains("be") {
+                        (false, b)
+                    } else if lname.contains("le") {
+                        (true, b)
+                    } else {
+                        match b {
+                            [0xFF, 0xFE, 0x00, 0x00, rest @ ..] => (true, rest),
+                            [0x00, 0x00, 0xFE, 0xFF, rest @ ..] => (false, rest),
+                            _ => (true, b),
+                        }
+                    };
+                    let mut out = String::new();
+                    for c in body.chunks_exact(4) {
+                        let cp = if little_endian {
+                            u32::from_le_bytes([c[0], c[1], c[2], c[3]])
+                        } else {
+                            u32::from_be_bytes([c[0], c[1], c[2], c[3]])
+                        };
+                        match char::from_u32(cp) {
+                            Some(ch) => out.push(ch),
+                            None => {
+                                return Err(InterpreterError::ValueError(
+                                    "invalid utf-32 data".into(),
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                    Ok(Value::String(out.into()))
+                }
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
                 }
