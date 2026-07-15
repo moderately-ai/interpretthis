@@ -31,6 +31,7 @@ pub mod fractions;
 pub mod functools;
 pub mod hashlib;
 pub mod heapq;
+pub mod io_mod;
 pub mod itertools;
 pub mod json;
 pub mod math;
@@ -103,7 +104,7 @@ pub trait Module: Sync + Send {
 /// plus one `pub struct XModule;` + `impl Module for XModule` in its
 /// own file. Lookup is O(1) hashed by module name.
 static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock::new(|| {
-    let modules: [&'static dyn Module; 26] = [
+    let modules: [&'static dyn Module; 27] = [
         &math::MathModule,
         &cmath::CmathModule,
         &bisect::BisectModule,
@@ -130,6 +131,7 @@ static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock:
         &copy_mod::CopyModule,
         &contextlib_mod::ContextlibModule,
         &abc_mod::AbcModule,
+        &io_mod::IoModule,
     ];
     modules.into_iter().map(|m| (m.name(), m)).collect()
 });

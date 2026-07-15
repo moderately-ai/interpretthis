@@ -81,6 +81,25 @@ pub fn shared_bytes(bytes: Vec<u8>) -> SharedByteArray {
     Arc::new(Mutex::new(bytes))
 }
 
+/// Backing state for [`Value::StringIO`] — the text buffer and the read/write
+/// cursor. `write` overwrites from `pos` (extending as needed); `read`/
+/// `readline` advance `pos`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StringIoData {
+    pub buf: String,
+    pub pos: usize,
+}
+
+/// Shared, reference-semantic `io.StringIO` state (an alias shares the buffer,
+/// like `bytearray`/`list`).
+pub type SharedStringIo = Arc<Mutex<StringIoData>>;
+
+/// Construct a fresh `SharedStringIo` seeded with `initial` text.
+#[must_use]
+pub fn shared_stringio(initial: String) -> SharedStringIo {
+    Arc::new(Mutex::new(StringIoData { buf: initial, pos: 0 }))
+}
+
 /// Construct a fresh [`SharedFields`] map.
 #[inline]
 #[must_use]
@@ -229,6 +248,20 @@ fn deserialize_shared_bytes<'de, D: serde::Deserializer<'de>>(
 ) -> Result<SharedByteArray, D::Error> {
     let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
     Ok(shared_bytes(bytes))
+}
+
+fn serialize_shared_stringio<S: serde::Serializer>(
+    io: &SharedStringIo,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    io.lock().clone().serialize(serializer)
+}
+
+fn deserialize_shared_stringio<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SharedStringIo, D::Error> {
+    let data: StringIoData = Deserialize::deserialize(deserializer)?;
+    Ok(Arc::new(Mutex::new(data)))
 }
 
 /// Serialize instance fields as a plain map (lock, then emit).
@@ -425,6 +458,14 @@ pub enum Value {
     /// reflects mutations; a `Bytes` source is a fixed snapshot). Boxed to keep
     /// the enum slot narrow.
     MemoryView(Box<Value>),
+    /// `io.StringIO` — an in-memory text stream. Reference-semantic like
+    /// `bytearray` (aliases share the buffer); doubles as its own context
+    /// manager (`with io.StringIO() as f:`).
+    StringIO(
+        #[serde(serialize_with = "serialize_shared_stringio")]
+        #[serde(deserialize_with = "deserialize_shared_stringio")]
+        SharedStringIo,
+    ),
     /// Python `list`. Backed by `Arc<Mutex<Vec<Value>>>` so chained
     /// assignment (`a = b = []`), mutable default args, and closure
     /// captures of lists share the same identity — mutations via any
@@ -1920,7 +1961,9 @@ impl Value {
             // objects, dates, match objects. (An instance is truthy unless it
             // defines `__bool__`/`__len__`; those aren't consulted in this
             // synchronous accessor, so it defaults to true.)
-            Self::Function(_)
+            // A StringIO is an object — truthy regardless of buffer content.
+            Self::StringIO(_)
+            | Self::Function(_)
             | Self::Lambda(_)
             | Self::Exception(_)
             | Self::ExceptionMethod { .. }
@@ -2008,6 +2051,7 @@ impl Value {
             Self::OrderedDict(_) => "OrderedDict",
             Self::Set(_) => "set",
             Self::Frozenset(_) => "frozenset",
+            Self::StringIO(_) => "StringIO",
             // Both Function (named def) and Lambda (anonymous) are "function"
             // in Python's type system.
             Self::Function(_) | Self::Lambda(_) => "function",
@@ -2632,6 +2676,9 @@ impl fmt::Display for Value {
             // CPython renders `<memory at 0x...>` with a real address; we omit
             // the (unstable) pointer.
             Self::MemoryView(_) => write!(f, "<memory>"),
+            // CPython shows `<_io.StringIO object at 0x…>`; the address is
+            // unreproducible, so emit the address-free form.
+            Self::StringIO(_) => write!(f, "<_io.StringIO object>"),
         }
     }
 }

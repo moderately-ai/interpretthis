@@ -28,9 +28,12 @@ pub const SUPPRESS_CLASS: &str = "contextlib.suppress";
 /// Marker class for a `@contextmanager`-produced context manager; the
 /// wrapped generator lives in its `gen` field.
 pub const GENCM_CLASS: &str = "contextlib._GeneratorContextManager";
+/// Marker for `contextlib.redirect_stdout(target)`; its `target` field holds
+/// the StringIO that receives `print` output while the block is active.
+pub const REDIRECT_STDOUT_CLASS: &str = "contextlib.redirect_stdout";
 
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "nullcontext" | "suppress" | "contextmanager")
+    matches!(name, "nullcontext" | "suppress" | "contextmanager" | "redirect_stdout")
 }
 
 /// `contextlib` module registration.
@@ -112,6 +115,24 @@ async fn call(
                 args: vec![func],
                 keywords: IndexMap::new(),
             })))
+        }
+        // `redirect_stdout(target)` — the marker stores the target stream; the
+        // push/pop of the redirect stack happens in `call_context_method`
+        // (which owns `&mut state`).
+        "redirect_stdout" => {
+            let target = args.first().cloned().unwrap_or(Value::None);
+            if !matches!(target, Value::StringIO(_)) {
+                return Err(InterpreterError::TypeError(
+                    "redirect_stdout() requires an io.StringIO target".into(),
+                )
+                .into());
+            }
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("target".into(), target);
+            Ok(Value::Instance(InstanceValue {
+                class_name: REDIRECT_STDOUT_CLASS.into(),
+                fields: crate::value::shared_fields(fields),
+            }))
         }
         other => Err(InterpreterError::AttributeError(format!(
             "module 'contextlib' has no attribute '{other}'"
@@ -225,7 +246,7 @@ pub(crate) async fn try_gencm_method(
 /// Register empty marker classes so Instance lookups don't NameError.
 fn ensure_marker_classes(state: &mut InterpreterState) {
     use crate::value::ClassValue;
-    for name in [NULLCONTEXT_CLASS, SUPPRESS_CLASS, GENCM_CLASS] {
+    for name in [NULLCONTEXT_CLASS, SUPPRESS_CLASS, GENCM_CLASS, REDIRECT_STDOUT_CLASS] {
         if state.classes.contains_key(name) {
             continue;
         }

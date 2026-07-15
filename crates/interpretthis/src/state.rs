@@ -167,6 +167,10 @@ pub struct InterpreterState {
     /// the [`ClassValue`] so instances stay cheap and methods are stored once.
     pub classes: FxHashMap<String, ClassValue>,
     pub print_buffer: String,
+    /// Active `contextlib.redirect_stdout` targets (innermost last). While
+    /// non-empty, `append_print` writes to the top StringIO instead of
+    /// `print_buffer`. Transient with-block resource (not persisted).
+    pub stdout_redirects: Vec<crate::value::SharedStringIo>,
     /// Parse cache for user-function body AST nodes, keyed by name.
     /// `rustpython_parser::ast` is not `Serialize`, so the canonical source
     /// of truth is `FunctionDef::source`; this map is populated at
@@ -358,6 +362,7 @@ impl InterpreterState {
             variables,
             classes,
             print_buffer: String::new(),
+            stdout_redirects: Vec::new(),
             function_bodies: FxHashMap::default(),
             lambda_bodies: FxHashMap::default(),
             current_source: String::new(),
@@ -543,6 +548,27 @@ impl InterpreterState {
     }
 
     pub fn append_print(&mut self, text: &str) -> Result<(), crate::error::InterpreterError> {
+        // Under an active `redirect_stdout`, print writes to that StringIO's
+        // buffer (at its cursor) instead of the real stdout buffer.
+        if let Some(target) = self.stdout_redirects.last() {
+            let mut g = target.lock();
+            let insert_at = g.pos.min(g.buf.chars().count());
+            if insert_at >= g.buf.chars().count() {
+                g.buf.push_str(text);
+            } else {
+                let mut chars: Vec<char> = g.buf.chars().collect();
+                for (i, c) in text.chars().enumerate() {
+                    if insert_at + i < chars.len() {
+                        chars[insert_at + i] = c;
+                    } else {
+                        chars.push(c);
+                    }
+                }
+                g.buf = chars.into_iter().collect();
+            }
+            g.pos = insert_at + text.chars().count();
+            return Ok(());
+        }
         let new_len = self.print_buffer.len() + text.len();
         // On 32-bit targets, max_stdout_bytes may exceed usize::MAX; saturate
         // to usize::MAX so the comparison stays meaningful (new_len is a usize
@@ -667,6 +693,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         Value::String(s) => STRING_HEADER_BYTES + s.len(),
         Value::Bytes(b) => STRING_HEADER_BYTES + b.len(),
         Value::ByteArray(b) => STRING_HEADER_BYTES + b.lock().len(),
+        Value::StringIO(io) => STRING_HEADER_BYTES + io.try_lock().map_or(0, |g| g.buf.len()),
         Value::MemoryView(inner) => 16 + estimate_value_size(inner),
         // List is shared via Arc<Mutex<Vec>>; lock to walk under the
         // guard. Tuple/Set wrap plain Vec<Value> and walk directly.

@@ -25,4 +25,5 @@ pub(crate) mod int;
 pub(crate) mod list;
 pub(crate) mod set;
 pub(crate) mod str;
+pub(crate) mod stringio;
 pub(crate) mod tuple;

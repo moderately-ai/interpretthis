@@ -35,8 +35,9 @@ use crate::{
 /// `Decimal` / `Fraction` — each bump rejects older readers of newer
 /// blobs (one-directional incompatibility). v12: `set`/`frozenset` moved to a
 /// shared CPython-order table, serialized as elements-only. v13: adds the
-/// `OrderedDict` variant (a distinct type from `dict`).
-pub const STATE_FORMAT_VERSION: u32 = 13;
+/// `OrderedDict` variant (a distinct type from `dict`). v14: adds the
+/// `io.StringIO` variant.
+pub const STATE_FORMAT_VERSION: u32 = 14;
 
 /// Bytes occupied by the little-endian `u32` version prefix before the
 /// JSON state body.

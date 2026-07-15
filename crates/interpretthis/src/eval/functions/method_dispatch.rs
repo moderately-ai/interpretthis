@@ -698,6 +698,19 @@ fn bytearray_methods(
     methods::bytes::dispatch_bytearray_method(b, method, args, kwargs)
 }
 
+fn stringio_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::StringIO(io) = obj else {
+        return Err(type_mismatch("StringIO"));
+    };
+    let stream = io.clone();
+    methods::stringio::dispatch_stringio_method(&stream, method, args, kwargs)
+}
+
 fn memoryview_methods(
     obj: &mut Value,
     method: &str,
@@ -1011,6 +1024,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Array { .. } => Some(array_methods),
         Value::LruCache(_) => Some(lru_methods),
         Value::Dict(_) | Value::OrderedDict(_) => Some(dict_methods),
+        Value::StringIO(_) => Some(stringio_methods),
         Value::Counter(_) => Some(counter_methods),
         Value::Deque { .. } => Some(deque_methods),
         Value::DefaultDict(_) => Some(defaultdict_methods),

@@ -356,6 +356,35 @@ async fn call_context_method(
     args: &[Value],
     tools: &Tools,
 ) -> EvalResult {
+    // `redirect_stdout` needs `&mut state` to push/pop the redirect stack, so
+    // it is handled here rather than in the sync `try_contextlib_method`.
+    if let Value::Instance(inst) = receiver {
+        if inst.class_name == crate::eval::modules::contextlib_mod::REDIRECT_STDOUT_CLASS {
+            let target = inst.fields.lock().get("target").cloned();
+            match (method, target) {
+                ("__enter__", Some(Value::StringIO(io))) => {
+                    state.stdout_redirects.push(io.clone());
+                    return Ok(Value::StringIO(io));
+                }
+                ("__exit__", _) => {
+                    state.stdout_redirects.pop();
+                    return Ok(Value::Bool(false));
+                }
+                _ => {}
+            }
+        }
+    }
+    // A StringIO is its own context manager (`with io.StringIO() as f:`).
+    if let Value::StringIO(io) = receiver {
+        return match method {
+            "__enter__" => Ok(Value::StringIO(io.clone())),
+            "__exit__" => Ok(Value::Bool(false)),
+            _ => Err(InterpreterError::AttributeError(format!(
+                "'_io.StringIO' object has no attribute '{method}'"
+            ))
+            .into()),
+        };
+    }
     // contextlib.nullcontext / suppress — marker instances without Python methods.
     if let Some(result) =
         crate::eval::modules::contextlib_mod::try_contextlib_method(state, receiver, method, args)
