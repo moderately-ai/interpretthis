@@ -148,7 +148,19 @@ pub fn apply_binop(
             crate::types::dispatch_binop(crate::types::BinOp::Mod, left, right, decimal_prec)
         }
         ast::Operator::Pow => {
-            crate::types::dispatch_binop(crate::types::BinOp::Pow, left, right, decimal_prec)
+            // Integer / float `**` honours the configured `max_int_bits` (like
+            // the shifts below); Decimal/Fraction/enum pow routes through the
+            // type arith slots.
+            if matches!(left, Value::Int(_) | Value::BigInt(_) | Value::Bool(_) | Value::Float(_))
+                && matches!(
+                    right,
+                    Value::Int(_) | Value::BigInt(_) | Value::Bool(_) | Value::Float(_)
+                )
+            {
+                pow_values(left, right, max_int_bits)
+            } else {
+                crate::types::dispatch_binop(crate::types::BinOp::Pow, left, right, decimal_prec)
+            }
         }
         ast::Operator::LShift => lshift_values(left, right, max_int_bits),
         ast::Operator::RShift => rshift_values(left, right, max_int_bits),
@@ -207,7 +219,9 @@ pub fn apply_binop_builtin(
         crate::types::BinOp::Div => div_values(left, right),
         crate::types::BinOp::FloorDiv => floordiv_values(left, right),
         crate::types::BinOp::Mod => mod_values(left, right),
-        crate::types::BinOp::Pow => pow_values(left, right),
+        // The sync builtin path has no config in scope; use the default cap.
+        // The configured cap is applied on the async `apply_binop` int/float path.
+        crate::types::BinOp::Pow => pow_values(left, right, 1_048_576),
     }
 }
 
@@ -775,7 +789,7 @@ fn matmult_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     Ok(Value::List(shared_list(out)))
 }
 
-fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
+fn pow_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, EvalError> {
     if either_is_float(left, right) {
         let l = to_float(left)?;
         let r = to_float(right)?;
@@ -840,9 +854,7 @@ fn pow_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
                     "exponent too large for integer power",
                 )));
             }
-            // Default max_int_bits; wiring this to InterpreterConfig is tracked by
-            // gap-pow-max-int-bits-config-wiring.
-            crate::value::int_from_bigint_limited(l.pow(exp), 1_048_576)
+            crate::value::int_from_bigint_limited(l.pow(exp), max_int_bits)
         }
     }
 }
