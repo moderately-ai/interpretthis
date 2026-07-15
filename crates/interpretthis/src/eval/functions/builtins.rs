@@ -1342,8 +1342,10 @@ pub(super) async fn try_builtin(
             let iterable = crate::eval::op::iter(state, &args[1], tools).await?;
             let mut result = Vec::new();
             for item in iterable {
+                // Async truthiness so a filtered instance (or an instance the
+                // predicate returns) dispatches __bool__/__len__.
                 let keep = if matches!(func, Value::None) {
-                    item.is_truthy()
+                    crate::eval::op::truthy(state, &item, tools).await?
                 } else {
                     let val = call_value_as_function(
                         state,
@@ -1353,7 +1355,7 @@ pub(super) async fn try_builtin(
                         tools,
                     )
                     .await?;
-                    val.is_truthy()
+                    crate::eval::op::truthy(state, &val, tools).await?
                 };
                 if keep {
                     result.push(item);
