@@ -273,6 +273,17 @@ pub async fn iter(
     };
 
     let (iterator, _self) = invoke_slot(state, value, &iter_method, &[], tools).await?;
+    // `__iter__` may return a generator (a generator method's `yield`s) or any
+    // builtin iterable; drain those directly rather than requiring an Instance.
+    match &iterator {
+        Value::Lazy { .. } | Value::Generator { .. } => {
+            return Box::pin(iter(state, &iterator, tools)).await;
+        }
+        Value::List(_) | Value::Tuple(_) | Value::Range { .. } => {
+            return Box::pin(iter(state, &iterator, tools)).await;
+        }
+        _ => {}
+    }
     let Value::Instance(iter_inst) = &iterator else {
         return Err(InterpreterError::TypeError(format!(
             "iter() returned non-iterator of type '{}'",

@@ -1334,6 +1334,24 @@ async fn call_method_inner(
 
     let body = state.function_bodies.get(&method.name).cloned();
     let exec_result = match body {
+        // A generator method (its body uses `yield`) returns a generator rather
+        // than running to completion — `def __iter__(self): ... yield ...` and
+        // any other yielding method. Collected eagerly into a Lazy generator
+        // (same shape as the while-based generator fallback).
+        Some(stmts) if method.is_generator => {
+            state.yield_stack.push(Vec::new());
+            let body_result = execute_body(state, stmts.as_slice(), tools).await;
+            let collected = state.yield_stack.pop().unwrap_or_default();
+            match body_result {
+                Ok(_) | Err(EvalError::Signal(crate::error::ControlFlow::Return(_))) => {
+                    let cursor_id = state.next_cursor_id;
+                    state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
+                    state.lazy_cursors.insert(cursor_id, 0);
+                    Ok(Value::Lazy { items: collected, cursor_id })
+                }
+                Err(e) => Err(e),
+            }
+        }
         Some(stmts) => execute_body(state, stmts.as_slice(), tools).await,
         None => Ok(Value::None),
     };

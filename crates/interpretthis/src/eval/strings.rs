@@ -204,6 +204,15 @@ fn format_value_body(
             || s.to_string(),
             |p| s.chars().take(spec_usize(p, 0)).collect::<String>(),
         )),
+        // A complex under a float presentation code formats each part with that
+        // code and joins them with the imaginary part's explicit sign, e.g.
+        // `f"{3+4j:.2f}"` is "3.00+4.00j".
+        (Value::Complex(c), Some('f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%')) => {
+            let re = format_value_body(&Value::Float(c.re), type_char, precision, alternate)?;
+            let im = format_value_body(&Value::Float(c.im.abs()), type_char, precision, alternate)?;
+            let sign = if c.im.is_sign_negative() { "-" } else { "+" };
+            Ok(format!("{re}{sign}{im}j"))
+        }
         // Remaining types (Decimal, Fraction, None, dates, …) render via
         // Display when no type code is given.
         (_, None) => Ok(format!("{value}")),
