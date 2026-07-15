@@ -1304,9 +1304,15 @@ pub async fn instance_method_call(
         return Ok((result, instance));
     }
     // classmethod beats regular method too. The first arg bound is
-    // the class (Value::Class), not the instance.
+    // the class (Value::Class), not the instance. The receiver that
+    // `call_method` threads back is that class — but the caller writes
+    // the returned receiver back over the instance's slot, so return the
+    // original `instance` (a classmethod never mutates the instance) to
+    // keep `s` an instance after `s.cm()`.
     if let Some(def) = lookup_class_method(state, &class_name, method_name) {
-        return call_method(state, &def, Value::Class(class_name.clone()), call, tools).await;
+        let (result, _cls) =
+            call_method(state, &def, Value::Class(class_name.clone()), call, tools).await?;
+        return Ok((result, instance));
     }
     // Walk the MRO: a method defined in any ancestor is callable on
     // `instance`, with `__class__` bound to the defining class so
