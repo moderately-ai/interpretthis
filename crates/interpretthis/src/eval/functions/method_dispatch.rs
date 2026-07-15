@@ -208,6 +208,51 @@ fn list_methods(
     methods::list::dispatch_list_method(&mut guard, method, args, kwargs)
 }
 
+fn range_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    let Value::Range { start, stop, step } = obj else {
+        return Err(type_mismatch("range"));
+    };
+    let (start, stop, step) = (*start, *stop, *step);
+    // Membership + position are O(1) arithmetic (never materialise the range).
+    let position = |v: &Value| -> Option<i64> {
+        let n = match v {
+            Value::Int(n) => *n,
+            Value::Bool(b) => i64::from(*b),
+            _ => return None,
+        };
+        if step == 0 {
+            return None;
+        }
+        let in_bounds = if step > 0 { n >= start && n < stop } else { n <= start && n > stop };
+        if in_bounds && (n - start) % step == 0 { Some((n - start) / step) } else { None }
+    };
+    match method {
+        "index" => {
+            let target = arg1(method, args)?;
+            match position(target) {
+                Some(i) => Ok(MethodOutcome::pure(Value::Int(i))),
+                None => {
+                    Err(InterpreterError::ValueError(format!("{target} is not in range")).into())
+                }
+            }
+        }
+        "count" => {
+            let n = i64::from(args.first().is_some_and(|v| position(v).is_some()));
+            Ok(MethodOutcome::pure(Value::Int(n)))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'range' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 fn lru_methods(
     obj: &mut Value,
     method: &str,
@@ -851,6 +896,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Set(_) => Some(set_methods),
         Value::Frozenset(_) => Some(frozenset_methods),
         Value::Tuple(_) => Some(tuple_methods),
+        Value::Range { .. } => Some(range_methods),
         Value::Int(_) | Value::BigInt(_) => Some(int_methods),
         Value::Float(_) => Some(float_methods),
         Value::Complex(_) => Some(complex_methods),
