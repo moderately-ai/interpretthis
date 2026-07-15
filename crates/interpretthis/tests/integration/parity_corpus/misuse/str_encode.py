@@ -1,0 +1,6 @@
+print("héllo".encode("utf-8"))
+print("héllo".encode("utf-8").decode("utf-8"))
+print("abc".encode("ascii"))
+print(len("héllo".encode("utf-8")))
+print("café".encode("latin-1"))
+print(b"\xff\xfe".decode("latin-1"))

@@ -158,19 +158,82 @@ pub(crate) fn dispatch_memoryview_method(raw: &[u8], method: &str) -> EvalResult
         "tolist" => {
             Ok(Value::List(shared_list(raw.iter().map(|&n| Value::Int(i64::from(n))).collect())))
         }
-        "hex" => {
-            use std::fmt::Write as _;
-            let mut out = String::with_capacity(raw.len() * 2);
-            for byte in raw {
-                let _ = write!(out, "{byte:02x}");
-            }
-            Ok(Value::String(out.into()))
-        }
+        "hex" => bytes_to_hex(raw, &[]),
         _ => Err(InterpreterError::AttributeError(format!(
             "'memoryview' object has no attribute '{method}'"
         ))
         .into()),
     }
+}
+
+/// `bytes.hex([sep[, bytes_per_sep]])`. With no separator, returns a bare
+/// lowercase hex string. With a one-character `sep`, groups every
+/// `bytes_per_sep` bytes (default 1) and joins the groups with `sep`;
+/// a positive count groups from the right, a negative count from the left
+/// (CPython semantics).
+fn bytes_to_hex(raw: &[u8], args: &[Value]) -> EvalResult {
+    use std::fmt::Write as _;
+
+    let sep = match args.first() {
+        None | Some(Value::None) => None,
+        Some(Value::String(s)) => {
+            let mut chars = s.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(c),
+                _ => {
+                    return Err(InterpreterError::ValueError("sep must be length 1.".into()).into());
+                }
+            }
+        }
+        Some(other) => {
+            return Err(InterpreterError::TypeError(format!(
+                "hex() argument 'sep' must be str, not {}",
+                other.type_name()
+            ))
+            .into());
+        }
+    };
+
+    let Some(sep) = sep else {
+        let mut out = String::with_capacity(raw.len() * 2);
+        for byte in raw {
+            let _ = write!(out, "{byte:02x}");
+        }
+        return Ok(Value::String(out.into()));
+    };
+
+    let group = match args.get(1) {
+        None => 1_i64,
+        Some(Value::Int(n)) => *n,
+        Some(Value::Bool(b)) => i64::from(*b),
+        Some(other) => {
+            return Err(InterpreterError::TypeError(format!(
+                "hex() argument 'bytes_per_sep' must be int, not {}",
+                other.type_name()
+            ))
+            .into());
+        }
+    };
+    if group == 0 {
+        return Err(InterpreterError::ValueError("bytes_per_sep must not be zero".into()).into());
+    }
+
+    // Group size is |group|; a positive count counts groups from the right
+    // (the trailing group may be short), a negative one from the left.
+    let width = group.unsigned_abs() as usize;
+    let from_right = group > 0;
+    let n = raw.len();
+    let mut out = String::with_capacity(n * 2 + n / width);
+    for (i, byte) in raw.iter().enumerate() {
+        if i > 0 {
+            let boundary = if from_right { (n - i) % width == 0 } else { i % width == 0 };
+            if boundary {
+                out.push(sep);
+            }
+        }
+        let _ = write!(out, "{byte:02x}");
+    }
+    Ok(Value::String(out.into()))
 }
 
 /// Convert a `bytes`-returning result of a shared bytes method into the
@@ -216,27 +279,40 @@ pub(crate) fn dispatch_bytes_method(
                     .into());
                 }
             };
-            match encoding {
-                "utf-8" | "utf_8" | "UTF-8" | "UTF_8" | "ascii" | "ASCII" => {
+            match encoding.to_ascii_lowercase().as_str() {
+                "utf-8" | "utf_8" | "u8" => {
                     let s = std::str::from_utf8(b).map_err(|e| {
                         EvalError::from(InterpreterError::ValueError(format!("invalid utf-8: {e}")))
                     })?;
                     Ok(Value::String(s.into()))
+                }
+                "ascii" | "us-ascii" => {
+                    if b.is_ascii() {
+                        // SAFETY-of-logic: all bytes < 128, so this is valid
+                        // UTF-8 too; from_utf8 cannot fail here.
+                        let s = std::str::from_utf8(b).map_err(|e| {
+                            EvalError::from(InterpreterError::ValueError(format!(
+                                "invalid ascii: {e}"
+                            )))
+                        })?;
+                        Ok(Value::String(s.into()))
+                    } else {
+                        Err(EvalError::Exception(ExceptionValue::new(
+                            "UnicodeDecodeError",
+                            "'ascii' codec can't decode byte",
+                        )))
+                    }
+                }
+                // latin-1 maps each byte 1:1 to U+00..U+FF, so it never fails.
+                "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" => {
+                    Ok(Value::String(b.iter().map(|&byte| byte as char).collect::<String>().into()))
                 }
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
                 }
             }
         }
-        "hex" => {
-            // CPython: bytes.hex() returns lowercase hex string.
-            use std::fmt::Write as _;
-            let mut out = String::with_capacity(b.len() * 2);
-            for byte in b {
-                let _ = write!(out, "{byte:02x}");
-            }
-            Ok(Value::String(out.into()))
-        }
+        "hex" => bytes_to_hex(b, args),
         "startswith" => bytes_affix(b, method, args, true),
         "endswith" => bytes_affix(b, method, args, false),
         "split" => {

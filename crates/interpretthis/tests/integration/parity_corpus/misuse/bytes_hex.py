@@ -1,0 +1,6 @@
+print(bytes([1,2,255]).hex())
+print(bytes.fromhex("01 02 ff"))
+print(b"hello".hex(":"))
+print(bytearray(b"ab").hex())
+print(int.from_bytes(b"\x01\x00", "big"))
+print((256).to_bytes(2, "little"))
