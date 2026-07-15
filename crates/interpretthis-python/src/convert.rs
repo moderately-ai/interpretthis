@@ -297,11 +297,11 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     // gate any object with a numeric `__str__` or `.numerator`/`.denominator`
     // (numpy.int64, a Money class) would be silently reinterpreted.
     if is_instance_of(ob, "decimal", "Decimal")? {
-        use num_traits::Zero as _;
         let big = ob.extract::<BigDecimal>()?;
         // `bigdecimal` drops the sign of a zero; recover CPython's negative
         // zero (`Decimal('-0.0')`) from the repr so it round-trips.
-        let neg_zero = big.is_zero() && ob.str()?.to_str()?.trim_start().starts_with('-');
+        let is_zero = big == BigDecimal::from(0i64);
+        let neg_zero = is_zero && ob.str()?.to_str()?.trim_start().starts_with('-');
         return Ok(Value::Decimal(Box::new(big), neg_zero));
     }
     if is_instance_of(ob, "fractions", "Fraction")? {
