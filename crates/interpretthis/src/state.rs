@@ -278,9 +278,39 @@ impl InterpreterState {
         // names so it stays out of user-visible state listings.
         let mut variables = FxHashMap::default();
         variables.insert("__name__".to_string(), Value::String("__main__".into()));
+        // Register `time.struct_time` as a namedtuple-shaped class so
+        // `date.timetuple()` can build an Instance of it (indexing, `.tm_*`
+        // attributes, and the `time.struct_time(...)` repr all reuse the
+        // namedtuple `_fields` machinery). The dotted name can't be created via
+        // the user-facing namedtuple() (invalid identifier), so it's seeded here.
+        let mut classes = FxHashMap::default();
+        let mut struct_time = crate::value::ClassValue::new("time.struct_time");
+        struct_time.class_attrs.insert(
+            "_fields".to_string(),
+            Value::Tuple(
+                [
+                    "tm_year", "tm_mon", "tm_mday", "tm_hour", "tm_min", "tm_sec", "tm_wday",
+                    "tm_yday", "tm_isdst",
+                ]
+                .into_iter()
+                .map(|f| Value::String(f.into()))
+                .collect(),
+            ),
+        );
+        classes.insert("time.struct_time".to_string(), struct_time);
+        // `datetime.IsoCalendarDate` for `date.isocalendar()` (year, week,
+        // weekday), same namedtuple-shaped reuse.
+        let mut iso = crate::value::ClassValue::new("datetime.IsoCalendarDate");
+        iso.class_attrs.insert(
+            "_fields".to_string(),
+            Value::Tuple(
+                ["year", "week", "weekday"].into_iter().map(|f| Value::String(f.into())).collect(),
+            ),
+        );
+        classes.insert("datetime.IsoCalendarDate".to_string(), iso);
         Self {
             variables,
-            classes: FxHashMap::default(),
+            classes,
             print_buffer: String::new(),
             function_bodies: FxHashMap::default(),
             lambda_bodies: FxHashMap::default(),

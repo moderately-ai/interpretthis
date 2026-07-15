@@ -313,6 +313,48 @@ pub fn timedelta_attribute(micros: i64, attr: &str) -> EvalResult {
 }
 
 /// Dispatch a method on a `date` value.
+/// Build a `time.struct_time` Instance (the class is seeded in
+/// `InterpreterState::new`). `tm_isdst` is -1 for date/datetime (unknown).
+fn build_struct_time(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    wday: u32,
+    yday: u32,
+) -> Value {
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("tm_year".to_string(), Value::Int(i64::from(year)));
+    fields.insert("tm_mon".to_string(), Value::Int(i64::from(month)));
+    fields.insert("tm_mday".to_string(), Value::Int(i64::from(day)));
+    fields.insert("tm_hour".to_string(), Value::Int(i64::from(hour)));
+    fields.insert("tm_min".to_string(), Value::Int(i64::from(minute)));
+    fields.insert("tm_sec".to_string(), Value::Int(i64::from(second)));
+    fields.insert("tm_wday".to_string(), Value::Int(i64::from(wday)));
+    fields.insert("tm_yday".to_string(), Value::Int(i64::from(yday)));
+    fields.insert("tm_isdst".to_string(), Value::Int(-1));
+    Value::Instance(crate::value::InstanceValue {
+        class_name: "time.struct_time".to_string(),
+        fields: crate::value::shared_fields(fields),
+    })
+}
+
+/// Build a `datetime.IsoCalendarDate` Instance (ISO year, week, weekday 1-7).
+fn build_isocalendar(date: NaiveDate) -> Value {
+    let iso = date.iso_week();
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("year".to_string(), Value::Int(i64::from(iso.year())));
+    fields.insert("week".to_string(), Value::Int(i64::from(iso.week())));
+    fields
+        .insert("weekday".to_string(), Value::Int(i64::from(date.weekday().number_from_monday())));
+    Value::Instance(crate::value::InstanceValue {
+        class_name: "datetime.IsoCalendarDate".to_string(),
+        fields: crate::value::shared_fields(fields),
+    })
+}
+
 pub fn dispatch_date_method(
     date: NaiveDate,
     method: &str,
@@ -331,6 +373,19 @@ pub fn dispatch_date_method(
         "isoweekday" => Ok(Value::Int(i64::from(date.weekday().number_from_monday()))),
         // Proleptic Gregorian ordinal — day 1 is 0001-01-01, matching CPython.
         "toordinal" => Ok(Value::Int(i64::from(date.num_days_from_ce()))),
+        // `datetime.IsoCalendarDate(year, week, weekday)`.
+        "isocalendar" => Ok(build_isocalendar(date)),
+        // `time.struct_time` with the time fields zeroed (a plain date).
+        "timetuple" => Ok(build_struct_time(
+            date.year(),
+            date.month(),
+            date.day(),
+            0,
+            0,
+            0,
+            date.weekday().num_days_from_monday(),
+            date.ordinal(),
+        )),
         "strftime" => {
             let fmt = arg_str("strftime", args, 0)?;
             Ok(Value::String(date.format(fmt).to_string().into()))
@@ -432,6 +487,18 @@ pub fn dispatch_datetime_method(
         "time" => Ok(Value::Time(dt.time())),
         "weekday" => Ok(Value::Int(i64::from(dt.weekday().num_days_from_monday()))),
         "isoweekday" => Ok(Value::Int(i64::from(dt.weekday().number_from_monday()))),
+        "isocalendar" => Ok(build_isocalendar(dt.date())),
+        // `time.struct_time` including the wall-clock time fields.
+        "timetuple" => Ok(build_struct_time(
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+            dt.weekday().num_days_from_monday(),
+            dt.ordinal(),
+        )),
         "strftime" => {
             let fmt = arg_str("strftime", args, 0)?;
             Ok(Value::String(dt.format(fmt).to_string().into()))
