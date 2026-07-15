@@ -33,44 +33,50 @@ pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Valu
         // `quantize(exp)` rounds to the exponent (decimal scale) of `exp`,
         // using banker's rounding (CPython's default ROUND_HALF_EVEN).
         "quantize" => {
-            let Some(Value::Decimal(exp)) = args.first() else {
+            let Some(Value::Decimal(exp, _)) = args.first() else {
                 return Err(InterpreterError::TypeError(
                     "quantize() requires a Decimal argument".into(),
                 )
                 .into());
             };
             let scale = exp.fractional_digit_count();
-            Ok(Value::Decimal(Box::new(
-                d.with_scale_round(scale, bigdecimal::RoundingMode::HalfEven),
-            )))
+            Ok(Value::Decimal(
+                Box::new(d.with_scale_round(scale, bigdecimal::RoundingMode::HalfEven)),
+                false,
+            ))
         }
-        "copy_abs" => Ok(Value::Decimal(Box::new(d.abs()))),
-        "copy_negate" => Ok(Value::Decimal(Box::new(-d.clone()))),
+        "copy_abs" => Ok(Value::Decimal(Box::new(d.abs()), false)),
+        "copy_negate" => Ok(Value::Decimal(Box::new(-d.clone()), false)),
         "copy_sign" => {
-            let Some(Value::Decimal(other)) = args.first() else {
+            let Some(Value::Decimal(other, _)) = args.first() else {
                 return Err(InterpreterError::TypeError(
                     "copy_sign() requires a Decimal argument".into(),
                 )
                 .into());
             };
             let magnitude = d.abs();
-            Ok(Value::Decimal(Box::new(if other.is_negative() { -magnitude } else { magnitude })))
+            Ok(Value::Decimal(
+                Box::new(if other.is_negative() { -magnitude } else { magnitude }),
+                false,
+            ))
         }
         "is_zero" => Ok(Value::Bool(d.is_zero())),
         "is_signed" => Ok(Value::Bool(d.is_negative())),
         "is_nan" | "is_infinite" | "is_qnan" | "is_snan" => Ok(Value::Bool(false)),
-        "normalize" => Ok(Value::Decimal(Box::new(d.normalized()))),
+        "normalize" => Ok(Value::Decimal(Box::new(d.normalized()), false)),
         // Rounded to the default context precision (28 significant digits),
         // matching CPython — bigdecimal's raw sqrt keeps ~100 digits.
-        "sqrt" => d.sqrt().map(|r| Value::Decimal(Box::new(r.with_prec(28)))).ok_or_else(|| {
-            EvalError::Exception(crate::value::ExceptionValue::new(
-                "InvalidOperation",
-                "sqrt of negative Decimal",
-            ))
-        }),
+        "sqrt" => {
+            d.sqrt().map(|r| Value::Decimal(Box::new(r.with_prec(28)), false)).ok_or_else(|| {
+                EvalError::Exception(crate::value::ExceptionValue::new(
+                    "InvalidOperation",
+                    "sqrt of negative Decimal",
+                ))
+            })
+        }
         // `compare(other)` yields Decimal(-1 / 0 / 1) (not a bare int).
         "compare" => {
-            let Some(Value::Decimal(other)) = args.first() else {
+            let Some(Value::Decimal(other, _)) = args.first() else {
                 return Err(InterpreterError::TypeError(
                     "compare() requires a Decimal argument".into(),
                 )
@@ -81,14 +87,14 @@ pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Valu
                 std::cmp::Ordering::Equal => 0,
                 std::cmp::Ordering::Greater => 1,
             };
-            Ok(Value::Decimal(Box::new(BigDecimal::from(sign))))
+            Ok(Value::Decimal(Box::new(BigDecimal::from(sign)), false))
         }
         // `scaleb(n)` shifts the decimal exponent by `n` (multiply by 10**n)
         // while preserving the coefficient, so the E-notation is retained.
         "scaleb" => {
             let n = match args.first() {
                 Some(Value::Int(i)) => *i,
-                Some(Value::Decimal(dec)) => {
+                Some(Value::Decimal(dec, _)) => {
                     use num_traits::ToPrimitive as _;
                     dec.to_i64().unwrap_or(0)
                 }
@@ -100,11 +106,12 @@ pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Valu
                 }
             };
             let (mantissa, scale) = d.as_bigint_and_exponent();
-            Ok(Value::Decimal(Box::new(BigDecimal::new(mantissa, scale - n))))
+            Ok(Value::Decimal(Box::new(BigDecimal::new(mantissa, scale - n)), false))
         }
-        "to_integral_value" | "to_integral" => {
-            Ok(Value::Decimal(Box::new(d.with_scale_round(0, bigdecimal::RoundingMode::HalfEven))))
-        }
+        "to_integral_value" | "to_integral" => Ok(Value::Decimal(
+            Box::new(d.with_scale_round(0, bigdecimal::RoundingMode::HalfEven)),
+            false,
+        )),
         "as_integer_ratio" => {
             let (mantissa, scale) = d.as_bigint_and_exponent();
             let (num, den) = if scale >= 0 {
@@ -203,7 +210,7 @@ pub fn call(func: &str, args: &[Value], state: &mut crate::state::InterpreterSta
             let big = BigDecimal::try_from(*f).map_err(|_| {
                 InterpreterError::ValueError(format!("cannot convert float {f} to Decimal"))
             })?;
-            Ok(Value::Decimal(Box::new(big)))
+            Ok(Value::Decimal(Box::new(big), false))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'decimal' has no attribute '{func}'"
@@ -227,15 +234,23 @@ pub(crate) fn construct_decimal(arg: Option<&Value>) -> EvalResult {
         )
         .into());
     };
-    let big = match arg {
-        Value::Int(i) => BigDecimal::from(*i),
-        Value::Bool(b) => BigDecimal::from(i64::from(*b)),
-        Value::String(s) => BigDecimal::from_str(s.trim()).map_err(|e| {
-            EvalError::from(InterpreterError::ValueError(format!(
-                "invalid Decimal literal: {s:?} ({e})"
-            )))
-        })?,
-        Value::Decimal(d) => (**d).clone(),
+    // CPython keeps the sign of a zero Decimal (`Decimal('-0.0')` prints
+    // `-0.0`), but `bigdecimal` normalises it away. Track it separately.
+    let (big, neg_zero) = match arg {
+        Value::Int(i) => (BigDecimal::from(*i), false),
+        Value::Bool(b) => (BigDecimal::from(i64::from(*b)), false),
+        Value::String(s) => {
+            use num_traits::Zero as _;
+            let trimmed = s.trim();
+            let bd = BigDecimal::from_str(trimmed).map_err(|e| {
+                EvalError::from(InterpreterError::ValueError(format!(
+                    "invalid Decimal literal: {s:?} ({e})"
+                )))
+            })?;
+            let neg_zero = bd.is_zero() && trimmed.starts_with('-');
+            (bd, neg_zero)
+        }
+        Value::Decimal(d, nz) => ((**d).clone(), *nz),
         Value::Float(_) => {
             return Err(InterpreterError::TypeError(
                 "Decimal() does not accept float — use a string instead (see \
@@ -252,7 +267,7 @@ pub(crate) fn construct_decimal(arg: Option<&Value>) -> EvalResult {
             .into());
         }
     };
-    Ok(Value::Decimal(Box::new(big)))
+    Ok(Value::Decimal(Box::new(big), neg_zero))
 }
 
 fn make_context_instance(state: &mut crate::state::InterpreterState) -> Value {

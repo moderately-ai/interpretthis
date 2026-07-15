@@ -210,7 +210,12 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
         // Decimal and Fraction have no lossless JS counterpart — a `number`
         // would defeat the entire point of an exact decimal. They cross as their
         // exact string form, which is documented and lossy in one direction.
-        Value::Decimal(d) => d.to_string().into_unknown(env),
+        Value::Decimal(d, neg_zero) => {
+            // bigdecimal drops the sign of a zero; restore CPython's negative
+            // zero in the exact string form the Decimal crosses as.
+            let s = if *neg_zero { format!("-{d}") } else { d.to_string() };
+            s.into_unknown(env)
+        }
         Value::Fraction(f) => f.to_string().into_unknown(env),
 
         // Value is #[non_exhaustive]; the rest is interpreter-internal.

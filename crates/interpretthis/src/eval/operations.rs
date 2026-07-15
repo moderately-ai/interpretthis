@@ -921,7 +921,7 @@ pub async fn apply_unaryop(
             | Value::BigInt(_)
             | Value::Float(_)
             | Value::Complex(_)
-            | Value::Decimal(_)
+            | Value::Decimal(..)
             | Value::Fraction(_) => Ok(operand.clone()),
             Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
             // `+Counter` keeps only the strictly-positive counts (CPython's
@@ -944,7 +944,11 @@ pub async fn apply_unaryop(
             Value::Float(f) => Ok(Value::Float(-*f)),
             Value::Complex(c) => Ok(Value::Complex(Box::new(-(**c)))),
             Value::Bool(b) => Ok(Value::Int(if *b { -1 } else { 0 })),
-            Value::Decimal(d) => Ok(Value::Decimal(Box::new(-(*d.clone())))),
+            // Unary `-` is the arithmetic negate (`__neg__`), which applies the
+            // context and yields *positive* zero for any zero operand
+            // (`-Decimal('0')` and `-Decimal('-0.0')` both print `0`) — unlike
+            // `copy_negate`. So the result is never neg-zero.
+            Value::Decimal(d, _) => Ok(Value::Decimal(Box::new(-(*d.clone())), false)),
             Value::Fraction(fr) => Ok(Value::Fraction(Box::new(-(*fr.clone())))),
             // `-Counter` negates every count and keeps the now-positive ones
             // (CPython's `Counter.__neg__`).

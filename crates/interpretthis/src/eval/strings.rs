@@ -389,7 +389,7 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
             | Value::Float(_)
             | Value::Bool(_)
             | Value::Complex(_)
-            | Value::Decimal(_)
+            | Value::Decimal(..)
             | Value::Fraction(_)
     ) {
         '>'

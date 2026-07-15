@@ -656,7 +656,7 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         // tight for the common case (Decimal("3.14"), Fraction(3, 7))
         // and only loosens for very long decimals, which a Python
         // script under our sandbox is unlikely to construct.
-        Value::Decimal(_) | Value::Fraction(_) => 48,
+        Value::Decimal(..) | Value::Fraction(_) => 48,
         // Bound-method snapshot: pointer-sized header + the captured
         // receiver's own footprint (which is itself bounded by the
         // memory limit since the receiver had to live in a variable).

@@ -205,7 +205,7 @@ pub(super) async fn try_builtin(
                 Value::String(s) => Ok(Some(parse_int_str(s, 10)?)),
                 // Decimal / Fraction truncate toward zero, as CPython's int()
                 // does for the numeric tower.
-                Value::Decimal(d) => {
+                Value::Decimal(d, _) => {
                     let (int_val, _) = d.with_scale(0).as_bigint_and_exponent();
                     Ok(Some(crate::value::int_from_bigint(int_val)))
                 }
@@ -740,7 +740,7 @@ pub(super) async fn try_builtin(
                 // abs(complex) is the magnitude (a float): sqrt(re^2 + im^2).
                 Value::Complex(c) => Ok(Some(Value::Float(c.norm()))),
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
-                Value::Decimal(d) => Ok(Some(Value::Decimal(Box::new(d.abs())))),
+                Value::Decimal(d, _) => Ok(Some(Value::Decimal(Box::new(d.abs()), false))),
                 Value::Fraction(fr) => {
                     use num_traits::Signed as _;
                     Ok(Some(Value::Fraction(Box::new((**fr).abs()))))

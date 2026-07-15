@@ -141,7 +141,16 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
         Value::Complex(c) => pyo3::types::PyComplex::from_doubles(py, c.re, c.im).into_any(),
         Value::Ellipsis => py.import("builtins")?.getattr("Ellipsis")?,
 
-        Value::Decimal(d) => (**d).clone().into_pyobject(py)?.into_any(),
+        Value::Decimal(d, neg_zero) => {
+            if *neg_zero {
+                // pyo3's BigDecimal conversion cannot emit a signed zero, so
+                // rebuild the negative zero through decimal.Decimal(str).
+                let s = format!("-{d}");
+                py.import("decimal")?.getattr("Decimal")?.call1((s,))?
+            } else {
+                (**d).clone().into_pyobject(py)?.into_any()
+            }
+        }
         Value::Fraction(f) => (**f).clone().into_pyobject(py)?.into_any(),
 
         Value::Date(d) => d.into_pyobject(py)?.into_any(),
@@ -288,7 +297,12 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     // gate any object with a numeric `__str__` or `.numerator`/`.denominator`
     // (numpy.int64, a Money class) would be silently reinterpreted.
     if is_instance_of(ob, "decimal", "Decimal")? {
-        return Ok(Value::Decimal(Box::new(ob.extract::<BigDecimal>()?)));
+        use num_traits::Zero as _;
+        let big = ob.extract::<BigDecimal>()?;
+        // `bigdecimal` drops the sign of a zero; recover CPython's negative
+        // zero (`Decimal('-0.0')`) from the repr so it round-trips.
+        let neg_zero = big.is_zero() && ob.str()?.to_str()?.trim_start().starts_with('-');
+        return Ok(Value::Decimal(Box::new(big), neg_zero));
     }
     if is_instance_of(ob, "fractions", "Fraction")? {
         return Ok(Value::Fraction(Box::new(ob.extract::<BigRational>()?)));

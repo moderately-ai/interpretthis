@@ -676,7 +676,7 @@ fn decimal_methods(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
-    let Value::Decimal(d) = obj else {
+    let Value::Decimal(d, _) = obj else {
         return Err(type_mismatch("Decimal"));
     };
     crate::eval::functions::reject_kwargs(method, kwargs)?;
@@ -747,7 +747,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::TimeDelta(_) => Some(timedelta_methods),
         Value::ReMatch(_) => Some(re_match_methods),
         Value::RePattern(_) => Some(re_pattern_methods),
-        Value::Decimal(_) => Some(decimal_methods),
+        Value::Decimal(..) => Some(decimal_methods),
         Value::Fraction(_) => Some(fraction_methods),
         Value::HashDigest { .. } => Some(hash_digest_methods),
         _ => None,
@@ -825,7 +825,7 @@ fn numeric_integral(obj: &Value, method: &str) -> Option<Value> {
             };
             Some(crate::value::int_from_bigint(r.to_integer()))
         }
-        Value::Decimal(d) => {
+        Value::Decimal(d, _) => {
             use bigdecimal::BigDecimal;
             let rounding = match method {
                 "__floor__" => bigdecimal::RoundingMode::Floor,

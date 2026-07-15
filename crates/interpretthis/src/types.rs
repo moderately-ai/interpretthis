@@ -634,7 +634,7 @@ fn type_of(value: &Value) -> &'static TypeObject {
         Value::DefaultDict { .. } => &DEFAULTDICT_TYPE,
         Value::ChainMap(_) => &CHAINMAP_TYPE,
         Value::DictView { .. } => &DICTVIEW_TYPE,
-        Value::Decimal(_) => &DECIMAL_TYPE,
+        Value::Decimal(..) => &DECIMAL_TYPE,
         Value::Fraction(_) => &FRACTION_TYPE,
         Value::Date(_) => &DATE_TYPE,
         Value::DateTime { .. } => &DATETIME_TYPE,
@@ -3306,7 +3306,7 @@ fn defaultdict_len(value: &Value) -> Result<usize, EvalError> {
 
 fn decimal_to_bigdecimal(value: &Value) -> Option<bigdecimal::BigDecimal> {
     match value {
-        Value::Decimal(d) => Some((**d).clone()),
+        Value::Decimal(d, _) => Some((**d).clone()),
         Value::Int(i) => Some(bigdecimal::BigDecimal::from(*i)),
         Value::BigInt(i) => Some(bigdecimal::BigDecimal::from(i.as_ref().clone())),
         Value::Bool(b) => Some(bigdecimal::BigDecimal::from(i64::from(*b))),
@@ -3397,7 +3397,7 @@ fn decimal_arith(
             }
         }
     };
-    Some(Ok(Value::Decimal(Box::new(result))))
+    Some(Ok(Value::Decimal(Box::new(result), false)))
 }
 
 // ---------------------------------------------------------------------------

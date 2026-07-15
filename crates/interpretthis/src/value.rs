@@ -542,7 +542,13 @@ pub enum Value {
     /// matches CPython's exact-input/exact-output contract (no
     /// binary-float roundoff). Boxed because `BigDecimal` is large
     /// (~48 bytes) and would inflate every `Value` slot otherwise.
-    Decimal(Box<bigdecimal::BigDecimal>),
+    ///
+    /// The `bool` is the negative-zero flag: `bigdecimal` cannot represent
+    /// `-0` (a zero mantissa is signless), yet CPython's `Decimal('-0.0')`
+    /// keeps its sign for `str`/`repr`. The flag is only ever `true` when
+    /// the value is zero, and it participates in neither equality nor
+    /// hashing (`-0 == 0` and they share a hash, as in CPython).
+    Decimal(Box<bigdecimal::BigDecimal>, bool),
     /// `fractions.Fraction` — auto-simplifying rational (numerator /
     /// denominator). `BigRational` keeps arbitrary precision so
     /// LCM-driven addition does not overflow. Boxed for the same
@@ -1017,14 +1023,14 @@ impl PartialEq for Value {
             // both BigDecimal and BigRational normalise on construction
             // so identical mathematical values compare equal even when
             // produced by different arithmetic paths.
-            (Self::Decimal(a), Self::Decimal(b)) => a == b,
+            (Self::Decimal(a, _), Self::Decimal(b, _)) => a == b,
             (Self::Fraction(a), Self::Fraction(b)) => a == b,
             // Decimal == int: lift int into Decimal and compare; matches
             // CPython where `Decimal(5) == 5 is True`.
-            (Self::Decimal(d), Self::Int(i)) | (Self::Int(i), Self::Decimal(d)) => {
+            (Self::Decimal(d, _), Self::Int(i)) | (Self::Int(i), Self::Decimal(d, _)) => {
                 d.as_ref() == &bigdecimal::BigDecimal::from(*i)
             }
-            (Self::Decimal(d), Self::BigInt(i)) | (Self::BigInt(i), Self::Decimal(d)) => {
+            (Self::Decimal(d, _), Self::BigInt(i)) | (Self::BigInt(i), Self::Decimal(d, _)) => {
                 d.as_ref() == &bigdecimal::BigDecimal::from(i.as_ref().clone())
             }
             // Fraction == int / Fraction == Fraction-of-int: lift int
@@ -1658,7 +1664,7 @@ impl Value {
             // Decimal / Fraction are falsy at zero, matching CPython
             // (`bool(Decimal("0")) is False`, `bool(Fraction(0)) is
             // False`).
-            Self::Decimal(d) => !d.is_zero(),
+            Self::Decimal(d, _) => !d.is_zero(),
             Self::Fraction(f) => !f.numer().is_zero(),
             // `bool(complex)` is False only when both parts are zero.
             Self::Complex(c) => c.re != 0.0 || c.im != 0.0,
@@ -1737,7 +1743,7 @@ impl Value {
             // returns the class name so `type(x).__name__` reflects
             // the enum class.
             Self::EnumMember { .. } => "enum",
-            Self::Decimal(_) => "Decimal",
+            Self::Decimal(..) => "Decimal",
             Self::Fraction(_) => "Fraction",
             Self::Lazy { .. } | Self::Generator { .. } => "generator",
             Self::BuiltinIter { kind, .. } => kind.type_name(),
@@ -2139,7 +2145,7 @@ impl fmt::Display for Value {
             // (no exponent unless the input used one). BigDecimal's
             // Display matches that for our use; we strip its scientific-
             // notation tail when the value is finite and small enough.
-            Self::Decimal(d) => format_decimal_str(f, d),
+            Self::Decimal(d, neg_zero) => format_decimal_str(f, d, *neg_zero),
             // CPython `str(Fraction(n, d))` returns `n/d` (or just `n`
             // when d == 1). BigRational's Display already produces this
             // shape with a guaranteed positive denominator.
@@ -2215,12 +2221,18 @@ impl fmt::Display for Value {
 /// Format a `Decimal` with CPython's `to-scientific-string` algorithm, so the
 /// exponent form is preserved (`Decimal("1E+2")` prints `1E+2`, not `100`) and
 /// small/large magnitudes switch to `E` notation exactly where CPython does.
-fn format_decimal_str(f: &mut fmt::Formatter<'_>, d: &bigdecimal::BigDecimal) -> fmt::Result {
+fn format_decimal_str(
+    f: &mut fmt::Formatter<'_>,
+    d: &bigdecimal::BigDecimal,
+    neg_zero: bool,
+) -> fmt::Result {
     use num_traits::Signed as _;
     // value == mantissa * 10^(-scale); CPython's exponent is `-scale` and the
     // coefficient is the mantissa's absolute-value digit string.
     let (mantissa, scale) = d.as_bigint_and_exponent();
-    let negative = mantissa.is_negative();
+    // `neg_zero` is only ever set on a zero value; it restores the leading
+    // sign that `bigdecimal` drops (`str(Decimal('-0.0'))` is `-0.0`).
+    let negative = mantissa.is_negative() || neg_zero;
     let digits = mantissa.abs().to_string();
     let exp: i64 = -scale;
     let sign = if negative { "-" } else { "" };
@@ -2388,7 +2400,7 @@ impl Value {
                 b.to_f64()
             }
             Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-            Self::Decimal(d) => {
+            Self::Decimal(d, _) => {
                 use num_traits::ToPrimitive as _;
                 d.to_f64()
             }
@@ -2631,7 +2643,7 @@ impl Value {
             Self::DefaultDict(data) => json_object(data.items.iter())?,
             // Decimal keeps its exact digits via arbitrary_precision; Fraction
             // has no JSON form, so its float value is used.
-            Self::Decimal(d) => {
+            Self::Decimal(d, _) => {
                 serde_json::from_str(&d.to_string()).unwrap_or_else(|_| J::String(d.to_string()))
             }
             Self::Fraction(fr) => {
