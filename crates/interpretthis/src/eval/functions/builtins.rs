@@ -815,7 +815,8 @@ pub(super) async fn try_builtin(
             let mut min_key = apply_key_fn(state, &min_val, key_fn, tools).await?;
             for item in items.iter().skip(1) {
                 let item_key = apply_key_fn(state, item, key_fn, tools).await?;
-                if crate::eval::operations::compare_lt(&item_key, &min_key)? {
+                // Async `op::lt` so instance keys dispatch through `__lt__`.
+                if crate::eval::op::lt(state, &item_key, &min_key, tools).await? {
                     min_val = item.clone();
                     min_key = item_key;
                 }
@@ -848,7 +849,8 @@ pub(super) async fn try_builtin(
             let mut max_key = apply_key_fn(state, &max_val, key_fn, tools).await?;
             for item in items.iter().skip(1) {
                 let item_key = apply_key_fn(state, item, key_fn, tools).await?;
-                if crate::eval::operations::compare_lt(&max_key, &item_key)? {
+                // Async `op::lt` so instance keys dispatch through `__lt__`.
+                if crate::eval::op::lt(state, &max_key, &item_key, tools).await? {
                     max_val = item.clone();
                     max_key = item_key;
                 }
@@ -876,13 +878,11 @@ pub(super) async fn try_builtin(
             }
             let mut total = start;
             for item in items {
-                total = crate::eval::operations::apply_binop(
-                    &total,
-                    &item,
-                    ast::Operator::Add,
-                    state.decimal_prec,
-                    state.config.max_int_bits,
-                )?;
+                // Use the async operator path so a custom start / element type
+                // dispatches through `__add__`/`__radd__` (e.g. summing a list
+                // of instances, where `0 + obj` needs the reflected slot).
+                total =
+                    crate::eval::op::binop(state, ast::Operator::Add, &total, &item, tools).await?;
             }
             Ok(Some(total))
         }
