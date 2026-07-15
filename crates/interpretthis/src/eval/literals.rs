@@ -251,43 +251,12 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
     }
 }
 
-/// Derive the hashable key for a float, folding exact integers into `Int`.
-///
-/// CPython unifies numeric keys: `hash(2.0) == hash(2)` and `{2: x}[2.0]` hits
-/// the same slot. Folding a float with an exact `i64` value into `ValueKey::Int`
-/// preserves that dict invariant (Python-equal values share one slot) across the
-/// int/float boundary — the load-bearing correctness property, since a dict
-/// holding two equal-but-distinct keys silently corrupts `in`/`len`/lookup.
-///
-/// The fold uses a round-trip guard (`as_int as f64 == f`): only values whose
-/// `i64` conversion is exact are folded, so `1e30` and any non-integral float
-/// keep their bit pattern. NaN/±inf are not finite, so they also keep bits and
-/// match only an identical bit pattern (a NaN key thus never re-matches a freshly
-/// computed NaN, mirroring CPython's identity-based NaN keys closely enough).
-///
-/// Known cosmetic deviation: a standalone integral-float key prints as the int
-/// (`{2.0: x}` → `{2: x}`) because the stored key is `Int(2)`. CPython retains
-/// the first-inserted key object and would print `2.0`. Preserving the equality
-/// invariant is worth this display difference; full fidelity needs a separate
-/// stored-key vs. lookup-key split, which the `IndexMap<ValueKey, _>` model does
-/// not have.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::float_cmp,
-    reason = "round-trip guarded: `Int(as_int)` is returned only when \
-              `as_int as f64 == f` — an exact equality check is the point (an \
-              epsilon comparison would mis-fold non-integral values), so the \
-              truncating cast is exact and any precision loss falls through to \
-              the bit-pattern key"
-)]
+/// Derive the hashable key for a float. The float keeps its own `Float` key
+/// (retaining its `2.0` repr), but an integral float is made cross-equal to the
+/// matching `Int`/`BigInt` key via `ValueKey`'s hand-written `PartialEq`/`Hash`
+/// (`hash(2.0) == hash(2)` and `{2: x}[2.0]` hit the same slot). So `{2.0: x}`
+/// prints `{2.0: x}` (CPython fidelity) while `{2, 2.0}` still dedups.
 fn float_to_key(f: f64) -> ValueKey {
-    if f.is_finite() && f.fract() == 0.0 {
-        let as_int = f as i64;
-        if as_int as f64 == f {
-            return ValueKey::Int(as_int);
-        }
-    }
     ValueKey::Float(f.to_bits())
 }
 

@@ -1101,8 +1101,8 @@ pub enum ValueKey {
     Int(i64),
     /// Arbitrary-precision int key (outside i64).
     BigInt(num_bigint::BigInt),
-    /// Non-integral float key, stored as raw IEEE-754 bits so the key derives
-    /// `Eq`/`Hash` (which `f64` cannot). Integral floats never reach this
+    /// Float key, stored as raw IEEE-754 bits so the key derives
+    /// `Eq`/`Hash` (which `f64` cannot). An integral float is cross-equal to the
     /// variant: dict-key coercion folds `2.0` into
     /// `Int(2)` so that `{2: x}[2.0]` hits the same slot, matching CPython's
     /// `hash(2.0) == hash(2)` numeric-key unification.
@@ -1182,6 +1182,18 @@ impl PartialEq for ValueKey {
                 i == &num_bigint::BigInt::from(i64::from(*b))
             }
             (Self::Float(a), Self::Float(b)) => a == b,
+            // An integral float key is numerically equal to the matching int
+            // key (`{2: x}[2.0]` is one slot), so they must compare equal here
+            // and hash alike below. `hash(2.0) == hash(2)` in CPython.
+            (Self::Float(bits), Self::Int(i)) | (Self::Int(i), Self::Float(bits)) => {
+                float_key_i64(*bits) == Some(*i)
+            }
+            (Self::Float(bits), Self::Bool(b)) | (Self::Bool(b), Self::Float(bits)) => {
+                float_key_i64(*bits) == Some(i64::from(*b))
+            }
+            (Self::Float(bits), Self::BigInt(n)) | (Self::BigInt(n), Self::Float(bits)) => {
+                float_key_i64(*bits).is_some_and(|i| n == &num_bigint::BigInt::from(i))
+            }
             (Self::Complex(ar, ai), Self::Complex(br, bi)) => ar == br && ai == bi,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Tuple(a), Self::Tuple(b)) => a == b,
@@ -1236,6 +1248,28 @@ impl PartialEq for ValueKey {
 
 impl Eq for ValueKey {}
 
+/// The `i64` value of a float key when it is finite, integral, and round-trips
+/// exactly through `i64` — the condition for it to be equal to (and hash like)
+/// an int key. Returns `None` for non-integral, non-finite, or out-of-range
+/// floats, which keep their own float identity.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    reason = "exact round-trip guard: `i` is returned only when `i as f64 == f`, \
+              so the truncating cast is exact and the equality check is the point"
+)]
+fn float_key_i64(bits: u64) -> Option<i64> {
+    let f = f64::from_bits(bits);
+    if f.is_finite() && f.fract() == 0.0 {
+        let i = f as i64;
+        if i as f64 == f {
+            return Some(i);
+        }
+    }
+    None
+}
+
 impl core::hash::Hash for ValueKey {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         // Hash MUST agree with PartialEq above: Bool(b) and Int(b as i64)
@@ -1281,8 +1315,16 @@ impl core::hash::Hash for ValueKey {
                 }
             }
             Self::Float(bits) => {
-                FLOAT_TAG.hash(state);
-                bits.hash(state);
+                // An i64-valued integral float hashes in the NUMERIC bucket so it
+                // collides with the equal Int/Bool key (agreeing with PartialEq);
+                // every other float hashes by its bit pattern.
+                if let Some(i) = float_key_i64(*bits) {
+                    NUMERIC_TAG.hash(state);
+                    i.hash(state);
+                } else {
+                    FLOAT_TAG.hash(state);
+                    bits.hash(state);
+                }
             }
             Self::Complex(re, im) => {
                 COMPLEX_TAG.hash(state);
@@ -2853,9 +2895,6 @@ impl fmt::Display for ValueKey {
             Self::Bool(false) => write!(f, "False"),
             Self::Int(i) => write!(f, "{i}"),
             Self::BigInt(i) => write!(f, "{i}"),
-            // Integral floats never reach this variant (folded to Int); the
-            // shared formatter still handles them for parity if one is built
-            // directly.
             Self::Float(bits) => write_python_float(f, f64::from_bits(*bits)),
             Self::Complex(re, im) => write!(
                 f,

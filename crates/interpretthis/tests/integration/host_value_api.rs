@@ -9,15 +9,21 @@
 use interpretthis::{InterpreterError, Value, ValueKey, shared_list};
 
 #[test]
-fn to_key_folds_integral_float_onto_the_int_slot() {
+fn to_key_integral_float_shares_the_int_slot() {
     // The invariant that makes this worth exposing rather than reimplementing:
     // CPython's `hash(2.0) == hash(2)`, so `{2: x}[2.0]` must hit one slot. A
     // host that derived keys itself and missed this would build a dict holding
     // two equal-but-distinct keys, silently corrupting `in` / `len` / lookup.
+    // The integral float keeps its own `Float` key (so `{2.0: x}` still reprs as
+    // `2.0`), but it compares equal to — and hashes like — the int key.
     let from_float = Value::Float(2.0).to_key().expect("float is hashable");
     let from_int = Value::Int(2).to_key().expect("int is hashable");
     assert_eq!(from_float, from_int);
-    assert!(matches!(from_float, ValueKey::Int(2)));
+    assert!(matches!(from_float, ValueKey::Float(_)));
+    // Equal keys must hash identically for the shared-slot invariant to hold.
+    use std::hash::{BuildHasher as _, RandomState};
+    let hasher = RandomState::new();
+    assert_eq!(hasher.hash_one(&from_float), hasher.hash_one(&from_int));
 
     // Non-integral floats keep their own slot.
     let fractional = Value::Float(2.5).to_key().expect("float is hashable");
