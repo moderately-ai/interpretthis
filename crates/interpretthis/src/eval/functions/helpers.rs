@@ -395,9 +395,12 @@ pub(super) fn object_id(v: &Value) -> i64 {
         // Sets/frozensets are Arc-backed reference types (`is` is pointer
         // identity), so their id must be the shared address too — otherwise
         // mutating a set would change its id, and an alias would report a
-        // different id than its source.
+        // different id than its source. dict/bytearray/array are the same.
         Value::Set(a) => Arc::as_ptr(a).addr(),
         Value::Frozenset(a) => Arc::as_ptr(a).addr(),
+        Value::Dict(a) => Arc::as_ptr(a).addr(),
+        Value::ByteArray(a) => Arc::as_ptr(a).addr(),
+        Value::Array { items, .. } => Arc::as_ptr(items).addr(),
         other => {
             use std::hash::{Hash as _, Hasher as _};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();

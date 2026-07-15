@@ -1383,6 +1383,11 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
         // but two separately-built equal sets are distinct objects.
         (Value::Set(a), Value::Set(b)) => Arc::ptr_eq(a, b),
         (Value::Frozenset(a), Value::Frozenset(b)) => Arc::ptr_eq(a, b),
+        // dict/bytearray/array are Arc-backed mutable reference types too: an
+        // alias `is` its source, two separately-built equal objects are not.
+        (Value::Dict(a), Value::Dict(b)) => Arc::ptr_eq(a, b),
+        (Value::ByteArray(a), Value::ByteArray(b)) => Arc::ptr_eq(a, b),
+        (Value::Array { items: a, .. }, Value::Array { items: b, .. }) => Arc::ptr_eq(a, b),
         // Iterator objects are identified by the id/cursor keying their state
         // in the interpreter, so a generator/lazy/builtin iterator is identical
         // exactly to itself (`g is g`, `iter(g) is g`).
@@ -1400,7 +1405,10 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::Lazy { .. }
             | Value::BuiltinIter { .. }
             | Value::Set(_)
-            | Value::Frozenset(_),
+            | Value::Frozenset(_)
+            | Value::Dict(_)
+            | Value::ByteArray(_)
+            | Value::Array { .. },
             _,
         )
         | (
@@ -1414,7 +1422,10 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::Lazy { .. }
             | Value::BuiltinIter { .. }
             | Value::Set(_)
-            | Value::Frozenset(_),
+            | Value::Frozenset(_)
+            | Value::Dict(_)
+            | Value::ByteArray(_)
+            | Value::Array { .. },
         ) => false,
         // Immutable value types: equality fallback (see doc).
         _ => values_equal(left, right),
