@@ -342,6 +342,18 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
         return Ok(Value::String(format!("{value}").into()));
     }
 
+    // A user-class instance reaching here has no `__format__` slot (the callers
+    // dispatch that first) yet was given a non-empty spec. CPython's inherited
+    // `object.__format__` rejects exactly this, naming the class:
+    // `TypeError: unsupported format string passed to <Class>.__format__`.
+    if let Value::Instance(inst) = value {
+        return Err(InterpreterError::TypeError(format!(
+            "unsupported format string passed to {}.__format__",
+            inst.class_name
+        ))
+        .into());
+    }
+
     // Detect fill and align
     let (fill, align, rest) = parse_fill_align(&chars);
 
