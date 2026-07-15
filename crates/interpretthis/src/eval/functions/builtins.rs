@@ -889,12 +889,23 @@ pub(super) async fn try_builtin(
         "all" => {
             check_arg_count(name, args, 1, 1)?;
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
-            Ok(Some(Value::Bool(items.iter().all(Value::is_truthy))))
+            // Async truthiness so instance elements dispatch __bool__/__len__.
+            for item in &items {
+                if !crate::eval::op::truthy(state, item, tools).await? {
+                    return Ok(Some(Value::Bool(false)));
+                }
+            }
+            Ok(Some(Value::Bool(true)))
         }
         "any" => {
             check_arg_count(name, args, 1, 1)?;
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
-            Ok(Some(Value::Bool(items.iter().any(Value::is_truthy))))
+            for item in &items {
+                if crate::eval::op::truthy(state, item, tools).await? {
+                    return Ok(Some(Value::Bool(true)));
+                }
+            }
+            Ok(Some(Value::Bool(false)))
         }
         "sorted" => {
             // `sorted` takes exactly one positional (the iterable); `key` and
