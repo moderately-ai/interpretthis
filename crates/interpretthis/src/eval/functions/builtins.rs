@@ -701,22 +701,31 @@ pub(super) async fn try_builtin(
             // UnboundClassMethod) are all callable. Method markers
             // (BoundMethod / BuiltinTypeMethod) and ModuleFunction are
             // callable. Anything else is NOT callable (CPython parity).
-            let is_callable = matches!(
-                &args[0],
-                Value::Function(_)
-                    | Value::Lambda(_)
-                    | Value::Class(_)
-                    | Value::BoundMethod { .. }
-                    | Value::BuiltinTypeMethod { .. }
-                    | Value::ModuleFunction { .. }
-                    | Value::BuiltinName(_)
-                    | Value::ToolName(_)
-                    | Value::ExceptionType(_)
-                    | Value::ExceptionMethod { .. }
-                    | Value::UnboundClassMethod { .. }
-                    | Value::Partial(_)
-                    | Value::LruCache(_)
-            );
+            let is_callable = match &args[0] {
+                // An instance is callable iff its class (or an MRO ancestor)
+                // defines `__call__`.
+                Value::Instance(inst) => state.classes.get(&inst.class_name).is_some_and(|class| {
+                    class.mro.iter().any(|anc| {
+                        state.classes.get(anc).is_some_and(|c| c.methods.contains_key("__call__"))
+                    })
+                }),
+                other => matches!(
+                    other,
+                    Value::Function(_)
+                        | Value::Lambda(_)
+                        | Value::Class(_)
+                        | Value::BoundMethod { .. }
+                        | Value::BuiltinTypeMethod { .. }
+                        | Value::ModuleFunction { .. }
+                        | Value::BuiltinName(_)
+                        | Value::ToolName(_)
+                        | Value::ExceptionType(_)
+                        | Value::ExceptionMethod { .. }
+                        | Value::UnboundClassMethod { .. }
+                        | Value::Partial(_)
+                        | Value::LruCache(_)
+                ),
+            };
             Ok(Some(Value::Bool(is_callable)))
         }
         "abs" => {
