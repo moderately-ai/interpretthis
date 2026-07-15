@@ -763,6 +763,84 @@ fn timedelta_methods(
         .map(MethodOutcome::pure)
 }
 
+/// A slice bound as an int (`None` -> absent). `TypeError` for a non-int,
+/// non-None component, matching `slice.indices`.
+fn slice_component(v: &Value) -> Result<Option<i64>, EvalError> {
+    match v {
+        Value::None => Ok(None),
+        Value::Int(n) => Ok(Some(*n)),
+        Value::Bool(b) => Ok(Some(i64::from(*b))),
+        Value::BigInt(b) => {
+            use num_traits::{Signed as _, ToPrimitive as _};
+            // A magnitude beyond i64 saturates by sign; `indices` then clamps it
+            // to the sequence bounds, so the exact value is immaterial.
+            Ok(Some(b.to_i64().unwrap_or(if b.is_negative() { i64::MIN } else { i64::MAX })))
+        }
+        _ => Err(InterpreterError::TypeError(
+            "slice indices must be integers or None or have an __index__ method".into(),
+        )
+        .into()),
+    }
+}
+
+fn slice_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Slice(slice) = obj else {
+        return Err(type_mismatch("slice"));
+    };
+    crate::eval::functions::reject_kwargs(method, kwargs)?;
+    match method {
+        // `slice.indices(length)` -> the `(start, stop, step)` a sequence of
+        // `length` would use, per CPython's `PySlice_GetIndicesEx`.
+        "indices" => {
+            let length = arg1(method, args)?.as_int().ok_or_else(|| {
+                EvalError::from(InterpreterError::TypeError(
+                    "slice indices must be integers".into(),
+                ))
+            })?;
+            if length < 0 {
+                return Err(
+                    InterpreterError::ValueError("length should not be negative".into()).into()
+                );
+            }
+            let step = slice_component(&slice.step)?.unwrap_or(1);
+            if step == 0 {
+                return Err(InterpreterError::ValueError("slice step cannot be zero".into()).into());
+            }
+            let negative = step < 0;
+            let (lower, upper) = if negative { (-1, length - 1) } else { (0, length) };
+            let clamp = |raw: Option<i64>, default: i64| -> i64 {
+                match raw {
+                    None => default,
+                    Some(mut v) => {
+                        if v < 0 {
+                            v += length;
+                            v.max(lower)
+                        } else {
+                            v.min(upper)
+                        }
+                    }
+                }
+            };
+            let start = clamp(slice_component(&slice.start)?, if negative { upper } else { lower });
+            let stop = clamp(slice_component(&slice.stop)?, if negative { lower } else { upper });
+            Ok(MethodOutcome::pure(Value::Tuple(vec![
+                Value::Int(start),
+                Value::Int(stop),
+                Value::Int(step),
+            ])))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'slice' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 fn re_match_methods(
     obj: &mut Value,
     method: &str,
@@ -934,6 +1012,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Set(_) => Some(set_methods),
         Value::Frozenset(_) => Some(frozenset_methods),
         Value::Tuple(_) => Some(tuple_methods),
+        Value::Slice(_) => Some(slice_methods),
         Value::Range { .. } => Some(range_methods),
         Value::Int(_) | Value::BigInt(_) => Some(int_methods),
         Value::Float(_) => Some(float_methods),
