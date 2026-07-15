@@ -119,12 +119,6 @@ pub mod render;
 pub mod statements;
 pub mod strings;
 
-/// Evaluate a single statement.
-///
-/// Each match arm is a **separately** `Box::pin`'d future so the polled
-/// state machine is only as large as the active arm (not the max of all
-/// arms). That cuts native stack use per recursive Python call and is
-/// what lets realistic recursion depths work on default OS stacks.
 /// Wrap a *compound* statement's evaluation (`if`/`for`/`while`/`with`/`try`/
 /// `match`/class body — the ones that recurse into a nested block) with the
 /// expression-depth guard and on-demand stack growth, so deeply nested blocks
@@ -142,6 +136,12 @@ macro_rules! guarded_block {
     };
 }
 
+/// Evaluate a single statement.
+///
+/// Each match arm is a **separately** `Box::pin`'d future so the polled
+/// state machine is only as large as the active arm (not the max of all
+/// arms). That cuts native stack use per recursive Python call and is
+/// what lets realistic recursion depths work on default OS stacks.
 pub fn eval_stmt<'a>(
     state: &'a mut InterpreterState,
     stmt: &'a Stmt,
