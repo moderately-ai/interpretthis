@@ -160,6 +160,15 @@ pub fn render<'a>(
                 out.push('}');
                 Ok(out)
             }
+            // `str(exc)` mirrors CPython's BaseException.__str__: no args
+            // renders empty, a single arg renders as that arg's str, and
+            // multiple args render as the args tuple's repr. `repr(exc)`
+            // keeps the `Type(args…)` form from `value.repr()`.
+            Value::Exception(e) if matches!(mode, RenderMode::Display) => match e.args.as_slice() {
+                [] => Ok(String::new()),
+                [single] => render(state, single, RenderMode::Display, tools).await,
+                many => Ok(render_sequence(state, many, "(", "", tools).await? + ")"),
+            },
             _ => Ok(match mode {
                 RenderMode::Repr => value.repr(),
                 RenderMode::Display => format!("{value}"),
