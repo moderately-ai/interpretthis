@@ -873,6 +873,30 @@ fn try_builtin_dunder(
             Some(v) => pure(v),
             None => Ok(None),
         },
+        // `x.__int__()` truncates toward zero to an int (numeric receivers only);
+        // `__index__` is the lossless int for the integer types only.
+        "__int__" => match numeric_integral(obj, "__trunc__") {
+            Some(v) => pure(v),
+            None => Ok(None),
+        },
+        "__index__" => match obj {
+            Value::Int(_) | Value::BigInt(_) => pure(obj.clone()),
+            Value::Bool(b) => pure(Value::Int(i64::from(*b))),
+            _ => Ok(None),
+        },
+        // `x.__float__()` — numeric receivers only.
+        "__float__" => match obj {
+            Value::Int(_)
+            | Value::BigInt(_)
+            | Value::Float(_)
+            | Value::Bool(_)
+            | Value::Decimal(..)
+            | Value::Fraction(_) => match obj.as_float() {
+                Some(f) => pure(Value::Float(f)),
+                None => Ok(None),
+            },
+            _ => Ok(None),
+        },
         // `x.__round__()` returns an int (round-half-to-even); `x.__round__(n)`
         // returns the same numeric type rounded to that scale. Mirrors the
         // `round()` builtin so both surfaces agree.
