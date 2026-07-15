@@ -268,6 +268,38 @@ pub async fn eval_call(
                                     method: method_name.to_string(),
                                 })
                             }
+                            // `add_note` (PEP 678) mutates the exception in
+                            // place — it appends to `__notes__` — so it must run
+                            // here against the actual slot (`target`) rather than
+                            // on the cloned receiver the deferred `Dispatch::Exception`
+                            // path carries, which would drop the write-back.
+                            Value::Exception(exc) if method_name == "add_note" => {
+                                let note = resolved_args.first().ok_or_else(|| {
+                                    EvalError::from(InterpreterError::TypeError(
+                                        "add_note() takes exactly one positional argument (0 given)"
+                                            .into(),
+                                    ))
+                                })?;
+                                if !matches!(note, Value::String(_)) {
+                                    return Err(InterpreterError::TypeError(format!(
+                                        "note must be a str, not {}",
+                                        note.type_name()
+                                    ))
+                                    .into());
+                                }
+                                match exc.fields.get_mut("__notes__") {
+                                    Some(Value::List(list)) => list.lock().push(note.clone()),
+                                    _ => {
+                                        exc.fields.insert(
+                                            "__notes__".to_string(),
+                                            Value::List(crate::value::shared_list(vec![
+                                                note.clone(),
+                                            ])),
+                                        );
+                                    }
+                                }
+                                Ok(Dispatch::Done(Value::None, 0))
+                            }
                             Value::Exception(_) => Ok(Dispatch::Exception {
                                 receiver: target.clone(),
                                 method: method_name.to_string(),

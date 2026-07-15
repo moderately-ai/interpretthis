@@ -697,6 +697,26 @@ pub(crate) fn call_exception_method(
     use crate::error::InterpreterError;
     use crate::value::{ExceptionValue, Value};
 
+    // `add_note` (PEP 678) on a *temporary* exception (`ValueError("x").add_note(...)`)
+    // has no slot to write back to, so the note is discarded — but the call must
+    // still type-check its argument and return None, not fall into the matcher
+    // logic below (whose arg is an exception type, not a note string).
+    if method == "add_note" {
+        let note = args.first().ok_or_else(|| {
+            InterpreterError::TypeError(
+                "add_note() takes exactly one positional argument (0 given)".to_string(),
+            )
+        })?;
+        if !matches!(note, Value::String(_)) {
+            return Err(InterpreterError::TypeError(format!(
+                "note must be a str, not {}",
+                note.type_name()
+            ))
+            .into());
+        }
+        return Ok(Value::None);
+    }
+
     let matcher = args.first().ok_or_else(|| {
         InterpreterError::TypeError(format!("{method}() takes exactly 1 argument (0 given)"))
     })?;

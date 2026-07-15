@@ -610,9 +610,16 @@ pub(super) fn check_isinstance(state: &InterpreterState, obj: &Value, type_name:
             (Value::Bool(_), "int") | (Value::Counter(_), "dict") => true,
             // Walk the builtin exception hierarchy, so
             // `isinstance(KeyError(), LookupError)` is True (was flat: it only
-            // matched the exact type or "Exception").
+            // matched the exact type or "Exception"). A *user-defined* exception
+            // (`class NotFound(AppError)`) is registered in `state.classes`, so
+            // also honour its MRO — otherwise `isinstance(NotFound(), AppError)`
+            // wrongly returns False for the user-declared parent.
             (Value::Exception(e), tn) => {
-                crate::eval::exceptions::builtin_exception_issubclass(&e.type_name, tn)
+                state
+                    .classes
+                    .get(&e.type_name)
+                    .is_some_and(|class| class.mro.iter().any(|ancestor| ancestor == tn))
+                    || crate::eval::exceptions::builtin_exception_issubclass(&e.type_name, tn)
             }
             _ => false,
         }
