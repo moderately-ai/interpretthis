@@ -1072,6 +1072,11 @@ pub struct PropertyDef {
     pub getter: FunctionDef,
     pub setter: Option<FunctionDef>,
     pub deleter: Option<FunctionDef>,
+    /// `functools.cached_property`: a *non-data* descriptor. Its getter runs
+    /// once, on first access; the result is stored in the instance dict, which
+    /// then shadows the descriptor on every later access (no re-computation).
+    #[serde(default)]
+    pub cached: bool,
 }
 
 impl PartialEq for Value {

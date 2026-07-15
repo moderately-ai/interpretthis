@@ -251,10 +251,16 @@ pub(crate) async fn getattr_on_value(
         if let Some(prop) =
             crate::eval::classes::lookup_property(state, &inst.class_name, attr_name)
         {
+            // `cached_property` (prop.cached) memoises into the instance dict on
+            // first access; the caching is handled inside invoke_property_getter
+            // so this dispatch keeps its single-await shape (its frame sits on
+            // hot recursive paths — see the engine_recursionerror canary).
+            let cache_key = prop.cached.then_some(attr_name);
             return crate::eval::classes::invoke_property_getter(
                 state,
                 &prop.getter,
                 obj.clone(),
+                cache_key,
                 tools,
             )
             .await;

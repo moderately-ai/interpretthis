@@ -36,6 +36,9 @@ pub fn has_function(name: &str) -> bool {
             | "cache"
             | "_lru_wrap"
             | "total_ordering"
+            // Detected as a method decorator by name at class-def time; the
+            // imported binding just needs to exist so the import succeeds.
+            | "cached_property"
     )
 }
 

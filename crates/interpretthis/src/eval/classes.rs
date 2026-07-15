@@ -487,8 +487,30 @@ fn classify_decorated_method(
             Expr::Name(n) if n.id.as_str() == "property" => {
                 let key = format!("{class_name}.{method_name}__get");
                 let func = register(key, body, source);
-                properties
-                    .insert(method_name, PropertyDef { getter: func, setter: None, deleter: None });
+                properties.insert(
+                    method_name,
+                    PropertyDef { getter: func, setter: None, deleter: None, cached: false },
+                );
+                return Ok(());
+            }
+            // `@cached_property` (functools) or `@functools.cached_property`: a
+            // getter that memoises into the instance dict on first access.
+            Expr::Name(n) if n.id.as_str() == "cached_property" => {
+                let key = format!("{class_name}.{method_name}__get");
+                let func = register(key, body, source);
+                properties.insert(
+                    method_name,
+                    PropertyDef { getter: func, setter: None, deleter: None, cached: true },
+                );
+                return Ok(());
+            }
+            Expr::Attribute(a) if a.attr.as_str() == "cached_property" => {
+                let key = format!("{class_name}.{method_name}__get");
+                let func = register(key, body, source);
+                properties.insert(
+                    method_name,
+                    PropertyDef { getter: func, setter: None, deleter: None, cached: true },
+                );
                 return Ok(());
             }
             Expr::Name(n) if n.id.as_str() == "staticmethod" => {
@@ -1561,10 +1583,27 @@ pub async fn invoke_property_getter(
     state: &mut InterpreterState,
     getter: &FunctionDef,
     instance: Value,
+    cache_key: Option<&str>,
     tools: &Tools,
 ) -> EvalResult {
+    // `functools.cached_property` (cache_key is Some): the instance dict shadows
+    // the descriptor, so return a stored value directly and otherwise run the
+    // getter once and store the result into the shared fields (visible on every
+    // alias). A plain `@property` (cache_key None) always re-runs the getter.
+    if let Some(key) = cache_key {
+        if let Value::Instance(inst) = &instance {
+            if let Some(v) = inst.fields.lock().get(key) {
+                return Ok(v.clone());
+            }
+        }
+    }
     let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
-    let (returned, _self) = call_method(state, getter, instance, call, tools).await?;
+    let (returned, _self) = call_method(state, getter, instance.clone(), call, tools).await?;
+    if let Some(key) = cache_key {
+        if let Value::Instance(inst) = &instance {
+            inst.fields.lock().insert(key.to_string(), returned.clone());
+        }
+    }
     Ok(returned)
 }
 
