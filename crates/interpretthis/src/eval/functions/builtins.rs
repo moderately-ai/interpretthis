@@ -155,10 +155,17 @@ pub(super) async fn try_builtin(
             Ok(Some(Value::Int(to_len_i64(length)?)))
         }
         "range" => {
-            let (start, stop, stride) = match args.len() {
-                1 => (0, value_to_i64(&args[0])?, 1),
-                2 => (value_to_i64(&args[0])?, value_to_i64(&args[1])?, 1),
-                3 => (value_to_i64(&args[0])?, value_to_i64(&args[1])?, value_to_i64(&args[2])?),
+            // range bounds accept anything with __index__, coerced to i64 first.
+            let mut c = Vec::with_capacity(args.len());
+            for a in args {
+                c.push(value_to_i64(
+                    &crate::eval::op::coerce_index(state, a.clone(), tools).await?,
+                )?);
+            }
+            let (start, stop, stride) = match c.len() {
+                1 => (0, c[0], 1),
+                2 => (c[0], c[1], 1),
+                3 => (c[0], c[1], c[2]),
                 _ => {
                     return Err(InterpreterError::TypeError(
                         "range expected at most 3 arguments".into(),
@@ -287,6 +294,24 @@ pub(super) async fn try_builtin(
             check_arg_count(name, args, 0, 1)?;
             if args.is_empty() {
                 return Ok(Some(Value::Float(0.0)));
+            }
+            // A user class converts via __float__ (falling back to __index__),
+            // so float(instance) dispatches before the numeric arms — mirroring
+            // int()/__int__ above.
+            if matches!(&args[0], Value::Instance(_)) {
+                for slot in ["__float__", "__index__"] {
+                    if let Some(result) =
+                        crate::eval::op::instance_unary_dunder(state, &args[0], slot, tools).await
+                    {
+                        let v = result?;
+                        return Ok(Some(Value::Float(v.as_float().ok_or_else(|| {
+                            EvalError::from(InterpreterError::TypeError(format!(
+                                "{slot} returned non-float (type {})",
+                                v.type_name()
+                            )))
+                        })?)));
+                    }
+                }
             }
             match &args[0] {
                 Value::String(s) => {
@@ -1060,7 +1085,8 @@ pub(super) async fn try_builtin(
         }
         "chr" => {
             check_arg_count(name, args, 1, 1)?;
-            let code = value_to_i64(&args[0])?;
+            let code =
+                value_to_i64(&crate::eval::op::coerce_index(state, args[0].clone(), tools).await?)?;
             // Python's chr() accepts 0..=0x10FFFF; out-of-range ints yield
             // ValueError. Convert to u32 defensively — a negative or >u32
             // code is caught by the same ValueError path via `from_u32`.
@@ -1553,21 +1579,25 @@ pub(super) async fn try_builtin(
         }
         "bin" => {
             check_arg_count(name, args, 1, 1)?;
-            let n = value_to_i64(&args[0])?;
+            // `bin`/`oct`/`hex` accept anything with `__index__`, coerced first.
+            let n =
+                value_to_i64(&crate::eval::op::coerce_index(state, args[0].clone(), tools).await?)?;
             let formatted =
                 if n < 0 { format!("-0b{:b}", n.unsigned_abs()) } else { format!("0b{n:b}") };
             Ok(Some(Value::String(formatted.into())))
         }
         "oct" => {
             check_arg_count(name, args, 1, 1)?;
-            let n = value_to_i64(&args[0])?;
+            let n =
+                value_to_i64(&crate::eval::op::coerce_index(state, args[0].clone(), tools).await?)?;
             let formatted =
                 if n < 0 { format!("-0o{:o}", n.unsigned_abs()) } else { format!("0o{n:o}") };
             Ok(Some(Value::String(formatted.into())))
         }
         "hex" => {
             check_arg_count(name, args, 1, 1)?;
-            let n = value_to_i64(&args[0])?;
+            let n =
+                value_to_i64(&crate::eval::op::coerce_index(state, args[0].clone(), tools).await?)?;
             let formatted =
                 if n < 0 { format!("-0x{:x}", n.unsigned_abs()) } else { format!("0x{n:x}") };
             Ok(Some(Value::String(formatted.into())))
