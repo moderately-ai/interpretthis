@@ -1173,6 +1173,25 @@ fn latin1_bytes_args(arg: &Value) -> Value {
     }
 }
 
+/// Consume the next positional argument as the integer value of a `*` width or
+/// precision. Errors if it is missing or not an int, matching CPython.
+fn percent_star_arg(positional: &[Value], next_arg: &mut usize) -> Result<i64, EvalError> {
+    let v = positional.get(*next_arg).ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(
+            "not enough arguments for format string".into(),
+        ))
+    })?;
+    *next_arg += 1;
+    match v {
+        Value::Int(n) => Ok(*n),
+        Value::Bool(b) => Ok(i64::from(*b)),
+        other => {
+            Err(InterpreterError::TypeError(format!("* wants int, not {}", other.type_name()))
+                .into())
+        }
+    }
+}
+
 pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
     let chars: Vec<char> = template.chars().collect();
     let positional: Vec<Value> = match arg {
@@ -1234,30 +1253,49 @@ pub fn str_percent_format(template: &str, arg: &Value) -> EvalResult {
             i += 1;
         }
 
-        // Width.
+        // Width — digits, or `*` to take the width from the next argument (a
+        // negative `*` width means left-justify with the absolute width).
         let mut width = String::new();
-        while let Some(&c) = chars.get(i) {
-            if c.is_ascii_digit() {
-                width.push(c);
-                i += 1;
-            } else {
-                break;
-            }
-        }
-
-        // Precision.
-        let precision: Option<String> = if chars.get(i) == Some(&'.') {
+        if chars.get(i) == Some(&'*') {
             i += 1;
-            let mut p = String::new();
+            let w = percent_star_arg(&positional, &mut next_arg)?;
+            if w < 0 {
+                flag_minus = true;
+                width = w.checked_neg().unwrap_or(i64::MAX).to_string();
+            } else {
+                width = w.to_string();
+            }
+        } else {
             while let Some(&c) = chars.get(i) {
                 if c.is_ascii_digit() {
-                    p.push(c);
+                    width.push(c);
                     i += 1;
                 } else {
                     break;
                 }
             }
-            Some(p)
+        }
+
+        // Precision — `.digits`, or `.*` to take it from the next argument (a
+        // negative `*` precision is treated as if omitted, matching CPython).
+        let precision: Option<String> = if chars.get(i) == Some(&'.') {
+            i += 1;
+            if chars.get(i) == Some(&'*') {
+                i += 1;
+                let p = percent_star_arg(&positional, &mut next_arg)?;
+                if p < 0 { None } else { Some(p.to_string()) }
+            } else {
+                let mut p = String::new();
+                while let Some(&c) = chars.get(i) {
+                    if c.is_ascii_digit() {
+                        p.push(c);
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                Some(p)
+            }
         } else {
             None
         };

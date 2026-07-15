@@ -1,0 +1,10 @@
+z = 3 + 4j
+print(z.real, z.imag, z.conjugate(), abs(z))
+print((1 + 2j) + (3 - 1j), (2 + 3j) * (1 - 1j), (4 + 2j) / (1 + 1j))
+print((1 + 2j) ** 2, complex(1, 2) == (1 + 2j))
+print(repr(3 + 4j), repr(complex(0, -1)), repr(complex(-1.5, 2.5)))
+print(str(1j), str(complex(2, 0)), str(complex(0, 0)))
+print(f"{3+4j}", f"{3+4j:.2f}", f"{1.5+2.5j:.1e}")
+print(abs(complex(3, 4)), pow(2j, 2))
+print(complex("1+2j"), complex("3"), complex("-4j"))
+print((1 + 0j) == 1, (0 + 0j) == 0, hash(1 + 0j) == hash(1))
