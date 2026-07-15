@@ -2449,6 +2449,18 @@ fn fraction_hash_slot(value: &Value) -> Result<i64, EvalError> {
     Ok(rational_hash(n_abs_mod, d_mod, fr.numer().is_negative()))
 }
 
+/// CPython's numeric hash for a `Decimal`/`Fraction` (`None` for other types),
+/// for `pyhash::python_hash` so a Decimal/Fraction can key a set/dict table and
+/// share a hash with the equal int/float/rational (the slots are infallible).
+#[must_use]
+pub(crate) fn rational_number_hash(value: &Value) -> Option<i64> {
+    match value {
+        Value::Decimal(..) => decimal_hash_slot(value).ok(),
+        Value::Fraction(_) => fraction_hash_slot(value).ok(),
+        _ => None,
+    }
+}
+
 /// `_Py_HashDouble` for `f64`. Operates on the magnitude via `frexp`,
 /// processes 28 mantissa bits at a time through a rotating accumulator modulo
 /// `HASH_MODULUS`, then realigns by the exponent. Sign is re-applied at the
@@ -3470,6 +3482,13 @@ fn decimal_to_bigdecimal(value: &Value) -> Option<bigdecimal::BigDecimal> {
 }
 
 fn decimal_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
+    // `Decimal == float` / `Decimal == Fraction` is a legal comparison in
+    // CPython (unlike `Decimal + float`, which raises) and is exact: both sides
+    // reduce to a rational and compare mathematically. The int/Decimal path
+    // stays on `BigDecimal` to avoid a `10^exponent` blow-up on a hostile scale.
+    if matches!(rhs, Value::Float(_) | Value::Fraction(_)) {
+        return Some(decimal_to_bigrational(lhs)? == exact_rational(rhs)?);
+    }
     Some(decimal_to_bigdecimal(lhs)? == decimal_to_bigdecimal(rhs)?)
 }
 
@@ -3572,8 +3591,60 @@ fn fraction_to_bigrational(value: &Value) -> Option<num_rational::BigRational> {
     }
 }
 
+/// The exact value of `f64` as a rational (via its IEEE mantissa/exponent), so
+/// `Fraction`/`Decimal` compare to a float without precision loss. `None` for a
+/// non-finite float, which equals no rational.
+fn float_to_bigrational(f: f64) -> Option<num_rational::BigRational> {
+    use num_bigint::BigInt;
+    use num_traits::Float as _;
+    if !f.is_finite() {
+        return None;
+    }
+    // f == sign * mantissa * 2^exp, exactly.
+    let (mantissa, exp, sign) = f.integer_decode();
+    let numer = BigInt::from(mantissa) * BigInt::from(i64::from(sign));
+    if exp >= 0 {
+        Some(num_rational::BigRational::from_integer(numer << usize::try_from(exp).ok()?))
+    } else {
+        Some(num_rational::BigRational::new(numer, BigInt::from(1) << usize::try_from(-exp).ok()?))
+    }
+}
+
+/// A `Decimal` as an exact rational: `mantissa * 10^(-scale)`. `None` if the
+/// scale is too large to materialise (such a value equals no finite float).
+fn decimal_to_bigrational(value: &Value) -> Option<num_rational::BigRational> {
+    use num_bigint::BigInt;
+    let Value::Decimal(d, _) = value else { return None };
+    let (mantissa, scale) = d.as_bigint_and_exponent();
+    let ten = BigInt::from(10);
+    if scale >= 0 {
+        Some(num_rational::BigRational::new(mantissa, ten.pow(u32::try_from(scale).ok()?)))
+    } else {
+        Some(num_rational::BigRational::from_integer(
+            mantissa * ten.pow(u32::try_from(-scale).ok()?),
+        ))
+    }
+}
+
+/// Any exact-numeric `Value` (including a float via its exact rational) as a
+/// `BigRational`; `None` for non-numerics and non-finite floats.
+fn exact_rational(value: &Value) -> Option<num_rational::BigRational> {
+    match value {
+        Value::Float(f) => float_to_bigrational(*f),
+        Value::Decimal(..) => decimal_to_bigrational(value),
+        _ => fraction_to_bigrational(value),
+    }
+}
+
 fn fraction_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
-    Some(fraction_to_bigrational(lhs)? == fraction_to_bigrational(rhs)?)
+    let a = fraction_to_bigrational(lhs)?;
+    // `Fraction == float` / `Fraction == Decimal` compares exact rationals,
+    // matching CPython (`Fraction(1, 2) == 0.5` is True, `Fraction(1, 3) ==
+    // 1/3.0` is False because the float is not exactly a third).
+    if matches!(rhs, Value::Float(_) | Value::Decimal(..)) {
+        return Some(exact_rational(rhs).is_some_and(|b| a == b));
+    }
+    Some(a == fraction_to_bigrational(rhs)?)
 }
 
 fn fraction_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {

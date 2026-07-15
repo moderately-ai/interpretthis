@@ -217,6 +217,9 @@ pub fn python_hash(value: &Value) -> Option<i64> {
         Value::BigInt(n) => Some(hash_bigint(n)),
         Value::Float(f) => Some(hash_double(*f)),
         Value::Complex(c) => Some(hash_complex(c.re, c.im)),
+        // Decimal/Fraction hash through CPython's rational formula so an equal
+        // int/float/Decimal/Fraction share a hash (and thus a set/dict slot).
+        Value::Decimal(..) | Value::Fraction(_) => crate::types::rational_number_hash(value),
         Value::String(s) => Some(hash_bytes(&str_hash_buffer(s))),
         Value::Bytes(b) => Some(hash_bytes(b)),
         Value::Tuple(items) => {

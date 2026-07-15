@@ -89,15 +89,17 @@ The supported subset covers the vast majority of LLM-generated extraction patter
 ## Set print order
 <a id="set-print-order"></a>
 
-`print(some_set)` and `repr(some_set)` iterate the set in **insertion order**, not CPython's hash-randomized order. Sets are stored as ordered hash sets internally; this is a deliberate determinism choice for differential testing.
+`set`/`frozenset` iterate in **CPython's hash-table slot order**, not insertion order. Both are backed by a port of CPython's open-addressing table (`crates/interpretthis/src/pyset.rs`) keyed on the bit-exact `pyhash` hash: the probe sequence, resize thresholds, dummy-tombstone reuse, and per-operation presize/merge all match `Objects/setobject.c`, so construction, `|`/`&`/`-`/`^`, `.copy()`, mutation, and `pop()` reproduce CPython 3.12 (`PYTHONHASHSEED=0`) order byte-for-byte. Corpus snippets can therefore print a set directly instead of routing through `sorted()`.
 
-CPython itself documents set iteration order as implementation-defined ("Sets are unordered" — language reference §3.1.4); relying on it is a CPython bug, not a portability target. Our determinism gives differential corpus tests a stable baseline without forcing every snippet through `sorted()`.
+Three residuals remain, all irreducible rather than convenience cuts:
 
-Corpus snippets that compare set output across the two interpreters should still use `sorted()` for clarity (the convention is documented under [`PYTHONHASHSEED=0` enforcement](#pythonhashseed-enforcement)), but the underlying determinism property is what makes set-printing tests stable in the first place.
+- **Constant set/frozenset literals** (`{'a', 'b', 'c'}` — all-constant elements) fold through CPython's compiler (`frozenset(list(frozenset(source)))` + `SET_UPDATE`), reproduced at ~98%. The remaining ~2% of collision-heavy literals are non-deterministic **in CPython itself** — they depend on compile-time interning state we cannot observe.
+- **Sets containing user instances** (or the numeric/temporal types `pyhash` does not reproduce) fall back to insertion order; CPython orders them by object address, which is not reproducible.
+- **Float object identity.** CPython dedups a set with `is`-before-`==`, so two *distinct* `NaN` objects are two elements while `nan in {nan}` (the *same* object) is `True`. Our clone-on-load model gives floats no object identity, so `NaN`-containing sets diverge. This is the same identity limitation documented for `is` on uncached immutables.
 
-**Rationale**: deterministic output is the foundation of byte-diff parity testing. CPython's own spec permits this divergence.
+**Rationale**: reproducing CPython's observable order is both a correctness win and a performance win (O(1) membership, O(n+m) algebra). The residuals are CPython-side non-determinism or a fundamental identity-model gap, not order choices.
 
-**Status**: Permanent divergence.
+**Status**: Order matches CPython; the three residuals above are permanent.
 
 ---
 
