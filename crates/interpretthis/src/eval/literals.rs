@@ -149,6 +149,11 @@ pub(crate) async fn build_set(
     let mut seen: rustc_hash::FxHashSet<crate::value::ValueKey> = rustc_hash::FxHashSet::default();
     for candidate in candidates {
         let exists = if let Value::Instance(_) = &candidate {
+            // Validate hashability first (raises `TypeError: unhashable type` for
+            // a class with `__hash__ = None`, `__eq__` without `__hash__`, or a
+            // default dataclass) — a set member must be hashable, and instance
+            // dedup otherwise skips the hash check that non-instances get.
+            crate::eval::op::hash(state, &candidate, tools).await?;
             // Instance dedup via async `__eq__` (structural scan misses custom
             // equality such as case-insensitive wrappers).
             let mut found = false;

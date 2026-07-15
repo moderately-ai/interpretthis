@@ -496,13 +496,29 @@ pub fn dispatch_hash(state: &InterpreterState, value: &Value) -> Result<i64, Eva
                 })
             })
         };
+        // Resolve `__hash__` along the MRO (first definition wins): a method
+        // makes the class hashable, an explicit `__hash__ = None` class attribute
+        // makes it unhashable (CPython's `Mutable.__hash__ = None` idiom).
+        let hash_is_none = registered.is_some_and(|class| {
+            class.mro.iter().find_map(|anc| {
+                state.classes.get(anc).and_then(|c| {
+                    if c.methods.contains_key("__hash__") {
+                        Some(false)
+                    } else if matches!(c.class_attrs.get("__hash__"), Some(Value::None)) {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                })
+            }) == Some(true)
+        });
         let has_hash = defines("__hash__");
         // CPython sets `__hash__ = None` (unhashable) for a default `@dataclass`
         // (eq=True, frozen=False) and for any class that defines `__eq__`
         // without also defining `__hash__`.
         let dataclass_default =
             registered.is_some_and(|c| c.dataclass_fields.is_some()) && !has_hash;
-        if dataclass_default || (defines("__eq__") && !has_hash) {
+        if hash_is_none || dataclass_default || (defines("__eq__") && !has_hash) {
             return Err(InterpreterError::TypeError(format!(
                 "unhashable type: '{}'",
                 inst.class_name
