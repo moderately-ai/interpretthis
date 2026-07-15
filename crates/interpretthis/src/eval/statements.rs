@@ -89,23 +89,41 @@ pub async fn eval_aug_assign(
     // place machinery (which navigates Values) cannot reach. Read-modify-write
     // it directly.
     if let Expr::Attribute(attr_node) = node.target.as_ref() {
-        if let Expr::Name(name_node) = attr_node.value.as_ref() {
-            if let Some(Value::Class(class_name)) = state.variables.get(name_node.id.as_str()) {
-                let class_name = class_name.clone();
-                let attr_name = attr_node.attr.as_str();
-                let current = state
-                    .classes
-                    .get(&class_name)
-                    .and_then(|c| c.class_attrs.get(attr_name).cloned());
-                if let Some(current) = current {
-                    let rhs = eval_expr(state, &node.value, tools).await?;
-                    let new_value =
-                        crate::eval::op::aug_binop(state, node.op, &current, &rhs, tools).await?;
-                    if let Some(class) = state.classes.get_mut(&class_name) {
-                        class.class_attrs.insert(attr_name.to_string(), new_value);
-                    }
-                    return Ok(Value::None);
+        // Augmented assignment to a class attribute reached through a *computed*
+        // class expression (`type(self)._count += 1`) as well as a bare class
+        // name (`C.count += 1`): the attribute lives in the class registry, which
+        // the place machinery (which navigates Values) cannot reach. A bare
+        // `Name` resolving to a class is checked without re-evaluating; any other
+        // base expression is evaluated once (CPython evaluates the object once).
+        let base_class = match attr_node.value.as_ref() {
+            Expr::Name(name_node) => match state.variables.get(name_node.id.as_str()) {
+                Some(Value::Class(class_name)) => Some(class_name.clone()),
+                _ => None,
+            },
+            other => match eval_expr(state, other, tools).await? {
+                Value::Class(class_name) => Some(class_name),
+                _ => None,
+            },
+        };
+        if let Some(class_name) = base_class {
+            let attr_name = attr_node.attr.as_str();
+            // Read the current value, walking the MRO so an inherited class
+            // attribute is visible.
+            let current = state.classes.get(&class_name).and_then(|c| {
+                c.class_attrs.get(attr_name).cloned().or_else(|| {
+                    c.mro.iter().find_map(|anc| {
+                        state.classes.get(anc).and_then(|a| a.class_attrs.get(attr_name).cloned())
+                    })
+                })
+            });
+            if let Some(current) = current {
+                let rhs = eval_expr(state, &node.value, tools).await?;
+                let new_value =
+                    crate::eval::op::aug_binop(state, node.op, &current, &rhs, tools).await?;
+                if let Some(class) = state.classes.get_mut(&class_name) {
+                    class.class_attrs.insert(attr_name.to_string(), new_value);
                 }
+                return Ok(Value::None);
             }
         }
     }
