@@ -436,6 +436,25 @@ async fn eval_call_inner(
                                     .await?;
                                     return Ok(returned);
                                 }
+                                // A regular instance method called through the
+                                // class (`C.method(instance, ...)`): the plain
+                                // function with the receiver passed explicitly.
+                                // Param binding raises the usual "missing
+                                // 'self'" TypeError if the user forgot it.
+                                if let Some((_, def)) = crate::eval::classes::lookup_method_in_mro(
+                                    state,
+                                    &class_name,
+                                    method_name,
+                                ) {
+                                    return call_user_function(
+                                        state,
+                                        &def,
+                                        &resolved_args,
+                                        &kwargs,
+                                        tools,
+                                    )
+                                    .await;
+                                }
                                 return Err(InterpreterError::AttributeError(format!(
                                     "type object '{class_name}' has no attribute '{method_name}'"
                                 ))
