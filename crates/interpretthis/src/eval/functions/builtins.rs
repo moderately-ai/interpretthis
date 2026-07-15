@@ -151,6 +151,38 @@ pub(super) async fn try_builtin(
             Ok(Some(Value::Range { start, stop, step: stride }))
         }
         "str" => {
+            // The decoding form `str(bytes, encoding[, errors])` — encoding
+            // given positionally or by keyword — decodes a bytes-like object,
+            // exactly like `bytes.decode(encoding, errors)`. Without an encoding
+            // it is the ordinary object-to-string conversion.
+            let encoding = args.get(1).cloned().or_else(|| kwargs.get("encoding").cloned());
+            let errors = args.get(2).cloned().or_else(|| kwargs.get("errors").cloned());
+            if encoding.is_some() || errors.is_some() {
+                check_arg_count(name, args, 1, 3)?;
+                let raw = match &args[0] {
+                    Value::Bytes(b) => b.clone(),
+                    Value::ByteArray(b) => b.lock().clone(),
+                    other => {
+                        return Err(InterpreterError::TypeError(format!(
+                            "decoding to str: need a bytes-like object, {} found",
+                            other.type_name()
+                        ))
+                        .into());
+                    }
+                };
+                let mut decode_args =
+                    vec![encoding.unwrap_or_else(|| Value::String("utf-8".into()))];
+                if let Some(err) = errors {
+                    decode_args.push(err);
+                }
+                return crate::eval::functions::methods::bytes::dispatch_bytes_method(
+                    &raw,
+                    "decode",
+                    &decode_args,
+                    &IndexMap::new(),
+                )
+                .map(Some);
+            }
             check_arg_count(name, args, 0, 1)?;
             if args.is_empty() {
                 Ok(Some(Value::String("".into())))
