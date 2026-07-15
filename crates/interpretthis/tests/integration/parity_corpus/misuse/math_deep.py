@@ -1,0 +1,12 @@
+import math
+print(math.factorial(10))
+print(math.comb(10, 3), math.perm(5, 2))
+print(round(math.pi, 5), round(math.e, 5))
+print(math.gcd(48, 36), math.lcm(4, 6))
+print(math.floor(3.7), math.ceil(3.2), math.trunc(-3.7))
+print(math.pow(2, 10), math.sqrt(144))
+print(math.log(math.e), math.log2(8), math.log10(1000))
+print(math.degrees(math.pi), round(math.radians(180), 5))
+print(math.isclose(0.1 + 0.2, 0.3))
+print(math.copysign(3, -1), math.fabs(-5))
+print(math.dist([0, 0], [3, 4]))

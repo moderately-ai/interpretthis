@@ -58,7 +58,10 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
                     .into());
                 }
             };
-            let fmt = JsonFormat { sort_keys, indent, item_sep, key_sep };
+            // `ensure_ascii=True` (default) escapes non-ASCII as \uXXXX;
+            // False emits raw UTF-8.
+            let ensure_ascii = kwargs.get("ensure_ascii").is_none_or(Value::is_truthy);
+            let fmt = JsonFormat { sort_keys, indent, item_sep, key_sep, ensure_ascii };
             let mut out = String::new();
             write_json(value, &fmt, 0, &mut out)?;
             Ok(Value::String(out.into()))
@@ -98,6 +101,9 @@ struct JsonFormat {
     item_sep: String,
     /// Separator between an object key and its value (e.g. `": "`).
     key_sep: String,
+    /// `ensure_ascii`: escape non-ASCII as `\uXXXX` (True) or emit raw
+    /// UTF-8 (False).
+    ensure_ascii: bool,
 }
 
 fn write_json(
@@ -112,7 +118,7 @@ fn write_json(
         Value::Int(i) => out.push_str(&i.to_string()),
         Value::BigInt(b) => out.push_str(&b.to_string()),
         Value::Float(f) => out.push_str(&float_repr(*f)),
-        Value::String(s) => write_json_str(s, out),
+        Value::String(s) => write_json_str(s, fmt.ensure_ascii, out),
         Value::List(items) => {
             // Snapshot the items under the lock — write_json recurses,
             // and we want a stable sequence for the duration of the
@@ -146,7 +152,7 @@ fn write_json(
                     }
                     out.push('\n');
                     out.push_str(&inner);
-                    write_json_str(&json_key(key), out);
+                    write_json_str(&json_key(key), fmt.ensure_ascii, out);
                     out.push_str(&fmt.key_sep);
                     write_json(val, fmt, depth + 1, out)?;
                 }
@@ -157,7 +163,7 @@ fn write_json(
                     if i > 0 {
                         out.push_str(&fmt.item_sep);
                     }
-                    write_json_str(&json_key(key), out);
+                    write_json_str(&json_key(key), fmt.ensure_ascii, out);
                     out.push_str(&fmt.key_sep);
                     write_json(val, fmt, depth, out)?;
                 }
@@ -266,7 +272,7 @@ fn write_seq_json(
 /// (`ensure_ascii=True`): the short escapes for the standard control chars,
 /// `\uXXXX` for other control chars and every non-ASCII code point, and a UTF-16
 /// surrogate pair for astral characters.
-fn write_json_str(s: &str, out: &mut String) {
+fn write_json_str(s: &str, ensure_ascii: bool, out: &mut String) {
     out.push('"');
     for ch in s.chars() {
         match ch {
@@ -278,7 +284,10 @@ fn write_json_str(s: &str, out: &mut String) {
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
             c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
-            c => escape_unicode(c, out),
+            // Control chars always escape; non-ASCII escapes only under
+            // ensure_ascii (the default).
+            c if c.is_ascii_control() || ensure_ascii => escape_unicode(c, out),
+            c => out.push(c),
         }
     }
     out.push('"');

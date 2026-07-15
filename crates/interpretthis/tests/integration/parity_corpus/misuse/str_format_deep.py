@@ -1,0 +1,13 @@
+print(f"{3.14159:.2f}")
+print(f"{1000000:,}")
+print(f"{255:08b}")
+print(f"{0.5:.1%}")
+print(f"{42:>10}")
+print(f"{'hi':*^10}")
+print(f"{-5:+}")
+print(f"{3.14159:e}")
+print("{:.2f}".format(3.14159))
+print("{0} {1} {0}".format("a", "b"))
+val = 42
+print(f"{val=}")
+print(f"{val:#x}")
