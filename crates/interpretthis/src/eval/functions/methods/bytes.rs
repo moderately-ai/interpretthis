@@ -238,6 +238,56 @@ fn bytes_to_hex(raw: &[u8], args: &[Value]) -> EvalResult {
 
 /// Convert a `bytes`-returning result of a shared bytes method into the
 /// `bytearray` a `bytearray` method returns (recursively for `split`'s list).
+/// Decode Python's `unicode-escape`: interpret backslash escapes; other bytes
+/// map to their Latin-1 code point (byte value → char), matching CPython.
+fn unicode_escape_decode(b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' || i + 1 >= b.len() {
+            out.push(b[i] as char);
+            i += 1;
+            continue;
+        }
+        i += 1; // consume the backslash
+        let c = b[i];
+        i += 1;
+        // Parse `count` hex digits into a char (\xHH, \uHHHH, \UHHHHHHHH).
+        let hex = |count: usize, out: &mut String, i: &mut usize| {
+            let end = (*i + count).min(b.len());
+            let digits = std::str::from_utf8(&b[*i..end]).unwrap_or("");
+            if let Ok(v) = u32::from_str_radix(digits, 16) {
+                if let Some(ch) = char::from_u32(v) {
+                    out.push(ch);
+                }
+                *i = end;
+            }
+        };
+        match c {
+            b'n' => out.push('\n'),
+            b't' => out.push('\t'),
+            b'r' => out.push('\r'),
+            b'\\' => out.push('\\'),
+            b'\'' => out.push('\''),
+            b'"' => out.push('"'),
+            b'a' => out.push('\u{7}'),
+            b'b' => out.push('\u{8}'),
+            b'f' => out.push('\u{c}'),
+            b'v' => out.push('\u{b}'),
+            b'0' => out.push('\0'),
+            b'x' => hex(2, &mut out, &mut i),
+            b'u' => hex(4, &mut out, &mut i),
+            b'U' => hex(8, &mut out, &mut i),
+            other => {
+                // Unknown escape: CPython keeps the backslash and the char.
+                out.push('\\');
+                out.push(other as char);
+            }
+        }
+    }
+    out
+}
+
 fn rewrap_bytes_as_bytearray(value: Value) -> Value {
     match value {
         Value::Bytes(b) => Value::ByteArray(shared_bytes(b)),
@@ -381,6 +431,9 @@ pub(crate) fn dispatch_bytes_method(
                         }
                     }
                     Ok(Value::String(out.into()))
+                }
+                "unicode-escape" | "unicode_escape" => {
+                    Ok(Value::String(unicode_escape_decode(b).into()))
                 }
                 other => {
                     Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
