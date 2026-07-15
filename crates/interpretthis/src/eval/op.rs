@@ -1058,6 +1058,17 @@ pub async fn contains(
             return Ok(false);
         }
     }
+    // A generator / lazy iterator is consumed by a membership test, comparing
+    // each yielded item until a match (`9 in squares(5)`).
+    if matches!(container, Value::Generator { .. } | Value::Lazy { .. }) {
+        let items = crate::eval::op::iter(state, container, tools).await?;
+        for stored in &items {
+            if eq(state, stored, item, tools).await? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
     crate::types::dispatch_contains(container, item)
 }
 
