@@ -529,6 +529,109 @@ pub(crate) fn dispatch_bytes_method(
             };
             Ok(Value::Bytes(b.strip_suffix(suffix.as_slice()).unwrap_or(b).to_vec()))
         }
+        // `translate(table, delete=b'')` — map each byte through the 256-byte
+        // table (None leaves bytes unchanged), dropping any byte in `delete`.
+        "translate" => {
+            let table = match args.first() {
+                None | Some(Value::None) => None,
+                Some(Value::Bytes(t)) if t.len() == 256 => Some(t.clone()),
+                Some(Value::ByteArray(t)) if t.lock().len() == 256 => Some(t.lock().clone()),
+                _ => {
+                    return Err(InterpreterError::ValueError(
+                        "translation table must be 256 bytes long".into(),
+                    )
+                    .into());
+                }
+            };
+            let delete: Vec<u8> = match args.get(1) {
+                None | Some(Value::None) => Vec::new(),
+                Some(Value::Bytes(d)) => d.clone(),
+                Some(Value::ByteArray(d)) => d.lock().clone(),
+                _ => Vec::new(),
+            };
+            let out: Vec<u8> = b
+                .iter()
+                .filter(|byte| !delete.contains(byte))
+                .map(|&byte| table.as_ref().map_or(byte, |t| t[byte as usize]))
+                .collect();
+            Ok(Value::Bytes(out))
+        }
+        // `partition`/`rpartition(sep)` — split at the first / last occurrence
+        // into a `(head, sep, tail)` tuple; no match puts the whole string in
+        // head (partition) or tail (rpartition) with two empty pieces.
+        "partition" | "rpartition" => {
+            let Some(Value::Bytes(sep)) = args.first() else {
+                return Err(
+                    InterpreterError::TypeError("a bytes-like object is required".into()).into()
+                );
+            };
+            if sep.is_empty() {
+                return Err(InterpreterError::ValueError("empty separator".into()).into());
+            }
+            let found = if method == "partition" {
+                b.windows(sep.len()).position(|w| w == sep.as_slice())
+            } else {
+                b.windows(sep.len()).rposition(|w| w == sep.as_slice())
+            };
+            let (head, tail): (&[u8], &[u8]) = match found {
+                Some(i) => (&b[..i], &b[i + sep.len()..]),
+                None if method == "partition" => (b, &[]),
+                None => (&[], b),
+            };
+            let sep_bytes: Vec<u8> = if found.is_some() { sep.clone() } else { Vec::new() };
+            Ok(Value::Tuple(vec![
+                Value::Bytes(head.to_vec()),
+                Value::Bytes(sep_bytes),
+                Value::Bytes(tail.to_vec()),
+            ]))
+        }
+        // Padding: `center`/`ljust`/`rjust(width, fillbyte=b' ')`. A short
+        // width returns the original unchanged.
+        "center" | "ljust" | "rjust" => {
+            let width = match args.first() {
+                Some(Value::Int(n)) => (*n).max(0) as usize,
+                Some(Value::Bool(bo)) => usize::from(*bo),
+                _ => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "{method}() takes an integer width"
+                    ))
+                    .into());
+                }
+            };
+            let fill = match args.get(1) {
+                None => b' ',
+                Some(Value::Bytes(f)) if f.len() == 1 => f[0],
+                Some(Value::ByteArray(f)) if f.lock().len() == 1 => f.lock()[0],
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "fill byte must be a byte string of length 1".into(),
+                    )
+                    .into());
+                }
+            };
+            if b.len() >= width {
+                return Ok(Value::Bytes(b.to_vec()));
+            }
+            let pad = width - b.len();
+            let mut out = Vec::with_capacity(width);
+            match method {
+                "ljust" => {
+                    out.extend_from_slice(b);
+                    out.extend(std::iter::repeat_n(fill, pad));
+                }
+                "rjust" => {
+                    out.extend(std::iter::repeat_n(fill, pad));
+                    out.extend_from_slice(b);
+                }
+                _ => {
+                    let left = pad / 2;
+                    out.extend(std::iter::repeat_n(fill, left));
+                    out.extend_from_slice(b);
+                    out.extend(std::iter::repeat_n(fill, pad - left));
+                }
+            }
+            Ok(Value::Bytes(out))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "'bytes' object has no attribute '{method}'"
         ))

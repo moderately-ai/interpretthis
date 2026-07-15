@@ -587,8 +587,18 @@ pub(crate) async fn call_value_as_function(
             if type_name == "int" && method == "from_bytes" {
                 return crate::eval::functions::helpers::int_from_bytes(args, kwargs);
             }
+            // bool is an int subclass, so `bool.from_bytes` reuses int's but
+            // truthifies the result.
+            if type_name == "bool" && method == "from_bytes" {
+                let n = crate::eval::functions::helpers::int_from_bytes(args, kwargs)?;
+                return Ok(Value::Bool(n.is_truthy()));
+            }
             if type_name == "str" && method == "maketrans" {
                 return crate::eval::functions::helpers::str_maketrans(args);
+            }
+            // `bytes.maketrans(from, to)` — a 256-byte translation table.
+            if (type_name == "bytes" || type_name == "bytearray") && method == "maketrans" {
+                return bytes_maketrans(args);
             }
             if type_name == "float" && method == "fromhex" {
                 return crate::eval::functions::helpers::float_fromhex(args);
@@ -782,6 +792,35 @@ pub(crate) async fn call_value_as_function(
         ))
         .into()),
     }
+}
+
+/// `bytes.maketrans(from, to)` — build the 256-byte identity table then map
+/// each byte in `from` to the byte at the same index in `to`.
+fn bytes_maketrans(args: &[Value]) -> EvalResult {
+    let bytes_of = |v: Option<&Value>| -> Option<Vec<u8>> {
+        match v {
+            Some(Value::Bytes(b)) => Some(b.clone()),
+            Some(Value::ByteArray(b)) => Some(b.lock().clone()),
+            _ => None,
+        }
+    };
+    let (Some(from), Some(to)) = (bytes_of(args.first()), bytes_of(args.get(1))) else {
+        return Err(InterpreterError::TypeError(
+            "maketrans() requires two bytes-like objects".into(),
+        )
+        .into());
+    };
+    if from.len() != to.len() {
+        return Err(InterpreterError::ValueError(
+            "maketrans arguments must have same length".into(),
+        )
+        .into());
+    }
+    let mut table: Vec<u8> = (0..=255).collect();
+    for (&f, &t) in from.iter().zip(&to) {
+        table[f as usize] = t;
+    }
+    Ok(Value::Bytes(table))
 }
 
 /// The default `object.__setattr__` / `__delattr__` / `__getattribute__` /
