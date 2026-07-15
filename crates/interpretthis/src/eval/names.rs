@@ -512,6 +512,12 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
         // (message,)) so this never needs a synthesis fallback. Multi-
         // arg constructors override via with_args at construction.
         "args" => Ok(Value::Tuple(exc.args.clone())),
+        // `StopIteration.value` (and StopAsyncIteration) is the first argument,
+        // defaulting to None — this is where a generator's `return` value
+        // surfaces. Other exception types have no `.value`, so it stays gated.
+        "value" if exc.type_name == "StopIteration" || exc.type_name == "StopAsyncIteration" => {
+            Ok(exc.args.first().cloned().unwrap_or(Value::None))
+        }
         "__cause__" | "__context__" => {
             Ok(exc.cause.as_ref().map_or(Value::None, |cause| Value::Exception(cause.clone())))
         }
