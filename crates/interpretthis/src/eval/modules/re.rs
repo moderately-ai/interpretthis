@@ -27,7 +27,15 @@ use crate::{
 pub fn has_function(name: &str) -> bool {
     matches!(
         name,
-        "findall" | "sub" | "subn" | "split" | "match" | "search" | "fullmatch" | "compile"
+        "findall"
+            | "finditer"
+            | "sub"
+            | "subn"
+            | "split"
+            | "match"
+            | "search"
+            | "fullmatch"
+            | "compile"
     )
 }
 
@@ -37,6 +45,7 @@ pub fn call(func: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> Eva
     match func {
         "compile" => compile_pattern(func, args),
         "findall" => findall(args),
+        "finditer" => finditer(args),
         "sub" => sub(func, args, kwargs),
         "subn" => subn(func, args, kwargs),
         "split" => split(func, args, kwargs),
@@ -93,7 +102,7 @@ pub fn dispatch_pattern_method(
     kwargs: &IndexMap<String, Value>,
 ) -> EvalResult {
     match method {
-        "match" | "search" | "fullmatch" | "findall" | "sub" | "subn" | "split" => {
+        "match" | "search" | "fullmatch" | "findall" | "finditer" | "sub" | "subn" | "split" => {
             let mut full = Vec::with_capacity(args.len() + 1);
             full.push(Value::String(pattern.to_string().into()));
             full.extend_from_slice(args);
@@ -132,6 +141,19 @@ fn findall(args: &[Value]) -> EvalResult {
         }
     }
     Ok(Value::List(shared_list(result)))
+}
+
+/// `re.finditer(pattern, string)` — an iterator of match objects for every
+/// non-overlapping match. Modelled eagerly as a list of `re.Match` values.
+fn finditer(args: &[Value]) -> EvalResult {
+    let pattern = arg_str("finditer", args, 0)?;
+    let text = arg_str("finditer", args, 1)?;
+    let re = compile(pattern)?;
+    let out: Vec<Value> = re
+        .captures_iter(text)
+        .map(|caps| Value::ReMatch(Box::new(build_match(&caps, &re, text))))
+        .collect();
+    Ok(Value::List(shared_list(out)))
 }
 
 /// `re.sub(pattern, repl, string, count=0)`.

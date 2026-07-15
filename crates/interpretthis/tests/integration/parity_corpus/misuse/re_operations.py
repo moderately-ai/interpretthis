@@ -1,0 +1,13 @@
+import re
+print(re.findall(r"\d+", "a1b22c333"))
+print(re.sub(r"\d", "#", "a1b2c3"))
+print(re.match(r"(\w+)@(\w+)", "user@host").groups())
+m = re.search(r"(?P<year>\d{4})", "year 2024 end")
+print(m.group("year"))
+print(re.split(r"[,;]", "a,b;c,d"))
+print(bool(re.fullmatch(r"\d+", "12345")))
+print(re.sub(r"(\w+) (\w+)", r"\2 \1", "hello world"))
+print([m.group() for m in re.finditer(r"\d+", "1 22 333")])
+print(re.subn(r"o", "0", "foo boo"))
+p = re.compile(r"\bword\b")
+print(p.findall("a word here word"))
