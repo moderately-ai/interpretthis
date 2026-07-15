@@ -457,7 +457,7 @@ fn set_comprehension_target<'a>(
                 Ok(())
             }
             _ => Err(InterpreterError::Runtime(format!(
-                "unsupported comprehension target: {:?}",
+                "unsupported comprehension target (see CONFORMANCE.md#unsupported-language-features): {:?}",
                 std::mem::discriminant(target)
             ))
             .into()),

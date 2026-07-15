@@ -11,6 +11,7 @@
 mod common;
 mod parity_corpus_runner;
 
+mod conformance_anchors;
 mod cpython_imported;
 mod divergences;
 mod engine_smoke;

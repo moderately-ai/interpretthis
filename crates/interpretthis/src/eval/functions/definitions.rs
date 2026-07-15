@@ -930,7 +930,7 @@ fn unparse_expr(expr: &ast::Expr) -> Result<String, EvalError> {
                     }
                     other => {
                         return Err(InterpreterError::TypeError(format!(
-                            "unsupported f-string default component: {:?}",
+                            "unsupported f-string default component (see CONFORMANCE.md#unsupported-language-features): {:?}",
                             std::mem::discriminant(other)
                         ))
                         .into());
@@ -1092,7 +1092,7 @@ fn unparse_expr(expr: &ast::Expr) -> Result<String, EvalError> {
         // that parsed to None, so `def f(x=<unsupported>)` gave a wrong answer.
         other => {
             return Err(InterpreterError::TypeError(format!(
-                "unsupported default argument expression: {:?}",
+                "unsupported default argument expression (see CONFORMANCE.md#unsupported-language-features): {:?}",
                 std::mem::discriminant(other)
             ))
             .into());

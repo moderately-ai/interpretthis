@@ -144,7 +144,7 @@ pub async fn eval_aug_assign(
     if let Some((place::PlaceStep::Slice(spec), prefix)) = place.steps.split_last() {
         if !prefix.iter().all(|s| !matches!(s, place::PlaceStep::Slice(_))) {
             return Err(InterpreterError::Runtime(
-                "augmented assignment to a nested slice target is not supported".into(),
+                "augmented assignment to a nested slice target is not supported (see CONFORMANCE.md#unsupported-language-features)".into(),
             )
             .into());
         }

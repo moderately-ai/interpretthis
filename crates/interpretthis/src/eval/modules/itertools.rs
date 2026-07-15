@@ -108,7 +108,7 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
                 Some(Value::Bool(b)) => usize::from(*b),
                 None => {
                     return Err(InterpreterError::Runtime(
-                        "itertools.repeat without a count is not supported (would not terminate); pass a `times` argument".into(),
+                        "itertools.repeat without a count is not supported (would not terminate); pass a `times` argument (see CONFORMANCE.md#unsupported-language-features)".into(),
                     )
                     .into());
                 }
