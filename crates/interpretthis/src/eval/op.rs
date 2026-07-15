@@ -175,6 +175,18 @@ async fn drain_generator(
     id: u64,
     tools: &Tools,
 ) -> Result<Vec<Value>, EvalError> {
+    Ok(drain_generator_with_return(state, id, tools).await?.0)
+}
+
+/// Like [`drain_generator`], but also returns the value the generator's
+/// `return` carried in its terminating `StopIteration` (CPython's `e.value`),
+/// which a delegating `yield from` uses as its own result. A generator that
+/// falls off the end (or `return`s nothing) yields `Value::None`.
+pub(crate) async fn drain_generator_with_return(
+    state: &mut InterpreterState,
+    id: u64,
+    tools: &Tools,
+) -> Result<(Vec<Value>, Value), EvalError> {
     let mut out = Vec::new();
     loop {
         match crate::eval::functions::dispatch_generator_method(
@@ -188,11 +200,13 @@ async fn drain_generator(
         .await
         {
             Ok(v) => out.push(v),
-            Err(EvalError::Exception(exc)) if exc.type_name == "StopIteration" => break,
+            Err(EvalError::Exception(exc)) if exc.type_name == "StopIteration" => {
+                let ret = exc.args.first().cloned().unwrap_or(Value::None);
+                return Ok((out, ret));
+            }
             Err(e) => return Err(e),
         }
     }
-    Ok(out)
 }
 
 pub async fn iter(

@@ -103,6 +103,10 @@ pub struct GeneratorFrame {
     /// exactly where it suspended rather than re-running the statement.
     /// Empty means no try is mid-suspension.
     pub try_stack: Vec<TryResume>,
+    /// Value a delegated (`yield from`) sub-generator returned, captured when
+    /// the sub-generator was drained on the first pass and handed back as the
+    /// value of the `yield from` expression when this frame resumes past it.
+    pub yield_from_return: Option<crate::value::Value>,
 }
 
 /// Where a suspended generator is inside a top-level `try` statement.

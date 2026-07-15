@@ -140,6 +140,7 @@ pub(crate) fn create_generator(
             for_stack: Vec::new(),
             while_resume: None,
             try_stack: Vec::new(),
+            yield_from_return: None,
         },
     );
     Value::Generator { id }
@@ -412,11 +413,13 @@ async fn step_generator(
             Err(EvalError::Exception(ExceptionValue::new("StopIteration", String::new())))
         }
         Err(EvalError::Signal(ControlFlow::Yield(v))) => Ok(*v),
-        Err(EvalError::Signal(ControlFlow::Return(_))) => {
+        Err(EvalError::Signal(ControlFlow::Return(v))) => {
             if let Some(frame) = state.generators.get_mut(&id) {
                 frame.finished = true;
             }
-            Err(EvalError::Exception(ExceptionValue::new("StopIteration", String::new())))
+            // Carry the generator's return value in StopIteration so a
+            // delegating `yield from` can recover it (CPython's `e.value`).
+            Err(EvalError::Exception(stop_iteration_with_value(*v)))
         }
         Err(e) => {
             if let Some(frame) = state.generators.get_mut(&id) {
@@ -425,6 +428,14 @@ async fn step_generator(
             Err(e)
         }
     }
+}
+
+/// Build the `StopIteration` that ends a generator, carrying its `return`
+/// value as `args[0]` (CPython's `e.value`). A `None` return leaves `args`
+/// empty so `str(exc)`/`.value` behave like a bare `return`.
+pub(crate) fn stop_iteration_with_value(value: Value) -> ExceptionValue {
+    let exc = ExceptionValue::new("StopIteration", String::new());
+    if matches!(value, Value::None) { exc } else { exc.with_args(vec![value]) }
 }
 
 async fn run_generator_body(
@@ -513,7 +524,13 @@ async fn run_generator_body(
                 }
                 return Err(EvalError::Signal(ControlFlow::Yield(v)));
             }
-            Err(EvalError::Signal(ControlFlow::Return(_))) => return Ok(()),
+            // Propagate the return signal so `step_generator` builds a
+            // StopIteration carrying its value (CPython's `e.value`, used by a
+            // delegating `yield from`). Returns nested in a for/while/try
+            // already propagate this way; a top-level return must match.
+            Err(EvalError::Signal(ControlFlow::Return(v))) => {
+                return Err(EvalError::Signal(ControlFlow::Return(v)));
+            }
             Err(e) => return Err(e),
         }
     }

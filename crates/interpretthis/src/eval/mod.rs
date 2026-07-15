@@ -468,13 +468,10 @@ pub fn eval_expr<'a>(
             .into())
         }),
         Expr::YieldFrom(node) => Box::pin(async move {
-            let source = eval_expr(state, &node.value, tools).await?;
-            let items = crate::eval::op::iter(state, &source, tools).await?;
-            if let Some(buffer) = state.yield_stack.last_mut() {
-                buffer.extend(items);
-                return Ok(Value::None);
-            }
-            // Streaming yield-from: materialise then yield first; rest via for_stack-like queue.
+            // On resume, the delegated iterable was already drained on the
+            // first pass; hand back the captured sub-generator return value
+            // (CPython: the value of `yield from` is that return value)
+            // without re-evaluating and re-draining the sub-expression.
             if let Some(&id) = state.active_generator_stack.last() {
                 if let Some(frame) = state.generators.get_mut(&id) {
                     if frame.resume_at_yield {
@@ -482,11 +479,33 @@ pub fn eval_expr<'a>(
                         if let Some(exc) = frame.pending_throw.take() {
                             return Err(EvalError::Exception(*exc));
                         }
-                        return Ok(std::mem::replace(&mut frame.send_value, Value::None));
+                        return Ok(frame.yield_from_return.take().unwrap_or(Value::None));
                     }
+                }
+            }
+            let source = eval_expr(state, &node.value, tools).await?;
+            // A delegated generator carries a `return` value in its
+            // StopIteration; any other iterable's yield-from value is None.
+            let (items, return_value) = match &source {
+                Value::Generator { id } => {
+                    crate::eval::op::drain_generator_with_return(state, *id, tools).await?
+                }
+                _ => (crate::eval::op::iter(state, &source, tools).await?, Value::None),
+            };
+            if let Some(buffer) = state.yield_stack.last_mut() {
+                buffer.extend(items);
+                return Ok(return_value);
+            }
+            // Streaming yield-from: yield the first item now, drain the rest
+            // through for_stack, and surface `return_value` on resume.
+            if let Some(&id) = state.active_generator_stack.last() {
+                if let Some(frame) = state.generators.get_mut(&id) {
                     if items.is_empty() {
-                        return Ok(Value::None);
+                        // Nothing to yield: the sub-generator returned without
+                        // yielding, so yield-from evaluates to its return value.
+                        return Ok(return_value);
                     }
+                    frame.yield_from_return = Some(return_value);
                     let mut rest = items;
                     let first = rest.remove(0);
                     // Reuse for_stack as a synthetic loop over remaining items.
