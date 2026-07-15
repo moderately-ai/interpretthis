@@ -661,12 +661,52 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
 /// (`mem_delta == 0`); mutating methods modify `obj` in place and report
 /// the byte delta. `args` / `kwargs` must already be proxy-resolved
 /// (see [`resolve_method_args`] / [`resolve_method_kwargs`]).
+/// Map a reflective builtin dunder call (`[1, 2].__len__()`, `"ab".__getitem__(0)`)
+/// to the sync operator it wraps. Returns `Ok(Some(_))` when handled,
+/// `Ok(None)` to fall through to the type's method table (and its
+/// AttributeError for a genuinely absent dunder). Only the sync-computable
+/// dunders are covered; ones needing `&mut state` (`__iter__`, `__add__`, …)
+/// are left to the normal call path.
+fn try_builtin_dunder(
+    obj: &Value,
+    method: &str,
+    args: &[Value],
+) -> Result<Option<MethodOutcome>, EvalError> {
+    let pure = |v: Value| Ok(Some(MethodOutcome::pure(v)));
+    match method {
+        // Only expose `__len__` on sized types (int has none), so a failure
+        // falls through to AttributeError rather than surfacing a len error.
+        "__len__" => match crate::types::dispatch_len(obj) {
+            Ok(n) => pure(Value::Int(crate::eval::functions::to_len_i64(n)?)),
+            Err(_) => Ok(None),
+        },
+        "__contains__" => match crate::types::dispatch_contains(obj, arg1(method, args)?) {
+            Ok(b) => pure(Value::Bool(b)),
+            Err(_) => Ok(None),
+        },
+        "__getitem__" => match crate::types::dispatch_getitem(obj, arg1(method, args)?) {
+            Ok(v) => pure(v),
+            Err(e) => Err(e),
+        },
+        "__str__" => pure(Value::String(format!("{obj}").into())),
+        "__repr__" => pure(Value::String(obj.repr().into())),
+        "__bool__" => pure(Value::Bool(obj.is_truthy())),
+        _ => Ok(None),
+    }
+}
+
 pub(super) fn dispatch_method(
     obj: &mut Value,
     method: &str,
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
+    // Reflective dunder calls on builtins map to their sync operator.
+    if method.starts_with("__") {
+        if let Some(outcome) = try_builtin_dunder(obj, method, args)? {
+            return Ok(outcome);
+        }
+    }
     let Some(handler) = methods_handler_for(obj) else {
         debug_assert!(
             !crate::types::type_has_methods_table(obj),

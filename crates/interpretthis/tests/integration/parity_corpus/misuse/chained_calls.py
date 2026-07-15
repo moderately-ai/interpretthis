@@ -1,0 +1,13 @@
+print("  Hello World  ".strip().lower().replace(" ", "_"))
+print([1, 2, 3, 4].__len__())
+print(sorted([3, 1, 2])[::-1])
+print("a,b,c".split(",")[1])
+print({"a": 1}.get("a", 0) + 10)
+print(list(range(10))[2:8:2])
+print("hello".upper().startswith("HE"))
+data = [{"n": 3}, {"n": 1}, {"n": 2}]
+print(sorted(data, key=lambda x: x["n"])[0]["n"])
+print("".join(reversed("abc")))
+print(max([1, 2, 3], key=lambda x: -x))
+result = (lambda x: x * 2)(21)
+print(result)
