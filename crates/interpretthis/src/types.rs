@@ -2850,7 +2850,7 @@ fn range_len(value: &Value) -> Result<usize, EvalError> {
 /// Closed-form `len(range(start, stop, step))` — ceil((stop - start) /
 /// step) clamped to zero. Step of 0 returns 0 (defensive; range
 /// construction already rejects step=0 with `ValueError`).
-fn range_length(start: i64, stop: i64, step: i64) -> usize {
+pub(crate) fn range_length(start: i64, stop: i64, step: i64) -> usize {
     let raw = match step.cmp(&0) {
         std::cmp::Ordering::Greater => ((stop - start + step - 1) / step).max(0),
         std::cmp::Ordering::Less => ((start - stop - step - 1) / (-step)).max(0),

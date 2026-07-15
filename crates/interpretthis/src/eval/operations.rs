@@ -1356,6 +1356,18 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         // Two timezones are equal when their UTC offsets match (CPython compares
         // the offset; our model carries no name to distinguish otherwise).
         (Value::TimeZone(a), Value::TimeZone(b)) => a == b,
+        // Ranges are equal when they yield the same sequence, not when their
+        // fields match: `range(0, 3, 2) == range(0, 4, 2)` is True (both [0, 2]).
+        // CPython: equal length, and — when non-empty — equal first element and
+        // (when length > 1) equal step.
+        (
+            Value::Range { start: sa, stop: pa, step: ta },
+            Value::Range { start: sb, stop: pb, step: tb },
+        ) => {
+            let la = crate::types::range_length(*sa, *pa, *ta);
+            la == crate::types::range_length(*sb, *pb, *tb)
+                && (la == 0 || (sa == sb && (la == 1 || ta == tb)))
+        }
         _ => false,
     }
 }
