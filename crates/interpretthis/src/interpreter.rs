@@ -127,7 +127,14 @@ impl Interpreter {
 
         // Evaluate
         match crate::eval::eval_body(&mut state, &stmts, tools).await {
-            Ok(_) => InterpreterResponse { stdout: state.print_buffer.clone(), error: None },
+            Ok(_) => {
+                // CPython runs a generator's `finally`/`with` cleanup when
+                // it is finalised at interpreter shutdown; finalise any
+                // still-suspended generators at the end of a successful
+                // run to match that (see `finalize_generators`).
+                crate::eval::functions::finalize_generators(&mut state, tools).await;
+                InterpreterResponse { stdout: state.print_buffer.clone(), error: None }
+            }
             Err(crate::error::EvalError::Signal(crate::error::ControlFlow::Return(_))) => {
                 InterpreterResponse {
                     stdout: state.print_buffer.clone(),

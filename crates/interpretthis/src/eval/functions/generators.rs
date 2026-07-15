@@ -246,6 +246,33 @@ async fn dispatch_suspended(
     }
 }
 
+/// Finalise every still-suspended generator at the end of a run — the
+/// analogue of CPython closing outstanding generators at interpreter
+/// shutdown, so a `try/finally` or `with` left open in a generator runs
+/// its cleanup. Each is closed via `GeneratorExit` (running its
+/// `finally`); errors from a misbehaving generator are swallowed so one
+/// bad finaliser can't fail the run. Finalises in creation order (the
+/// `id` is monotonic), matching CPython's shutdown finalisation here.
+pub(crate) async fn finalize_generators(state: &mut InterpreterState, tools: &crate::tools::Tools) {
+    let mut ids: Vec<u64> = state
+        .generators
+        .iter()
+        .filter(|(_, f)| f.started && !f.finished && !f.closed)
+        .map(|(id, _)| *id)
+        .collect();
+    ids.sort_unstable();
+    let empty = IndexMap::new();
+    for id in ids {
+        let live = state.generators.get(&id).is_some_and(|f| f.started && !f.finished && !f.closed);
+        if !live {
+            continue;
+        }
+        let _ =
+            dispatch_generator_method(state, &Value::Generator { id }, "close", &[], &empty, tools)
+                .await;
+    }
+}
+
 /// Mark a generator as finished/closed and drop its loop-resume state.
 fn mark_generator_closed(state: &mut InterpreterState, id: u64) {
     if let Some(frame) = state.generators.get_mut(&id) {
