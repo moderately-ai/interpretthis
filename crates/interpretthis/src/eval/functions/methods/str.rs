@@ -59,7 +59,9 @@ pub(crate) fn dispatch_string_method(
     // CPython 3.12 keyword-accepting str methods (others are positional-only
     // and raise TypeError on kwargs — never silently drop).
     // See CONFORMANCE.md#method-call-kwargs.
-    if !kwargs.is_empty() && !matches!(method, "split" | "rsplit" | "encode" | "expandtabs") {
+    if !kwargs.is_empty()
+        && !matches!(method, "split" | "rsplit" | "encode" | "expandtabs" | "splitlines")
+    {
         reject_kwargs(method, kwargs)?;
     }
 
@@ -591,8 +593,10 @@ pub(crate) fn dispatch_string_method(
             }
         }
         "splitlines" => {
-            // `keepends` (default False): keep the line-break characters when true.
-            let keepends = match args.first() {
+            // `keepends` (default False, positional or keyword): keep the
+            // line-break characters when true.
+            let bound = bind_method_params(method, args, kwargs, &["keepends"])?;
+            let keepends = match &bound[0] {
                 None | Some(Value::None) => false,
                 Some(v) => v.is_truthy(),
             };

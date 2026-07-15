@@ -1,0 +1,13 @@
+gen = (x**2 for x in range(5))
+print(list(gen))
+print(sum(x for x in range(10) if x % 2 == 0))
+print(max(len(w) for w in ["a", "bb", "ccc"]))
+print(any(x > 5 for x in [1, 2, 3]))
+print(all(x > 0 for x in [1, 2, 3]))
+print(list((i, j) for i in range(2) for j in range(2)))
+nested = ((x, y) for x in range(2) for y in range(2) if x != y)
+print(list(nested))
+print(sorted((x for x in [3, 1, 2])))
+print(", ".join(str(x) for x in range(3)))
+d = {k: v for k, v in ((str(i), i) for i in range(3))}
+print(d)

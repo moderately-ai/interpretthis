@@ -164,8 +164,18 @@ pub fn render<'a>(
             // renders empty, a single arg renders as that arg's str, and
             // multiple args render as the args tuple's repr. `repr(exc)`
             // keeps the `Type(args…)` form from `value.repr()`.
+            //
+            // KeyError overrides __str__ to render its single arg via repr
+            // (`str(KeyError('k'))` is "'k'"), so it takes the tuple-repr path
+            // even for one arg.
             Value::Exception(e) if matches!(mode, RenderMode::Display) => match e.args.as_slice() {
                 [] => Ok(String::new()),
+                // KeyError renders its key via repr (`str(KeyError('k'))` is
+                // "'k'"). The message is already the repr'd form at every
+                // construction site (internal raisers quote the key; the
+                // user-facing constructor reprs it — see construct_exception_type),
+                // so return it directly rather than repr-ing the arg twice.
+                [_] if e.type_name == "KeyError" => Ok(e.message.clone()),
                 [single] => render(state, single, RenderMode::Display, tools).await,
                 many => Ok(render_sequence(state, many, "(", "", tools).await? + ")"),
             },

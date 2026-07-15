@@ -650,6 +650,10 @@ pub(crate) fn construct_exception_type(
     }
     let message = match args.len() {
         0 => String::new(),
+        // KeyError's str is the key's repr, so its message stores the repr'd
+        // form (matching the internal dict-miss raisers), while `args` keeps
+        // the plain key. Every other exception uses the plain str of its arg.
+        1 if type_name == "KeyError" => args[0].repr(),
         1 => format!("{}", args[0]),
         _ => args.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", "),
     };
