@@ -141,6 +141,7 @@ pub(crate) fn create_generator(
             while_resume: None,
             try_stack: Vec::new(),
             yield_from_return: None,
+            delegating_to: None,
         },
     );
     Value::Generator { id }
@@ -174,6 +175,59 @@ pub(crate) async fn dispatch_generator_method(
     dispatch_lazy(state, receiver, method, args)
 }
 
+/// Forward a `next`/`send`/`throw` on a delegating generator (`id`) to the
+/// sub-generator it is suspended inside via `yield from` (`sub_id`). While the
+/// sub still yields, the delegating generator stays parked. When the sub
+/// finishes (StopIteration) or raises, the delegating generator resumes its own
+/// body past the `yield from` — with the sub's return value, or re-raising the
+/// sub's exception at the yield-from point.
+async fn forward_to_delegate(
+    state: &mut InterpreterState,
+    id: u64,
+    sub_id: u64,
+    method: &str,
+    args: &[Value],
+    tools: &crate::tools::Tools,
+) -> EvalResult {
+    let sub_method = if method == "throw" { "throw" } else { method };
+    // Boxed: dispatch_generator_method -> dispatch_suspended -> here is an
+    // async recursion cycle.
+    let sub_result = Box::pin(dispatch_generator_method(
+        state,
+        &Value::Generator { id: sub_id },
+        sub_method,
+        args,
+        &indexmap::IndexMap::new(),
+        tools,
+    ))
+    .await;
+    match sub_result {
+        // Sub yielded again — remain delegating.
+        Ok(v) => Ok(v),
+        // Sub exhausted — resume our body past the yield-from with its return.
+        Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => {
+            let ret = e.args.first().cloned().unwrap_or(Value::None);
+            if let Some(frame) = state.generators.get_mut(&id) {
+                frame.delegating_to = None;
+                frame.yield_from_return = Some(ret);
+                frame.resume_at_yield = true;
+            }
+            step_generator(state, id, Value::None, tools).await
+        }
+        // Sub raised — propagate the exception at the yield-from point so a
+        // try/except around the `yield from` in our body can catch it.
+        Err(EvalError::Exception(e)) => {
+            if let Some(frame) = state.generators.get_mut(&id) {
+                frame.delegating_to = None;
+                frame.pending_throw = Some(Box::new(e));
+                frame.resume_at_yield = true;
+            }
+            step_generator(state, id, Value::None, tools).await
+        }
+        Err(other) => Err(other),
+    }
+}
+
 async fn dispatch_suspended(
     state: &mut InterpreterState,
     id: u64,
@@ -181,6 +235,15 @@ async fn dispatch_suspended(
     args: &[Value],
     tools: &crate::tools::Tools,
 ) -> EvalResult {
+    // While suspended inside `yield from <generator>`, forward next/send/throw
+    // to the delegated sub-generator so it stays lazy (its `finally` runs when
+    // it is actually exhausted / closed, not eagerly).
+    if matches!(method, "__next__" | "send" | "throw") {
+        let delegating_to = state.generators.get(&id).and_then(|f| f.delegating_to);
+        if let Some(sub_id) = delegating_to {
+            return forward_to_delegate(state, id, sub_id, method, args, tools).await;
+        }
+    }
     match method {
         "__next__" => {
             if !args.is_empty() {
@@ -206,6 +269,23 @@ async fn dispatch_suspended(
         }
         "throw" => throw_into_generator(state, id, args, tools).await,
         "close" => {
+            // Closing a generator suspended in `yield from <sub>` closes the
+            // sub first (running its `finally`), then continues to close this
+            // generator so any `finally` around the yield-from also runs.
+            if let Some(sub_id) = state.generators.get(&id).and_then(|f| f.delegating_to) {
+                let _ = Box::pin(dispatch_generator_method(
+                    state,
+                    &Value::Generator { id: sub_id },
+                    "close",
+                    &[],
+                    &indexmap::IndexMap::new(),
+                    tools,
+                ))
+                .await?;
+                if let Some(frame) = state.generators.get_mut(&id) {
+                    frame.delegating_to = None;
+                }
+            }
             // A live suspended generator is closed by throwing
             // `GeneratorExit` at its yield, so any pending `finally`
             // (and `with`) cleanup runs. A not-started / finished

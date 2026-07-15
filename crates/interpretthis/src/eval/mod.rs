@@ -484,6 +484,45 @@ pub fn eval_expr<'a>(
                 }
             }
             let source = eval_expr(state, &node.value, tools).await?;
+
+            // Streaming delegation to a true sub-generator: keep it suspended
+            // and pull lazily so its `finally`/`.close()`/`throw()` run at the
+            // correct time. `next`/`send`/`throw`/`close` on THIS generator are
+            // forwarded to the sub in `dispatch_suspended` while `delegating_to`
+            // is set. (The eager yield_stack path below handles `list(gen)`.)
+            if let Value::Generator { id: sub_id } = &source {
+                let sub_id = *sub_id;
+                if state.yield_stack.is_empty() {
+                    // Pull the first item from the sub-generator.
+                    let empty = indexmap::IndexMap::new();
+                    let first = crate::eval::functions::dispatch_generator_method(
+                        state,
+                        &Value::Generator { id: sub_id },
+                        "__next__",
+                        &[],
+                        &empty,
+                        tools,
+                    )
+                    .await;
+                    return match first {
+                        Ok(v) => {
+                            if let Some(&id) = state.active_generator_stack.last() {
+                                if let Some(frame) = state.generators.get_mut(&id) {
+                                    frame.delegating_to = Some(sub_id);
+                                }
+                            }
+                            Err(EvalError::Signal(ControlFlow::Yield(Box::new(v))))
+                        }
+                        // Sub returned without yielding: yield-from evaluates to
+                        // its return value immediately.
+                        Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => {
+                            Ok(e.args.first().cloned().unwrap_or(Value::None))
+                        }
+                        Err(other) => Err(other),
+                    };
+                }
+            }
+
             // A delegated generator carries a `return` value in its
             // StopIteration; any other iterable's yield-from value is None.
             let (items, return_value) = match &source {

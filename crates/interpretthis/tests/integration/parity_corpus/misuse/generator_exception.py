@@ -27,3 +27,15 @@ def gen_finally_close():
 g3 = gen_finally_close()
 print(next(g3))
 g3.close()
+def sub_gen():
+    try:
+        yield 1
+        yield 2
+    finally:
+        print("sub finally")
+def delegating():
+    yield from sub_gen()
+    yield 3
+d = delegating()
+print(next(d))
+d.close()

@@ -107,6 +107,11 @@ pub struct GeneratorFrame {
     /// the sub-generator was drained on the first pass and handed back as the
     /// value of the `yield from` expression when this frame resumes past it.
     pub yield_from_return: Option<crate::value::Value>,
+    /// While this frame is suspended inside `yield from <generator>`, the id of
+    /// the sub-generator it is delegating to. `next`/`send`/`throw`/`close` are
+    /// forwarded to it (lazily, so the sub stays suspended and its `finally`
+    /// runs at the right time) until the sub is exhausted. `None` otherwise.
+    pub delegating_to: Option<u64>,
 }
 
 /// Where a suspended generator is inside a top-level `try` statement.
