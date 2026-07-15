@@ -632,6 +632,60 @@ pub(crate) fn dispatch_bytes_method(
             }
             Ok(Value::Bytes(out))
         }
+        // `zfill(width)` left-pads with b'0' to `width`, keeping a leading
+        // sign byte (`b'+'`/`b'-'`) first (`b"-42".zfill(6)` -> `b"-0042"`).
+        "zfill" => {
+            let width = match args.first() {
+                Some(Value::Int(n)) => (*n).max(0) as usize,
+                Some(Value::Bool(bo)) => usize::from(*bo),
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "zfill() takes an integer width".into(),
+                    )
+                    .into());
+                }
+            };
+            if b.len() >= width {
+                return Ok(Value::Bytes(b.to_vec()));
+            }
+            let pad = width - b.len();
+            let mut out = Vec::with_capacity(width);
+            if matches!(b.first(), Some(b'+' | b'-')) {
+                out.push(b[0]);
+                out.extend(std::iter::repeat_n(b'0', pad));
+                out.extend_from_slice(&b[1..]);
+            } else {
+                out.extend(std::iter::repeat_n(b'0', pad));
+                out.extend_from_slice(b);
+            }
+            Ok(Value::Bytes(out))
+        }
+        // `splitlines(keepends=False)` — unlike str, bytes only treats the
+        // ASCII `\n`, `\r`, and `\r\n` as line boundaries (not \v/\f/\x1c-\x1e).
+        "splitlines" => {
+            let keepends = args.first().is_some_and(Value::is_truthy);
+            let mut lines: Vec<Value> = Vec::new();
+            let mut start = 0;
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'\n' || b[i] == b'\r' {
+                    let mut end = i + 1;
+                    if b[i] == b'\r' && end < b.len() && b[end] == b'\n' {
+                        end += 1;
+                    }
+                    let line_end = if keepends { end } else { i };
+                    lines.push(Value::Bytes(b[start..line_end].to_vec()));
+                    start = end;
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+            if start < b.len() {
+                lines.push(Value::Bytes(b[start..].to_vec()));
+            }
+            Ok(Value::List(crate::value::shared_list(lines)))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "'bytes' object has no attribute '{method}'"
         ))
