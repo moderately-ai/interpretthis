@@ -236,12 +236,23 @@ fn pretouch_defaultdict_inner<'a>(
         // what makes NESTED defaultdicts (`d[a][b] += 1`) work: `d[a]` is
         // autovivified before we touch `[b]` on it.
         pretouch_defaultdict_inner(state, sub.value.as_ref(), tools, depth + 1).await?;
+        // A slice subscript (`x[a:b]`) never names a defaultdict key — skip it
+        // (and it would make `value_to_key` fail on the unhashable slice).
+        if matches!(sub.slice.as_ref(), Expr::Slice(_)) {
+            return Ok(());
+        }
         // Resolve the base (`sub.value`) to a place — a bare name resolves to an
         // empty-step place, a subscript to a navigable one — so a defaultdict
         // reached through any chain (not just a bare `d`) is pre-touched.
         let Some(place) = place::eval_place(state, sub.value.as_ref(), tools).await? else {
             return Ok(());
         };
+        // A base reached through a slice (`b[::-1][k]`) is not a navigable slot,
+        // so it cannot be a defaultdict — skip rather than navigating (which
+        // would raise the intermediate-slice error).
+        if !place.is_navigable() {
+            return Ok(());
+        }
         let key = crate::eval::literals::value_to_key(&eval_expr(state, &sub.slice, tools).await?)?;
         // Read the base defaultdict's factory iff the key is absent.
         let factory = {

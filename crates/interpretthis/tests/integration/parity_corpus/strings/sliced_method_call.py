@@ -1,0 +1,11 @@
+b = bytes(range(20))
+print(b[::-1][:3].hex())
+print(b[5:10])
+print(list(b[5:10]))
+x = b[::-1]
+print(x[:3].hex())
+print("hello"[::-1][:3].upper())
+print([1, 2, 3, 4][::-1][:2])
+print((b[::-1])[:3].hex())
+print("abcdef"[1:][:2].upper())
+print([5, 4, 3, 2, 1][::-1].index(3))
