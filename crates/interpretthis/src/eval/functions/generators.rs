@@ -95,9 +95,22 @@ pub(crate) fn generator_suspendable(stmts: &[Stmt]) -> bool {
 fn while_yields_are_direct(body: &[Stmt]) -> bool {
     body.iter().all(|stmt| {
         match stmt {
-            // Compound statements that could hide a yield they can't resume at.
-            Stmt::If(_)
-            | Stmt::For(_)
+            // An `if` re-enters cleanly on resume: `run_while_suspendable`
+            // re-runs the whole `if` (re-evaluating its condition, the same way a
+            // top-level `if cond: yield` already resumes) and the yield's
+            // `resume_at_yield` flag returns the send value instead of
+            // re-yielding — so `while True: if cond: yield` suspends correctly (a
+            // filtered infinite stream) rather than eager-buffering. This is only
+            // sound when the yield sits at the *head* of its branch, so no
+            // statement before it re-executes (`if c: log(); yield` would log
+            // twice); otherwise fall back to eager.
+            Stmt::If(node) => {
+                if_branch_yield_safe(&node.body) && if_branch_yield_safe(&node.orelse)
+            }
+            // Loops / try / with cannot resume via whole-statement re-entry (it
+            // would re-run earlier iterations or the try body from the top), so a
+            // yield inside them still forces the eager fallback.
+            Stmt::For(_)
             | Stmt::While(_)
             | Stmt::With(_)
             | Stmt::Try(_)
@@ -110,6 +123,31 @@ fn while_yields_are_direct(body: &[Stmt]) -> bool {
             _ => true,
         }
     })
+}
+
+/// Whether an `if` branch's yields are all resume-safe: the branch either has
+/// no yield, or its first statement leads straight to the yield (a bare `yield`,
+/// a `x = yield`, or a nested resume-safe `if`) with no other yield in the rest.
+/// This guarantees whole-`if` re-entry re-executes nothing before the yield.
+fn if_branch_yield_safe(branch: &[Stmt]) -> bool {
+    use rustpython_parser::ast::Expr;
+    if !super::definitions::contains_yield_stmts(branch) {
+        return true;
+    }
+    let Some((first, rest)) = branch.split_first() else {
+        return true;
+    };
+    let expr_is_yield = |e: &Expr| matches!(e, Expr::Yield(_) | Expr::YieldFrom(_));
+    let leads_to_yield = match first {
+        Stmt::Expr(e) => expr_is_yield(&e.value),
+        Stmt::Assign(a) => expr_is_yield(&a.value),
+        Stmt::AugAssign(a) => expr_is_yield(&a.value),
+        Stmt::AnnAssign(a) => a.value.as_deref().is_some_and(expr_is_yield),
+        Stmt::If(node) => if_branch_yield_safe(&node.body) && if_branch_yield_safe(&node.orelse),
+        _ => false,
+    };
+    // Every yield must live in that leading statement, so the rest stays yield-free.
+    leads_to_yield && !super::definitions::contains_yield_stmts(rest)
 }
 
 /// Create a suspended generator from a just-bound function frame.
