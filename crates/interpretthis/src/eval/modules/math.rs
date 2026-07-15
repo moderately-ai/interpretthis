@@ -65,12 +65,62 @@ pub fn has_function(name: &str) -> bool {
             | "isclose"
             | "expm1"
             | "log1p"
+            | "remainder"
+            | "ldexp"
+            | "frexp"
+            | "modf"
+            | "gamma"
+            | "lgamma"
+            | "sinh"
+            | "cosh"
+            | "tanh"
     )
 }
 
 /// Invoke a `math` function.
 pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Value>) -> EvalResult {
     match func {
+        // IEEE 754 remainder: x - round-half-even(x / y) * y.
+        "remainder" => {
+            let (x, y) = (arg_f64(func, args, 0)?, arg_f64(func, args, 1)?);
+            Ok(Value::Float(x - (x / y).round_ties_even() * y))
+        }
+        "ldexp" => {
+            let m = arg_f64(func, args, 0)?;
+            let e = arg_f64(func, args, 1)?.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+            Ok(Value::Float(m * 2f64.powi(e)))
+        }
+        // frexp(x) = (m, e) with x == m * 2**e and 0.5 <= |m| < 1 (or (0.0, 0)).
+        "frexp" => {
+            let x = arg_f64(func, args, 0)?;
+            let (m, e) = if x == 0.0 || !x.is_finite() {
+                (x, 0)
+            } else {
+                let mut e = x.abs().log2().floor() as i32 + 1;
+                let mut m = x / 2f64.powi(e);
+                while m.abs() >= 1.0 {
+                    m /= 2.0;
+                    e += 1;
+                }
+                while m.abs() < 0.5 {
+                    m *= 2.0;
+                    e -= 1;
+                }
+                (m, e)
+            };
+            Ok(Value::Tuple(vec![Value::Float(m), Value::Int(i64::from(e))]))
+        }
+        // modf(x) = (fractional, integral) parts, both floats, sign of x.
+        "modf" => {
+            let x = arg_f64(func, args, 0)?;
+            let int_part = x.trunc();
+            Ok(Value::Tuple(vec![Value::Float(x - int_part), Value::Float(int_part)]))
+        }
+        "gamma" => Ok(Value::Float(gamma(arg_f64(func, args, 0)?))),
+        "lgamma" => Ok(Value::Float(gamma(arg_f64(func, args, 0)?).abs().ln())),
+        "sinh" => Ok(Value::Float(arg_f64(func, args, 0)?.sinh())),
+        "cosh" => Ok(Value::Float(arg_f64(func, args, 0)?.cosh())),
+        "tanh" => Ok(Value::Float(arg_f64(func, args, 0)?.tanh())),
         "comb" => math_comb(args),
         "perm" => math_perm(args),
         "prod" => math_prod(args, kwargs),
@@ -404,5 +454,36 @@ impl crate::eval::modules::Module for MathModule {
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
         call(func, args, kwargs)
+    }
+}
+
+/// `math.gamma` via the Lanczos approximation (g=7, n=9). Accurate to ~15
+/// significant digits across the range the sandbox sees, and exact enough that
+/// integer arguments round-trip (`gamma(5) == 24.0` to display precision).
+fn gamma(x: f64) -> f64 {
+    // Lanczos coefficients for g = 7.
+    const G: f64 = 7.0;
+    const C: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    if x < 0.5 {
+        // Reflection formula for the left half-plane.
+        std::f64::consts::PI / ((std::f64::consts::PI * x).sin() * gamma(1.0 - x))
+    } else {
+        let x = x - 1.0;
+        let mut a = C[0];
+        let t = x + G + 0.5;
+        for (i, &c) in C.iter().enumerate().skip(1) {
+            a += c / (x + i as f64);
+        }
+        (2.0 * std::f64::consts::PI).sqrt() * t.powf(x + 0.5) * (-t).exp() * a
     }
 }

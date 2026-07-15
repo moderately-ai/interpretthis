@@ -536,7 +536,9 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
         "__cause__" | "__context__" => {
             Ok(exc.cause.as_ref().map_or(Value::None, |cause| Value::Exception(cause.clone())))
         }
-        "message" => Ok(Value::String(exc.message.clone().into())),
+        // NB: no built-in `.message` — Python 3 removed BaseException.message,
+        // so `e.message` resolves only to a user-set field (else AttributeError),
+        // letting `self.message = ...` in a custom __init__ win.
         // Custom attributes set by a user exception's `__init__`
         // (`self.code = ...`), preserved through instantiation.
         _ => exc

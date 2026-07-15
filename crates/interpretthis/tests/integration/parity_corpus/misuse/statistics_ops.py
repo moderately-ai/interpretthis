@@ -1,0 +1,12 @@
+import statistics
+print(statistics.mean([1, 2, 3, 4, 5]))
+print(statistics.median([1, 2, 3, 4]))
+print(statistics.median([1, 2, 3]))
+print(statistics.mode([1, 1, 2, 3]))
+print(statistics.stdev([2, 4, 4, 4, 5, 5, 7, 9]))
+print(round(statistics.variance([1, 2, 3, 4, 5]), 2))
+print(statistics.median_low([1, 2, 3, 4]))
+print(statistics.median_high([1, 2, 3, 4]))
+print(statistics.pstdev([1, 2, 3, 4, 5]))
+print(statistics.fmean([1, 2, 3, 4]))
+print(statistics.geometric_mean([1, 4, 16]))

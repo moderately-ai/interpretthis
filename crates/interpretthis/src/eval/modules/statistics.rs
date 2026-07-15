@@ -40,6 +40,9 @@ pub fn has_function(name: &str) -> bool {
             | "mode"
             | "quantiles"
             | "fmean"
+            | "median_low"
+            | "median_high"
+            | "geometric_mean"
     )
 }
 
@@ -57,6 +60,18 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
             Ok(coerce(mean(&nums), all_integer(&data)))
         }
         "median" => median(&data),
+        "median_low" => median_low_high(&data, false),
+        "median_high" => median_low_high(&data, true),
+        "geometric_mean" => {
+            let nums = numbers(func, &data, 1)?;
+            if nums.iter().any(|&x| x <= 0.0) {
+                return Err(crate::eval::modules::statistics_error(
+                    "geometric mean requires a non-empty dataset containing positive numbers",
+                ));
+            }
+            let log_mean = nums.iter().map(|x| x.ln()).sum::<f64>() / nums.len() as f64;
+            Ok(Value::Float(log_mean.exp()))
+        }
         // variance / stdev require >= 2 data points; CPython's
         // message is "requires at least two data points" with the
         // OUTER function name, not the inner variance() helper.
@@ -221,6 +236,37 @@ fn median(data: &[Value]) -> EvalResult {
         let hi = key(ordered[mid]).unwrap_or(f64::NAN);
         Ok(Value::Float(f64::midpoint(lo, hi)))
     }
+}
+
+/// `statistics.median_low` / `median_high` — the lower (or higher) of the two
+/// central values for an even-length dataset, or the middle for odd-length.
+/// Unlike `median`, these always return an actual data value (never an average).
+fn median_low_high(data: &[Value], high: bool) -> EvalResult {
+    if data.is_empty() {
+        return Err(crate::eval::modules::statistics_error("no median for empty data"));
+    }
+    let key = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Bool(b) => Some(f64::from(*b)),
+            _ => v.as_float(),
+        }
+    };
+    for v in data {
+        if key(v).is_none() {
+            return Err(InterpreterError::TypeError("can't convert value to float".into()).into());
+        }
+    }
+    let mut ordered: Vec<&Value> = data.iter().collect();
+    ordered.sort_by(|a, b| {
+        key(a)
+            .unwrap_or(f64::NAN)
+            .partial_cmp(&key(b).unwrap_or(f64::NAN))
+            .unwrap_or(Ordering::Equal)
+    });
+    let n = ordered.len();
+    // Odd length: the middle. Even length: lower index for low, upper for high.
+    let idx = if n % 2 == 1 || high { n / 2 } else { n / 2 - 1 };
+    Ok(ordered[idx].clone())
 }
 
 /// Sample (n-1 denominator) or population (n denominator) variance.
