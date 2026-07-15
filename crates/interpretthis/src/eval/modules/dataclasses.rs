@@ -349,14 +349,42 @@ pub(crate) fn apply_dataclass(
         .get(class_name)
         .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
     let annotations = class.annotations.clone();
-    let mut fields: Vec<DataclassField> = Vec::with_capacity(annotations.len());
+    let mro = class.mro.clone();
+
+    // Collect inherited dataclass fields first (base-most ancestor first), then
+    // this class's own — a field redefined by name keeps its inherited position
+    // but takes the new default/type, matching CPython. Each ancestor's
+    // dataclass_fields already includes ITS inheritance, so the by-name dedup
+    // collapses the overlap across a multi-level chain.
+    let mut fields: Vec<DataclassField> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut push_or_update = |field: DataclassField, fields: &mut Vec<DataclassField>| {
+        if let Some(&i) = index.get(&field.name) {
+            fields[i] = field;
+        } else {
+            index.insert(field.name.clone(), fields.len());
+            fields.push(field);
+        }
+    };
+    for ancestor in mro.iter().skip(1).rev() {
+        if let Some(anc_fields) =
+            state.classes.get(ancestor).and_then(|c| c.dataclass_fields.clone())
+        {
+            for f in anc_fields {
+                push_or_update(f, &mut fields);
+            }
+        }
+    }
+    let class = state
+        .classes
+        .get(class_name)
+        .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
     for name in &annotations {
         // A class attribute matching the annotation name supplies the
         // default. If the attribute is a `field(...)` sentinel, unpack it
         // into the field's flag set + defaults.
         let class_attr = class.class_attrs.get(name).cloned();
-        let field = build_field(name.clone(), class_attr);
-        fields.push(field);
+        push_or_update(build_field(name.clone(), class_attr), &mut fields);
     }
 
     // CPython rule: a non-default field cannot follow a default field —

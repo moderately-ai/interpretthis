@@ -1400,8 +1400,11 @@ impl ExceptionValue {
     /// `KeyError(<key>)` — used by every dict/Counter/defaultdict
     /// miss. CPython's `KeyError` message is the key's repr.
     #[must_use]
-    pub fn key_error(key: impl std::fmt::Display) -> Self {
-        Self::new("KeyError", format!("{key}"))
+    pub fn key_error(key: &ValueKey) -> Self {
+        // `str(exc)` / the traceback show the key's repr (the `ValueKey` Display
+        // already quotes strings), while `e.args` must hold the PLAIN key value
+        // — CPython's `KeyError('missing').args` is `('missing',)`.
+        Self::new("KeyError", format!("{key}")).with_args(vec![key.to_value()])
     }
 
     /// `IndexError(<kind> index out of range)` — CPython varies the

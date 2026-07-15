@@ -64,7 +64,7 @@ pub(crate) fn dispatch_dict_method(
             if let Some(def) = args.get(1) {
                 return Ok(MethodOutcome::pure(def.clone()));
             }
-            Err(EvalError::Exception(ExceptionValue::key_error(key)))
+            Err(EvalError::Exception(ExceptionValue::key_error(&key)))
         }
         "update" => {
             // CPython: update([other], **kwargs). `other` may be a mapping or
@@ -126,7 +126,7 @@ pub(crate) fn dispatch_dict_method(
             let key = value_to_key(require_param(method, &bound, 0, "key")?)?;
             let last = bound[1].as_ref().is_none_or(Value::is_truthy);
             let Some((existing_key, val)) = map.shift_remove_entry(&key) else {
-                return Err(EvalError::Exception(ExceptionValue::key_error(key)));
+                return Err(EvalError::Exception(ExceptionValue::key_error(&key)));
             };
             if last {
                 map.insert(existing_key, val);

@@ -1179,7 +1179,7 @@ fn chainmap_get_item(container: &Value, index: &Value) -> Result<Value, EvalErro
             }
         }
     }
-    Err(crate::value::ExceptionValue::key_error(key).into())
+    Err(crate::value::ExceptionValue::key_error(&key).into())
 }
 
 fn chainmap_set_item(
@@ -2462,7 +2462,7 @@ fn dict_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
     if let Some(missing) = type_of(container).missing_slot {
         return missing(container, index);
     }
-    Err(crate::value::ExceptionValue::key_error(key).into())
+    Err(crate::value::ExceptionValue::key_error(&key).into())
 }
 
 /// `range(start, stop, step)[i]`: arithmetic-progression indexing.
@@ -2527,7 +2527,7 @@ fn dict_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalErro
     // shift_remove preserves insertion order (CPython `del d[k]`), unlike
     // swap_remove which moves the last entry into the hole.
     let Some(val) = map.lock().shift_remove(&key) else {
-        return Err(crate::value::ExceptionValue::key_error(key).into());
+        return Err(crate::value::ExceptionValue::key_error(&key).into());
     };
     let freed = crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&val);
     Ok(-to_isize_sat(freed))
@@ -3028,7 +3028,7 @@ fn counter_get_item(container: &Value, index: &Value) -> Result<Value, EvalError
     if let Some(missing) = type_of(container).missing_slot {
         return missing(container, index);
     }
-    Err(crate::value::ExceptionValue::key_error(key).into())
+    Err(crate::value::ExceptionValue::key_error(&key).into())
 }
 
 /// `counter[key] = value`: insert or overwrite. Same memory accounting
@@ -3060,7 +3060,7 @@ fn counter_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalE
     // shift_remove preserves insertion order (CPython `del d[k]`), unlike
     // swap_remove which moves the last entry into the hole.
     let Some(val) = map.shift_remove(&key) else {
-        return Err(crate::value::ExceptionValue::key_error(key).into());
+        return Err(crate::value::ExceptionValue::key_error(&key).into());
     };
     let freed = crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&val);
     Ok(-to_isize_sat(freed))
@@ -3282,7 +3282,7 @@ fn defaultdict_del_item(container: &mut Value, index: &Value) -> Result<isize, E
     let key = crate::eval::literals::value_to_key(index)?;
     // shift_remove preserves insertion order (CPython `del dd[k]`).
     let Some(val) = data.items.shift_remove(&key) else {
-        return Err(crate::value::ExceptionValue::key_error(key).into());
+        return Err(crate::value::ExceptionValue::key_error(&key).into());
     };
     let freed = crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&val);
     Ok(-to_isize_sat(freed))
