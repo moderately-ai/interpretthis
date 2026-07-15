@@ -1,0 +1,21 @@
+lst = [1, 2, 3, 2, 1, 2]
+print(lst.index(2))
+print(lst.index(2, 2))
+print(lst.index(2, 3, 6))
+print(lst.count(2))
+print("banana".index("a"))
+print("banana".index("a", 2))
+print("banana".count("a"))
+print("banana".count("a", 2))
+print((1,2,3,2).index(2))
+print((1,2,3,2).count(2))
+print([1,2,3].index(2))
+print("hello".find("l", 3))
+print("hello".rfind("l"))
+try:
+    [1,2,3].index(5)
+except ValueError:
+    print("not found")
+print("abcabc".index("bc", 2))
+print("aaa".count("a", 1, 2))
+print([1,1,1].count(1))
