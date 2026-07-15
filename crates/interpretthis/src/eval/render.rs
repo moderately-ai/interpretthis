@@ -148,9 +148,13 @@ pub fn render<'a>(
                 Ok(render_sequence(state, &snapshot, "[", "]", tools).await?)
             }
             Value::Tuple(items) => {
+                // `render_sequence` here uses an empty closing delimiter, so the
+                // one-element tuple just needs a trailing `,)` — never trim the
+                // body, or an element whose repr ends in `)` (e.g. `Decimal('1')`)
+                // loses its own paren.
                 let single = items.len() == 1;
                 let body = render_sequence(state, items, "(", "", tools).await?;
-                Ok(if single { format!("{},)", body.trim_end_matches(')')) } else { body + ")" })
+                Ok(if single { format!("{body},)") } else { body + ")" })
             }
             Value::Set(items) => {
                 if items.is_empty() {

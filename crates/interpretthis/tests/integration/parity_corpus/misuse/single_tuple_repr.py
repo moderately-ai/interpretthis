@@ -1,0 +1,5 @@
+print((1,))
+print((Decimal('1'),) if False else ("x",))
+print(((1, 2),))
+print(([1],))
+print((("nested",),))
