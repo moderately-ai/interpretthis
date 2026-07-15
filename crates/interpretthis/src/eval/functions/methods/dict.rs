@@ -77,13 +77,33 @@ pub(crate) fn dispatch_dict_method(
             }
             let mut delta = 0isize;
             if let Some(arg) = args.first() {
-                let Value::Dict(new_entries) = arg else {
-                    return Err(InterpreterError::TypeError(
-                        "dict.update() argument must be a dict".into(),
-                    )
-                    .into());
+                // A mapping (dict/OrderedDict/Counter/defaultdict) merges by
+                // key→value; anything else is read as an iterable of pairs
+                // (`d.update([(k, v), …])` or `d.update(other.items())`).
+                let entries: Vec<(ValueKey, Value)> = if let Some(m) = arg.as_dict() {
+                    m.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                } else if let Value::Counter(m) = arg {
+                    m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                } else if let Value::DefaultDict(d) = arg {
+                    d.items.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                } else {
+                    let mut out = Vec::new();
+                    for (i, pair) in
+                        crate::eval::control_flow::iterate_value(arg)?.into_iter().enumerate()
+                    {
+                        let items = crate::eval::control_flow::iterate_value(&pair)?;
+                        if items.len() != 2 {
+                            return Err(InterpreterError::ValueError(format!(
+                                "dictionary update sequence element #{i} has length {}; 2 is required",
+                                items.len()
+                            ))
+                            .into());
+                        }
+                        out.push((value_to_key(&items[0])?, items[1].clone()));
+                    }
+                    out
                 };
-                for (k, v) in new_entries.lock().clone() {
+                for (k, v) in entries {
                     delta = delta.saturating_add(insert_entry(map, k, v));
                 }
             }
