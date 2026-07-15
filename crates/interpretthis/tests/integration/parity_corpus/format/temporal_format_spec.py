@@ -1,0 +1,10 @@
+from datetime import date, datetime, time
+print(f"{date(2024, 3, 15):%Y-%m-%d}")
+print(f"{date(2024, 3, 15):%A, %B %d}")
+print(f"{date(2024, 12, 25):%d/%m/%Y}")
+print(f"{datetime(2024, 3, 15, 14, 30, 45):%Y-%m-%d %H:%M:%S}")
+print(f"{datetime(2024, 3, 15, 14, 30):%I:%M %p}")
+print(f"{time(9, 5, 30):%H:%M:%S}")
+print("{:%Y}".format(date(2024, 1, 1)))
+print(format(datetime(2024, 6, 15, 12), "%Y/%m/%d %H"))
+print(f"{date(2024, 1, 1):}")

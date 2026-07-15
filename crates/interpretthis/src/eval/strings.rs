@@ -169,6 +169,26 @@ fn format_value_body(
         (Value::Bool(b), _) => {
             format_integer(&Value::Int(i64::from(*b)), type_char, precision, alternate)
         }
+        // Non-finite floats render as CPython's `nan`/`inf` (lowercase for the
+        // lowercase codes, uppercase for F/E/G) rather than Rust's `NaN`/`inf`;
+        // the sign is applied by the caller, so return the magnitude form.
+        (Value::Float(f), Some(c @ ('f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%')))
+            if !f.is_finite() =>
+        {
+            let base = if f.is_nan() {
+                "nan"
+            } else if *f < 0.0 {
+                "-inf"
+            } else {
+                "inf"
+            };
+            let mut out =
+                if c.is_ascii_uppercase() { base.to_uppercase() } else { base.to_string() };
+            if c == '%' {
+                out.push('%');
+            }
+            Ok(out)
+        }
         (Value::Float(f), Some('f' | 'F')) => {
             let p = prec();
             Ok(format!("{f:.p$}"))
@@ -365,6 +385,17 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
         ) {
             return apply_format_spec(inner, spec);
         }
+    }
+
+    // A date/datetime/time interprets a non-empty spec as a strftime pattern
+    // (`f"{d:%Y-%m-%d}"`), not a numeric format spec.
+    match value {
+        Value::Date(d) => return Ok(Value::String(d.format(spec).to_string().into())),
+        Value::DateTime { dt, .. } => {
+            return Ok(Value::String(dt.format(spec).to_string().into()));
+        }
+        Value::Time(t) => return Ok(Value::String(t.format(spec).to_string().into())),
+        _ => {}
     }
 
     // A user-class instance reaching here has no `__format__` slot (the callers
