@@ -593,6 +593,12 @@ pub(crate) async fn call_value_as_function(
             if type_name == "float" && method == "fromhex" {
                 return crate::eval::functions::helpers::float_fromhex(args);
             }
+            // `object.__setattr__(inst, name, value)` etc. — the default
+            // implementations, called directly to bypass a custom override
+            // (e.g. from within a class's own `__setattr__`).
+            if type_name == "object" {
+                return object_default_method(method, args);
+            }
             let Some((recv_arg, rest)) = args.split_first() else {
                 return Err(InterpreterError::TypeError(format!(
                     "unbound method {type_name}.{method}() needs a {type_name} as first argument"
@@ -773,6 +779,64 @@ pub(crate) async fn call_value_as_function(
         _ => Err(InterpreterError::TypeError(format!(
             "'{}' object is not callable",
             func.type_name()
+        ))
+        .into()),
+    }
+}
+
+/// The default `object.__setattr__` / `__delattr__` / `__getattribute__` /
+/// `__init__`, called directly (`object.__setattr__(self, name, value)`) to
+/// bypass a class's own override. Operates straight on the instance's fields.
+fn object_default_method(method: &str, args: &[Value]) -> EvalResult {
+    let inst = match args.first() {
+        Some(Value::Instance(inst)) => inst,
+        _ => {
+            return Err(InterpreterError::TypeError(format!(
+                "descriptor '{method}' requires a 'object' instance"
+            ))
+            .into());
+        }
+    };
+    match method {
+        "__setattr__" => {
+            let (Some(Value::String(name)), Some(value)) = (args.get(1), args.get(2)) else {
+                return Err(InterpreterError::TypeError(
+                    "object.__setattr__ requires a name and a value".into(),
+                )
+                .into());
+            };
+            inst.fields.lock().insert(name.to_string(), value.clone());
+            Ok(Value::None)
+        }
+        "__delattr__" => {
+            let Some(Value::String(name)) = args.get(1) else {
+                return Err(InterpreterError::TypeError(
+                    "object.__delattr__ requires a name".into(),
+                )
+                .into());
+            };
+            if inst.fields.lock().remove(name.as_str()).is_none() {
+                return Err(InterpreterError::AttributeError(name.to_string()).into());
+            }
+            Ok(Value::None)
+        }
+        "__getattribute__" => {
+            let Some(Value::String(name)) = args.get(1) else {
+                return Err(InterpreterError::TypeError(
+                    "object.__getattribute__ requires a name".into(),
+                )
+                .into());
+            };
+            inst.fields
+                .lock()
+                .get(name.as_str())
+                .cloned()
+                .ok_or_else(|| EvalError::from(InterpreterError::AttributeError(name.to_string())))
+        }
+        // `object.__init__` / `__new__` accept anything and do nothing useful here.
+        "__init__" => Ok(Value::None),
+        _ => Err(InterpreterError::AttributeError(format!(
+            "type object 'object' has no attribute '{method}'"
         ))
         .into()),
     }
