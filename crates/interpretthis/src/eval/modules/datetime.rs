@@ -405,6 +405,9 @@ pub fn dispatch_date_method(
     }
     match method {
         "isoformat" => Ok(Value::String(date.format("%Y-%m-%d").to_string().into())),
+        // C `asctime`-style, time fields zeroed: "Fri Mar 15 00:00:00 2024"
+        // (day is space-padded via `%e`).
+        "ctime" => Ok(Value::String(date.format("%a %b %e 00:00:00 %Y").to_string().into())),
         // Python: Monday == 0 … Sunday == 6.
         "weekday" => Ok(Value::Int(i64::from(date.weekday().num_days_from_monday()))),
         // Python: Monday == 1 … Sunday == 7.
@@ -503,6 +506,8 @@ pub fn dispatch_datetime_method(
                 .ok_or_else(|| value_error("time component out of range"))?;
             Ok(Value::DateTime { dt: NaiveDateTime::new(date, time), tz_offset_secs: tz })
         }
+        // C `asctime`-style: "Fri Mar 15 14:30:45 2024" (day space-padded).
+        "ctime" => Ok(Value::String(dt.format("%a %b %e %H:%M:%S %Y").to_string().into())),
         "isoformat" => {
             // CPython: `2026-01-15T14:30:00` for naive; with tz adds
             // `+HH:MM`. We don't model microseconds in the default
