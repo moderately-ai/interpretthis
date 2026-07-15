@@ -39,6 +39,17 @@ pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
     }
 }
 
+/// Class-level *constant* attributes on datetime types (as opposed to
+/// [`type_classmethod`], which resolves callables). `timezone.utc` is the fixed
+/// UTC timezone — `timezone(timedelta(0))`.
+#[must_use]
+pub fn type_attribute(type_name: &str, attr: &str) -> Option<Value> {
+    match (type_name, attr) {
+        ("timezone", "utc") => Some(Value::TimeZone(0)),
+        _ => None,
+    }
+}
+
 /// Build a `NaiveDate` with CPython's exact validation order +
 /// wording: year first (`year N is out of range`), then month
 /// (`month must be in 1..12`), then day (`day is out of range for

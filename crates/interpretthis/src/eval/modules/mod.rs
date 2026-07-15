@@ -284,6 +284,17 @@ pub fn type_classmethod(module: &str, type_name: &str, method: &str) -> Option<&
     }
 }
 
+/// A class-level *constant* attribute (`datetime.timezone.utc`) resolving to a
+/// `Value` rather than a callable. `None` when the pair is unknown (caller then
+/// tries [`type_classmethod`] before raising AttributeError).
+#[must_use]
+pub fn type_attribute(module: &str, type_name: &str, attr: &str) -> Option<crate::value::Value> {
+    match module {
+        "datetime" => datetime::type_attribute(type_name, attr),
+        _ => None,
+    }
+}
+
 fn module_not_found(module: &str) -> EvalError {
     EvalError::Exception(ExceptionValue::new(
         "ModuleNotFoundError",

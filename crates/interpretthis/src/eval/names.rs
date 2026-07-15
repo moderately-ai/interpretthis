@@ -486,7 +486,13 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
         // Live calls `datetime.strptime(...)` are handled in eval_call's
         // method path via the same registry — keep both in sync.
         Value::ModuleFunction { module, name } => {
-            if let Some(func) = crate::eval::modules::type_classmethod(module, name, attr_name) {
+            // A class constant (`datetime.timezone.utc`) resolves to a value;
+            // a classmethod (`datetime.strptime`) resolves to another callable.
+            if let Some(value) = crate::eval::modules::type_attribute(module, name, attr_name) {
+                Ok(value)
+            } else if let Some(func) =
+                crate::eval::modules::type_classmethod(module, name, attr_name)
+            {
                 Ok(Value::ModuleFunction { module: module.clone(), name: func.into() })
             } else {
                 Err(attribute_error(obj.type_name(), attr_name))

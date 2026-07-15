@@ -1353,6 +1353,9 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             }
             _ => false,
         },
+        // Two timezones are equal when their UTC offsets match (CPython compares
+        // the offset; our model carries no name to distinguish otherwise).
+        (Value::TimeZone(a), Value::TimeZone(b)) => a == b,
         _ => false,
     }
 }
