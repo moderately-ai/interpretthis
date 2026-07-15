@@ -1127,6 +1127,24 @@ pub async fn instance_unary_dunder(
     Some(invoke_slot(state, value, &method, &[], tools).await.map(|(returned, _self)| returned))
 }
 
+/// `round(value[, ndigits])` on a user-class instance: dispatches `__round__`,
+/// passing `ndigits` only when the caller supplied it (CPython calls
+/// `__round__()` with no args for a bare `round(x)`). Returns `None` when the
+/// value is not an instance with a `__round__` slot.
+pub async fn instance_round_dunder(
+    state: &mut InterpreterState,
+    value: &Value,
+    ndigits: Option<&Value>,
+    tools: &Tools,
+) -> Option<Result<Value, EvalError>> {
+    let method = instance_slot(state, value, "__round__")?;
+    let args: &[Value] = match ndigits {
+        Some(n) => std::slice::from_ref(n),
+        None => &[],
+    };
+    Some(invoke_slot(state, value, &method, args, tools).await.map(|(returned, _self)| returned))
+}
+
 /// `len(value)` — dispatches `__len__` on user-class instances (must
 /// return an int; non-int returns raise TypeError matching CPython's
 /// "object cannot be interpreted as an integer"). Falls through to
