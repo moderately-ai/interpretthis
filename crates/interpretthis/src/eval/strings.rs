@@ -567,6 +567,111 @@ fn format_scientific(val: f64, precision: usize, uppercase: bool) -> String {
 /// engine f-strings use, so there is one formatting code path. `{{` / `}}` are
 /// literal-brace escapes. Field names may chain `.attr` (dict-key lookup) and
 /// `[idx]`/`[key]` accessors, matching common CPython usage.
+/// `string.Template.substitute` / `.safe_substitute`. Replaces
+/// `$name` / `${name}` from the mapping (positional dict + kwargs, kwargs
+/// winning) and `$$` with a literal `$`. In non-safe mode a missing key
+/// raises `KeyError` and a malformed placeholder raises `ValueError`; in
+/// safe mode both are left in place verbatim.
+pub(crate) fn template_substitute(
+    template: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    safe: bool,
+) -> Result<String, EvalError> {
+    // Positional mapping dict (if any), snapshotted.
+    let positional: Option<IndexMap<ValueKey, Value>> = match args.first() {
+        Some(Value::Dict(map)) => Some(map.lock().clone()),
+        _ => None,
+    };
+    let lookup = |name: &str| -> Option<Value> {
+        if let Some(v) = kwargs.get(name) {
+            return Some(v.clone());
+        }
+        positional.as_ref().and_then(|m| m.get(&ValueKey::String(name.into())).cloned())
+    };
+
+    let chars: Vec<char> = template.chars().collect();
+    let is_ident_start = |c: char| c.is_ascii_alphabetic() || c == '_';
+    let is_ident_cont = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '$' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        // A `$` at the very end, `$$`, `${name}`, or `$name`.
+        match chars.get(i + 1) {
+            Some('$') => {
+                out.push('$');
+                i += 2;
+            }
+            Some('{') => {
+                let mut j = i + 2;
+                while j < chars.len() && chars[j] != '}' {
+                    j += 1;
+                }
+                let name: String = chars[i + 2..j.min(chars.len())].iter().collect();
+                let valid = j < chars.len()
+                    && !name.is_empty()
+                    && name.chars().next().is_some_and(is_ident_start)
+                    && name.chars().all(is_ident_cont);
+                if valid {
+                    match lookup(&name) {
+                        Some(v) => out.push_str(&format!("{v}")),
+                        None if safe => out.extend(&chars[i..=j]),
+                        None => {
+                            return Err(EvalError::Exception(ExceptionValue::new(
+                                "KeyError",
+                                format!("'{name}'"),
+                            )));
+                        }
+                    }
+                    i = j + 1;
+                } else if safe {
+                    out.push('$');
+                    i += 1;
+                } else {
+                    return Err(InterpreterError::ValueError(
+                        "Invalid placeholder in string".into(),
+                    )
+                    .into());
+                }
+            }
+            Some(&c) if is_ident_start(c) => {
+                let mut j = i + 1;
+                while j < chars.len() && is_ident_cont(chars[j]) {
+                    j += 1;
+                }
+                let name: String = chars[i + 1..j].iter().collect();
+                match lookup(&name) {
+                    Some(v) => out.push_str(&format!("{v}")),
+                    None if safe => out.extend(&chars[i..j]),
+                    None => {
+                        return Err(EvalError::Exception(ExceptionValue::new(
+                            "KeyError",
+                            format!("'{name}'"),
+                        )));
+                    }
+                }
+                i = j;
+            }
+            // A lone `$` or `$` before an invalid char.
+            _ if safe => {
+                out.push('$');
+                i += 1;
+            }
+            _ => {
+                return Err(
+                    InterpreterError::ValueError("Invalid placeholder in string".into()).into()
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn str_format(template: &str, args: &[Value], kwargs: &IndexMap<String, Value>) -> EvalResult {
     let chars: Vec<char> = template.chars().collect();
     let mut out = String::new();

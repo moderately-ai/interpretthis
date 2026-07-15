@@ -458,6 +458,10 @@ pub enum Value {
     /// semantics. Never empty (CPython seeds an empty dict for
     /// `ChainMap()`).
     ChainMap(Vec<Self>),
+    /// `string.Template` — a `$`-substitution template. Carries the raw
+    /// template string; `.substitute` / `.safe_substitute` render it and
+    /// `.template` reads it back.
+    Template(CompactString),
     /// `enum.Enum` member. Wraps the underlying value with
     /// the class name + member name + kind (Plain vs IntEnum vs
     /// StrEnum), so we can match CPython's `Color.RED` repr,
@@ -1528,6 +1532,8 @@ impl Value {
             Self::DefaultDict(data) => !data.items.is_empty(),
             // Truthy when any underlying map has entries.
             Self::ChainMap(maps) => maps.iter().any(Self::is_truthy),
+            // A Template object is always truthy (like any instance).
+            Self::Template(_) => true,
             Self::EnumMember { value, .. } => value.is_truthy(),
             // Decimal / Fraction are falsy at zero, matching CPython
             // (`bool(Decimal("0")) is False`, `bool(Fraction(0)) is
@@ -1605,6 +1611,7 @@ impl Value {
             Self::Deque { .. } => "deque",
             Self::DefaultDict { .. } => "defaultdict",
             Self::ChainMap(_) => "ChainMap",
+            Self::Template(_) => "Template",
             // CPython: type(Color.RED).__name__ == "Color". Our model
             // returns the class name so `type(x).__name__` reflects
             // the enum class.
@@ -1956,6 +1963,9 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            // CPython prints `<string.Template object at 0x...>`; the
+            // address is unavailable, so use a stable placeholder.
+            Self::Template(_) => write!(f, "<string.Template object>"),
             // CPython: empty Counter prints `Counter()`. Non-empty
             // prints `Counter({...})` with entries sorted by count
             // descending, insertion order as the tie-breaker

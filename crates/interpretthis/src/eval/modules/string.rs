@@ -9,7 +9,10 @@
 //! f-strings and `.format()`, which cover every observed extraction-
 //! script case).
 
-use crate::value::Value;
+use crate::{
+    error::{EvalResult, InterpreterError},
+    value::Value,
+};
 
 pub fn constant(name: &str) -> Option<Value> {
     let s = match name {
@@ -29,16 +32,47 @@ pub fn constant(name: &str) -> Option<Value> {
     Some(Value::String(s.into()))
 }
 
-/// `string` module registration. Constants-only; the default
-/// [`Module::call`] returns "no callable" for any invocation, and
-/// [`Module::has_function`] defaults to false.
+/// `string` module registration. Exposes the character-class constants
+/// plus the `Template` class constructor.
 pub struct StringModule;
 
+#[async_trait::async_trait]
 impl crate::eval::modules::Module for StringModule {
     fn name(&self) -> &'static str {
         "string"
     }
     fn constant(&self, name: &str) -> Option<Value> {
         constant(name)
+    }
+    fn has_function(&self, name: &str) -> bool {
+        name == "Template"
+    }
+    async fn call(
+        &self,
+        _state: &mut crate::state::InterpreterState,
+        func: &str,
+        args: &[Value],
+        _kwargs: &indexmap::IndexMap<String, Value>,
+        _tools: &crate::tools::Tools,
+    ) -> EvalResult {
+        match func {
+            // `string.Template(template_string)`.
+            "Template" => match args.first() {
+                Some(Value::String(s)) => Ok(Value::Template(s.clone())),
+                Some(other) => Err(InterpreterError::TypeError(format!(
+                    "Template() argument must be str, not {}",
+                    other.type_name()
+                ))
+                .into()),
+                None => Err(InterpreterError::TypeError(
+                    "Template() missing required argument: 'template'".into(),
+                )
+                .into()),
+            },
+            _ => Err(InterpreterError::AttributeError(format!(
+                "module 'string' has no callable '{func}'"
+            ))
+            .into()),
+        }
     }
 }

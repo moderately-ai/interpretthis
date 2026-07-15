@@ -1,0 +1,10 @@
+from collections import Counter, OrderedDict, ChainMap
+c = Counter("abracadabra")
+print(c.most_common(2))
+print(sorted(c.elements()))
+od = OrderedDict([("a", 1), ("b", 2)])
+od.move_to_end("a")
+print(list(od.keys()))
+cm = ChainMap({"a": 1}, {"b": 2})
+print(cm["a"], cm["b"])
+print(sorted(cm.keys()))

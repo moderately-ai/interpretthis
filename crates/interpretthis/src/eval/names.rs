@@ -470,6 +470,14 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                 Err(attribute_error("re.Pattern", attr_name))
             }
         }
+        // `string.Template(s).template` reads the raw template back.
+        Value::Template(t) => {
+            if attr_name == "template" {
+                Ok(Value::String(t.clone()))
+            } else {
+                Err(attribute_error("string.Template", attr_name))
+            }
+        }
         // Constructor classmethods: `f = datetime.strptime` (no call yet).
         // Live calls `datetime.strptime(...)` are handled in eval_call's
         // method path via the same registry — keep both in sync.

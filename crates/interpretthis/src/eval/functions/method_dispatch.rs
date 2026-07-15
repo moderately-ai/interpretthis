@@ -260,6 +260,31 @@ fn defaultdict_methods(
     methods::dict::dispatch_dict_method(&mut data.items, method, args, kwargs)
 }
 
+fn template_methods(
+    obj: &mut Value,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<MethodOutcome, EvalError> {
+    let Value::Template(template) = obj else {
+        return Err(type_mismatch("Template"));
+    };
+    match method {
+        // `substitute` raises on a missing key / bad placeholder;
+        // `safe_substitute` leaves them in place.
+        "substitute" | "safe_substitute" => {
+            let safe = method == "safe_substitute";
+            let rendered =
+                super::super::strings::template_substitute(template, args, kwargs, safe)?;
+            Ok(MethodOutcome::pure(Value::String(rendered.into())))
+        }
+        _ => Err(InterpreterError::AttributeError(format!(
+            "'string.Template' object has no attribute '{method}'"
+        ))
+        .into()),
+    }
+}
+
 fn chainmap_methods(
     obj: &mut Value,
     method: &str,
@@ -588,6 +613,7 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Deque { .. } => Some(deque_methods),
         Value::DefaultDict(_) => Some(defaultdict_methods),
         Value::ChainMap(_) => Some(chainmap_methods),
+        Value::Template(_) => Some(template_methods),
         Value::Set(_) => Some(set_methods),
         Value::Frozenset(_) => Some(frozenset_methods),
         Value::Tuple(_) => Some(tuple_methods),
