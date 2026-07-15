@@ -101,31 +101,10 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         return Ok(Value::BuiltinName(name.to_string()));
     }
 
-    // Exception type names are valid names for raise/except.
-    let exception_types = [
-        "Exception",
-        "ValueError",
-        "TypeError",
-        "KeyError",
-        "IndexError",
-        "AttributeError",
-        "RuntimeError",
-        "StopIteration",
-        "ZeroDivisionError",
-        "OverflowError",
-        "AssertionError",
-        "NotImplementedError",
-        "FileNotFoundError",
-        "IOError",
-        "OSError",
-        "NameError",
-        "ArithmeticError",
-        "LookupError",
-        "RecursionError",
-        "ExceptionGroup",
-        "BaseExceptionGroup",
-    ];
-    if exception_types.contains(&name) {
+    // Exception type names are valid names for raise/except. Shares the
+    // single source of truth with the builtins dispatcher so the two lists
+    // cannot drift.
+    if crate::eval::functions::is_exception_type_name(name) {
         return Ok(Value::ExceptionType(name.to_string()));
     }
 

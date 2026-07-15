@@ -768,6 +768,25 @@ pub async fn hash(
             .into()),
         };
     }
+    // A frozen dataclass is hashable even without a user `__hash__`: CPython
+    // auto-generates one over the compare-field tuple for `frozen=True, eq=True`.
+    if let Value::Instance(inst) = value {
+        if let Some(class) = state.classes.get(&inst.class_name) {
+            if class.frozen {
+                if let Some(dc_fields) = class.dataclass_fields.clone() {
+                    let values: Vec<Value> = {
+                        let fields = inst.fields.lock();
+                        dc_fields
+                            .iter()
+                            .filter(|f| f.compare)
+                            .map(|f| fields.get(&f.name).cloned().unwrap_or(Value::None))
+                            .collect()
+                    };
+                    return crate::types::dispatch_hash(state, &Value::Tuple(values));
+                }
+            }
+        }
+    }
     crate::types::dispatch_hash(state, value)
 }
 

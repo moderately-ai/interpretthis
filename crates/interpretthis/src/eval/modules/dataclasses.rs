@@ -34,7 +34,10 @@ use crate::{
 const FIELD_SENTINEL: &str = "__interpretthis_dataclasses_field__";
 
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "dataclass" | "field" | "is_dataclass" | "fields" | "asdict" | "astuple")
+    matches!(
+        name,
+        "dataclass" | "field" | "is_dataclass" | "fields" | "asdict" | "astuple" | "replace"
+    )
 }
 
 /// Call into a `dataclasses.<func>` module function. Unlike most module
@@ -145,6 +148,44 @@ pub fn call(
             )
             .into()),
         },
+        // `replace(obj, **changes)` — a copy with some fields overridden.
+        "replace" => {
+            let Some(Value::Instance(inst)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "replace() should be called on dataclass instances".into(),
+                )
+                .into());
+            };
+            let field_names: Vec<String> = state
+                .classes
+                .get(&inst.class_name)
+                .and_then(|c| c.dataclass_fields.as_ref())
+                .ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(format!(
+                        "replace() should be called on dataclass instances; '{}' is not a dataclass",
+                        inst.class_name
+                    )))
+                })?
+                .iter()
+                .map(|f| f.name.clone())
+                .collect();
+            for key in kwargs.keys() {
+                if !field_names.contains(key) {
+                    return Err(InterpreterError::TypeError(format!(
+                        "replace() got an unexpected keyword argument '{key}'"
+                    ))
+                    .into());
+                }
+            }
+            let mut new_fields = inst.fields.lock().clone();
+            for (k, v) in kwargs {
+                new_fields.insert(k.clone(), v.clone());
+            }
+            Ok(Value::Instance(InstanceValue {
+                class_name: inst.class_name.clone(),
+                fields: crate::value::shared_fields(new_fields),
+            }))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'dataclasses' has no attribute '{func}'"
         ))
