@@ -1,0 +1,10 @@
+a = frozenset([1, 2, 3])
+b = frozenset([2, 3, 4])
+print(sorted(a | b), sorted(a & b), sorted(a - b))
+print(a <= frozenset([1, 2, 3, 4]))
+s = {1, 2, 3}
+s.discard(2)
+s.add(5)
+print(sorted(s))
+print(len({frozenset([1]), frozenset([1]), frozenset([2])}))
+print({1, 2} < {1, 2, 3})

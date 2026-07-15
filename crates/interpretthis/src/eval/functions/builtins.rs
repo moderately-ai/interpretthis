@@ -770,6 +770,15 @@ pub(super) async fn try_builtin(
             check_arg_count(name, args, 1, 2)?;
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
             let start = if args.len() >= 2 { args[1].clone() } else { Value::Int(0) };
+            // CPython 3.12 sums a run of floats with Neumaier compensation,
+            // so `sum([0.1] * 10) == 1.0` rather than 0.999…. Take that
+            // fast path when start + every item is a plain number and at
+            // least one is a float; otherwise fall back to repeated
+            // `__add__` (which stays exact for pure-int sums and handles
+            // list concatenation, custom types, etc.).
+            if let Some(result) = sum_float_neumaier(&start, &items) {
+                return Ok(Some(result));
+            }
             let mut total = start;
             for item in items {
                 total = crate::eval::operations::apply_binop(
@@ -1414,6 +1423,47 @@ pub(super) async fn try_builtin(
         .into()),
         _ => Ok(None),
     }
+}
+
+/// CPython 3.12's float fast path for `sum()`: Neumaier-compensated
+/// summation of a numeric run. Returns `None` (defer to `__add__`) when
+/// `start` or any item is non-numeric, or when nothing is a float (a
+/// pure-int sum stays exact — and arbitrary-precision — on the generic
+/// path).
+fn sum_float_neumaier(start: &Value, items: &[Value]) -> Option<Value> {
+    use num_traits::ToPrimitive as _;
+    let as_num = |v: &Value| -> Option<(f64, bool)> {
+        match v {
+            #[allow(clippy::cast_precision_loss)]
+            Value::Int(i) => Some((*i as f64, false)),
+            Value::Bool(b) => Some((f64::from(u8::from(*b)), false)),
+            Value::Float(f) => Some((*f, true)),
+            Value::BigInt(b) => Some((b.to_f64()?, false)),
+            _ => None,
+        }
+    };
+    let (mut sum, mut any_float) = as_num(start)?;
+    let mut nums = Vec::with_capacity(items.len());
+    for it in items {
+        let (f, is_float) = as_num(it)?;
+        any_float |= is_float;
+        nums.push(f);
+    }
+    if !any_float {
+        return None;
+    }
+    // Neumaier (improved Kahan) compensated summation.
+    let mut c = 0.0_f64;
+    for x in nums {
+        let t = sum + x;
+        if sum.abs() >= x.abs() {
+            c += (sum - t) + x;
+        } else {
+            c += (x - t) + sum;
+        }
+        sum = t;
+    }
+    Some(Value::Float(sum + c))
 }
 
 /// `zip(...)` when at least one argument is an infinite `BuiltinIter`.

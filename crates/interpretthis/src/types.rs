@@ -844,7 +844,7 @@ static SET_TYPE: TypeObject = TypeObject {
     name: "set",
     eq_slot: set_eq,
     hash_slot: None,
-    lt_slot: noimpl_lt,
+    lt_slot: set_lt,
     contains_slot: Some(sequence_contains),
     arith_slot: set_arith,
     iter_slot: Some(sequence_iter),
@@ -866,7 +866,7 @@ static FROZENSET_TYPE: TypeObject = TypeObject {
     name: "frozenset",
     eq_slot: set_eq,
     hash_slot: Some(fallback_hash_slot),
-    lt_slot: noimpl_lt,
+    lt_slot: set_lt,
     contains_slot: Some(sequence_contains),
     arith_slot: set_arith,
     iter_slot: Some(sequence_iter),
@@ -1481,6 +1481,18 @@ fn set_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
     // the same eq semantics.
     let equal = a.iter().all(|av| b.iter().any(|bv| recurse_eq(av, bv)));
     Some(equal)
+}
+
+/// `set`/`frozenset` `<` — proper-subset test (accepts either concrete
+/// type on both sides). The `<=`/`>`/`>=` forms derive from this via
+/// `compare_builtin` (`<=` = `<` or `==`, `>` = swapped `<`), giving the
+/// full subset/superset lattice.
+fn set_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    let (Value::Set(a) | Value::Frozenset(a)) = lhs else { return None };
+    let (Value::Set(b) | Value::Frozenset(b)) = rhs else { return None };
+    // Proper subset: strictly smaller and every element contained.
+    let is_proper = a.len() < b.len() && a.iter().all(|av| b.iter().any(|bv| recurse_eq(av, bv)));
+    Some(Ok(is_proper))
 }
 
 /// Catch-all eq for variants without their own per-type slot (Function,
