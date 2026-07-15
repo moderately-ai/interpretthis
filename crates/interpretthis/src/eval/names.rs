@@ -656,6 +656,27 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
         "__suppress_context__" => {
             Ok(exc.fields.get("__suppress_context__").cloned().unwrap_or(Value::Bool(false)))
         }
+        // OSError and its subclasses expose `errno`/`strerror`/`filename` from
+        // the 2..=5-argument constructor form; a single-arg OSError has them
+        // as None (CPython). A user-set field of the same name still wins.
+        "errno" | "strerror" | "filename" | "filename2"
+            if !exc.fields.contains_key(attr_name)
+                && crate::eval::exceptions::builtin_exception_issubclass(
+                    &exc.type_name,
+                    "OSError",
+                ) =>
+        {
+            let n = exc.args.len();
+            let arg = |i: usize| exc.args.get(i).cloned().unwrap_or(Value::None);
+            let two_to_five = (2..=5).contains(&n);
+            Ok(match attr_name {
+                "errno" if two_to_five => arg(0),
+                "strerror" if two_to_five => arg(1),
+                "filename" if n >= 3 => arg(2),
+                "filename2" if n >= 5 => arg(4),
+                _ => Value::None,
+            })
+        }
         // NB: no built-in `.message` — Python 3 removed BaseException.message,
         // so `e.message` resolves only to a user-set field (else AttributeError),
         // letting `self.message = ...` in a custom __init__ win.
