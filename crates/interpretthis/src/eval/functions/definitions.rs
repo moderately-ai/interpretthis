@@ -154,8 +154,46 @@ pub async fn eval_function_def(
     let free = collect_free_names(&bound, &node.body);
     ensure_capture_cells(state, &free);
 
-    let (nonlocal_names, nonlocal_cell_id, cell_refreshes) =
+    // A nested function that reads its own name is self-recursive, but the
+    // closure snapshot above predates the `name` binding, so the body can't see
+    // itself. Back the name with a capture cell now; `set_variable(name, func)`
+    // at the end writes the (possibly decorated) function through it, giving the
+    // body a live self-reference — CPython binds a `def` name in the enclosing
+    // scope as a cell the recursive body reads.
+    let self_recursion_cell = if state.call_depth > 0
+        && free.iter().any(|n| n == name)
+        && !collect_nonlocal_names(&node.body).iter().any(|n| n == name)
+    {
+        let cell_id = state
+            .frame_cell_owners
+            .last()
+            .and_then(|owners| owners.get(name).copied())
+            .unwrap_or_else(|| {
+                let id = state.next_nonlocal_cell_id;
+                state.next_nonlocal_cell_id = state.next_nonlocal_cell_id.wrapping_add(1);
+                id
+            });
+        if let Some(owners) = state.frame_cell_owners.last_mut() {
+            owners.insert(name.to_string(), cell_id);
+        }
+        state
+            .nonlocal_cells
+            .entry(cell_id)
+            .or_default()
+            .entry(name.to_string())
+            .or_insert(Value::None);
+        Some((name.to_string(), cell_id))
+    } else {
+        None
+    };
+
+    let (nonlocal_names, nonlocal_cell_id, mut cell_refreshes) =
         resolve_closure_cells(state, node, &closure);
+    if let Some(sc) = self_recursion_cell {
+        if !cell_refreshes.iter().any(|(n, _)| *n == sc.0) {
+            cell_refreshes.push(sc);
+        }
+    }
 
     // Walk the body for `assigned_names` (what the checkpoint will
     // snapshot at call time) and `global_names` (which the checkpoint
