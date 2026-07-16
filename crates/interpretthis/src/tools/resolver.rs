@@ -69,6 +69,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "input",
     "object",
     "__import__",
+    "dir",
 ];
 
 /// True if `name` is a Python builtin the interpreter handles natively.

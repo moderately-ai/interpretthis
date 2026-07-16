@@ -1694,6 +1694,32 @@ pub(super) async fn try_builtin(
             let h = crate::eval::op::hash(state, &args[0], tools).await?;
             Ok(Some(Value::Int(h)))
         }
+        "dir" => {
+            // Security posture (critically assessed): `dir` of a builtin VALUE
+            // returns only universal, access-gated attribute-name strings — it
+            // grants no access (`obj.__class__` still raises), reveals no sandbox
+            // internals, and cannot escalate (getattr gates every name), so it is
+            // safe and matches CPython. The no-arg form (== locals()) and dir of
+            // instances / classes / modules / tools stay BLOCKED (scope / internals
+            // leak), like `vars()`/`locals()`.
+            check_arg_count(name, args, 0, 1)?;
+            let Some(arg) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "dir() with no arguments is not supported in the sandboxed interpreter (locals() is blocked)".into(),
+                )
+                .into());
+            };
+            let obj = resolve_proxy(arg).await?;
+            let Some(names) = crate::types::builtin_dir(&obj) else {
+                return Err(InterpreterError::TypeError(format!(
+                    "dir() of a '{}' is not supported in the sandboxed interpreter (only builtin values)",
+                    obj.type_name()
+                ))
+                .into());
+            };
+            let items = names.into_iter().map(|s| Value::String(s.into())).collect();
+            Ok(Some(Value::List(shared_list(items))))
+        }
         "__import__" => {
             // `__import__(name, globals=None, locals=None, fromlist=(), level=0)`.
             // The dynamic form of the `import` statement — routes through the same

@@ -100,9 +100,28 @@ async fn security_vars_blocked() {
 }
 
 #[tokio::test]
-async fn security_dir_blocked() {
+async fn security_dir_scope_and_object_blocked() {
+    // `dir` of a builtin VALUE is safe (universal, access-gated attribute names —
+    // listing grants no access and reveals no internals) and matches CPython.
     let interp = interpreter();
     let resp = interp.execute("x = dir([])", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+
+    // The no-arg form (== locals()) stays blocked, like vars()/locals().
+    let resp = interp.execute("x = dir()", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some());
+
+    // dir of a user instance stays blocked (would expose object internals).
+    let resp =
+        interp.execute("class C:\n    pass\nx = dir(C())", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some());
+
+    // dir of a module stays blocked.
+    let resp = interp.execute("import math\nx = dir(math)", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some());
+
+    // Listing `__class__` via dir does NOT grant access to it.
+    let resp = interp.execute("x = [].__class__", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some());
 }
 

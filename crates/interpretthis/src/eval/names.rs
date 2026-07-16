@@ -101,6 +101,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "bytes",
         "bytearray",
         "__import__",
+        "dir",
     ];
     if builtin_functions.contains(&name) {
         return Ok(Value::BuiltinName(name.to_string()));

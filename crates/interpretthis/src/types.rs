@@ -516,6 +516,49 @@ pub(crate) fn instance_classmethod(
     }
 }
 
+/// The sorted attribute list `dir(value)` returns for a builtin value:
+/// `object`'s dunders, the type's own dunders, its callable methods, and its
+/// data attributes (`int.real`, `range.start`, …). `None` for types not
+/// modelled here — the `dir` builtin only supports builtin *values* (listing
+/// universal, access-gated names leaks nothing); Instance/Class/Module/tool
+/// introspection stays blocked.
+pub(crate) fn builtin_dir(value: &Value) -> Option<Vec<String>> {
+    let (dunders, methods, data): (&[&str], &[&str], &[&str]) = match value {
+        Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => {
+            (INT_DUNDERS, INT_METHODS, &["denominator", "imag", "numerator", "real"])
+        }
+        Value::Float(_) => (FLOAT_DUNDERS, FLOAT_METHODS, &["imag", "real"]),
+        Value::Complex(_) => (COMPLEX_DUNDERS, COMPLEX_METHODS, &["imag", "real"]),
+        Value::String(_) => (STR_DUNDERS, STR_METHODS, &[]),
+        Value::Bytes(_) => (BYTES_DUNDERS, BYTES_METHODS, &[]),
+        Value::ByteArray(_) => (BYTEARRAY_DUNDERS, BYTEARRAY_METHODS, &[]),
+        Value::List(_) => (LIST_DUNDERS, LIST_METHODS, &[]),
+        Value::Tuple(_) => (TUPLE_DUNDERS, TUPLE_METHODS, &[]),
+        Value::Dict(_) => (DICT_DUNDERS, DICT_METHODS, &[]),
+        Value::Set(_) => (SET_DUNDERS, SET_METHODS, &[]),
+        Value::Frozenset(_) => (FROZENSET_DUNDERS, FROZENSET_METHODS, &[]),
+        Value::Range { .. } => (RANGE_DUNDERS, RANGE_METHODS, &["start", "step", "stop"]),
+        Value::None => (NONE_DUNDERS, &[], &[]),
+        _ => return None,
+    };
+    // `__class__` is listed by CPython's `dir` on every object. Listing the name
+    // is not access — `obj.__class__` stays blocked by `validate_attribute` — and
+    // the name is universal, so it leaks nothing while matching CPython. Kept OUT
+    // of the presence tables that feed getattr/hasattr, so access stays denied.
+    let mut all: Vec<String> = COMMON_DUNDERS
+        .iter()
+        .chain(dunders)
+        .chain(methods)
+        .chain(data)
+        .copied()
+        .chain(std::iter::once("__class__"))
+        .map(str::to_string)
+        .collect();
+    all.sort_unstable();
+    all.dedup();
+    Some(all)
+}
+
 /// Whether CPython's `type(value)` defines dunder `name`, for `hasattr` /
 /// `getattr` on builtin values. Returns `false` for user `Instance` / `Class`
 /// values (their dunders resolve through the class registry) and any type not
