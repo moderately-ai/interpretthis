@@ -609,6 +609,20 @@ pub fn assign_target<'a>(
                                 .insert(attr_name.to_string(), value.clone());
                             return Ok(());
                         }
+                        // Exception instances carry an arbitrary attribute
+                        // namespace (`exc.custom = ...`), stored in the boxed
+                        // `ExceptionValue::fields` — the read side already
+                        // resolves user fields. Mutate the stored value in place
+                        // (exceptions are value-semantic, not `Arc`-shared).
+                        if matches!(&obj, Value::Exception(_)) {
+                            let attr_name = attr_node.attr.as_str();
+                            crate::security::validator::validate_attribute(attr_name)?;
+                            if let Some(Value::Exception(exc)) = state.variables.get_mut(&obj_name)
+                            {
+                                exc.fields.insert(attr_name.to_string(), value.clone());
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 // Fall through to the place machinery.
