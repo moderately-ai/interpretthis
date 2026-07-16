@@ -764,6 +764,36 @@ pub fn dispatch_binop(
             _ => {}
         }
     }
+    // A sequence multiplied by a non-int gets CPython's "can't multiply sequence
+    // by non-int of type 'X'" — the valid sequence*int case is handled by the
+    // arith slot, so reaching here with a sequence operand means the other is
+    // not an int.
+    if matches!(op, BinOp::Mul) {
+        let is_seq = |v: &Value| {
+            matches!(
+                v,
+                Value::String(_)
+                    | Value::List(_)
+                    | Value::Tuple(_)
+                    | Value::Bytes(_)
+                    | Value::ByteArray(_)
+            )
+        };
+        if is_seq(lhs) {
+            return Err(InterpreterError::TypeError(format!(
+                "can't multiply sequence by non-int of type '{}'",
+                rhs.python_type_name(),
+            ))
+            .into());
+        }
+        if is_seq(rhs) {
+            return Err(InterpreterError::TypeError(format!(
+                "can't multiply sequence by non-int of type '{}'",
+                lhs.python_type_name(),
+            ))
+            .into());
+        }
+    }
     // Use the dynamic class name for instances (`type_of` bottoms out at the
     // static "object" TypeObject), matching CPython's per-class wording.
     Err(InterpreterError::TypeError(format!(

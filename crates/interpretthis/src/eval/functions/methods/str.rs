@@ -217,12 +217,15 @@ pub(crate) fn dispatch_string_method(
                 .into());
             }
             let items = iterate_value(&args[0])?;
+            // CPython names the offending index and type:
+            // `sequence item 0: expected str instance, int found`.
             let parts: Result<Vec<compact_str::CompactString>, _> = items
                 .into_iter()
-                .map(|v| match v {
+                .enumerate()
+                .map(|(i, v)| match v {
                     Value::String(s) => Ok(s),
                     _ => Err(EvalError::from(InterpreterError::TypeError(format!(
-                        "sequence item: expected str, found '{}'",
+                        "sequence item {i}: expected str instance, {} found",
                         v.type_name()
                     )))),
                 })

@@ -295,6 +295,23 @@ fn to_int(v: &Value) -> Result<i64, EvalError> {
     })
 }
 
+/// Both operands of a bitwise / shift op must be int-like; otherwise CPython
+/// raises the standard `unsupported operand type(s) for <op>: '<lt>' and '<rt>'`
+/// (naming both operands), not the generic single-operand integer-op error.
+fn require_int_operands(op: &str, left: &Value, right: &Value) -> Result<(), EvalError> {
+    if crate::value::value_as_bigint(left).is_none()
+        || crate::value::value_as_bigint(right).is_none()
+    {
+        return Err(InterpreterError::TypeError(format!(
+            "unsupported operand type(s) for {op}: '{}' and '{}'",
+            left.type_name(),
+            right.type_name()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Coerce a Value to BigInt for arbitrary-precision arithmetic.
 fn to_bigint(v: &Value) -> Result<num_bigint::BigInt, EvalError> {
     crate::value::value_as_bigint(v).ok_or_else(|| {
@@ -560,6 +577,35 @@ fn mult_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
             Ok(Value::Tuple(result))
         }
         _ => {
+            // A sequence times a non-int is CPython's "can't multiply sequence
+            // by non-int of type 'X'" (the sequence*int arms above already
+            // handled the valid case, so reaching here with a sequence means the
+            // other operand is not an int).
+            let is_seq = |v: &Value| {
+                matches!(
+                    v,
+                    Value::String(_)
+                        | Value::List(_)
+                        | Value::Tuple(_)
+                        | Value::Bytes(_)
+                        | Value::ByteArray(_)
+                )
+            };
+            let is_int = |v: &Value| matches!(v, Value::Int(_) | Value::Bool(_) | Value::BigInt(_));
+            if is_seq(left) && !is_int(right) {
+                return Err(InterpreterError::TypeError(format!(
+                    "can't multiply sequence by non-int of type '{}'",
+                    right.type_name()
+                ))
+                .into());
+            }
+            if is_seq(right) && !is_int(left) {
+                return Err(InterpreterError::TypeError(format!(
+                    "can't multiply sequence by non-int of type '{}'",
+                    left.type_name()
+                ))
+                .into());
+            }
             if either_is_float(left, right) {
                 Ok(Value::Float(to_float(left)? * to_float(right)?))
             } else {
@@ -887,6 +933,7 @@ fn pow_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, E
 
 fn lshift_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, EvalError> {
     use num_traits::{Signed, ToPrimitive as _};
+    require_int_operands("<<", left, right)?;
     let l = to_bigint(left)?;
     let r = to_bigint(right)?;
     if r.is_negative() {
@@ -910,6 +957,7 @@ fn lshift_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value
 
 fn rshift_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, EvalError> {
     use num_traits::{Signed, ToPrimitive as _};
+    require_int_operands(">>", left, right)?;
     let l = to_bigint(left)?;
     let r = to_bigint(right)?;
     if r.is_negative() {
@@ -959,6 +1007,7 @@ fn bitor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         return Ok(Value::Int(a | b));
     }
+    require_int_operands("|", left, right)?;
     Ok(crate::value::int_from_bigint(to_bigint(left)? | to_bigint(right)?))
 }
 
@@ -973,6 +1022,7 @@ fn bitxor_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         return Ok(Value::Int(a ^ b));
     }
+    require_int_operands("^", left, right)?;
     Ok(crate::value::int_from_bigint(to_bigint(left)? ^ to_bigint(right)?))
 }
 
@@ -992,6 +1042,7 @@ fn bitand_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         return Ok(Value::Int(a & b));
     }
+    require_int_operands("&", left, right)?;
     Ok(crate::value::int_from_bigint(to_bigint(left)? & to_bigint(right)?))
 }
 
