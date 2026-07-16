@@ -75,13 +75,18 @@ fn top_level_suspendable(stmt: &Stmt) -> bool {
                     if_branch_suspendable(&eh.body)
                 })
         }
+        // A `with` whose body can suspend is stepped by `run_with_suspendable`,
+        // which enters the context managers once and defers `__exit__` to the
+        // real block exit — so a `@contextmanager` generator can `yield` from
+        // inside a `with`.
+        Stmt::With(w) => if_branch_suspendable(&w.body),
         // A bare `yield` statement, or one whose RHS/return value yields.
         Stmt::Expr(_)
         | Stmt::Assign(_)
         | Stmt::AugAssign(_)
         | Stmt::AnnAssign(_)
         | Stmt::Return(_) => true,
-        // with / match / async / anything else carrying a yield → eager.
+        // match / async / anything else carrying a yield → eager.
         _ => false,
     }
 }
@@ -169,6 +174,7 @@ pub(crate) fn create_generator(
             while_resume: None,
             try_stack: Vec::new(),
             if_stack: Vec::new(),
+            with_stack: Vec::new(),
             yield_from_return: None,
             delegating_to: None,
         },
@@ -392,6 +398,7 @@ fn mark_generator_closed(state: &mut InterpreterState, id: u64) {
         frame.closed = true;
         frame.for_stack.clear();
         frame.try_stack.clear();
+        frame.with_stack.clear();
     }
 }
 
@@ -613,6 +620,25 @@ async fn run_generator_body(
                     return Err(EvalError::Signal(ControlFlow::Yield(v)));
                 }
                 Err(e) => return Err(e),
+            }
+        }
+        // Top-level `with` containing a (suspendable) yield: step it so the
+        // context managers are entered once and `__exit__` runs at the real
+        // block exit rather than on each yield (see `run_with_suspendable`).
+        if let Stmt::With(with_node) = stmt {
+            if if_branch_suspendable(&with_node.body)
+                && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
+            {
+                match run_with_suspendable(state, with_node, tools).await {
+                    Ok(()) => {
+                        *stmt_index += 1;
+                        continue;
+                    }
+                    Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                        return Err(EvalError::Signal(ControlFlow::Yield(v)));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
         // Top-level `if` containing a (suspendable) yield: step it so a yield
@@ -994,6 +1020,125 @@ async fn run_try_suspendable_inner(
         // Body/Handler already handled by the earlier phases.
         _ => Ok(()),
     }
+}
+
+/// Run a `with` statement inside a generator, stepping its body so a
+/// `yield` inside suspends without running `__exit__`. The context
+/// managers are entered once on the first pass; on every resume the
+/// already-entered managers are restored from the resume record, and
+/// `__exit__` runs only when the body truly completes or errors — this is
+/// what makes a `@contextmanager` generator able to `yield` from inside a
+/// `with`. Mirrors `run_try_suspendable`.
+fn run_with_suspendable<'a>(
+    state: &'a mut InterpreterState,
+    node: &'a rustpython_parser::ast::StmtWith,
+    tools: &'a crate::tools::Tools,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EvalError>> + Send + 'a>> {
+    Box::pin(run_with_suspendable_inner(state, node, tools))
+}
+
+async fn run_with_suspendable_inner(
+    state: &mut InterpreterState,
+    node: &rustpython_parser::ast::StmtWith,
+    tools: &crate::tools::Tools,
+) -> Result<(), EvalError> {
+    use crate::eval::control_flow::{call_context_method, exit_context_managers};
+
+    // Pop this nesting level's resume record (LIFO). `None` = a fresh entry:
+    // enter every context manager in declaration order and bind its target.
+    let (start, managers) = match pop_with_resume(state) {
+        Some(resume) => (resume.index, resume.managers),
+        None => {
+            let mut managers = Vec::with_capacity(node.items.len());
+            for item in &node.items {
+                let cm = crate::eval::eval_expr(state, &item.context_expr, tools).await?;
+                let cm = super::resolve_proxy(&cm).await?;
+                let entered = call_context_method(state, &cm, "__enter__", &[], tools).await?;
+                if let Some(var_expr) = &item.optional_vars {
+                    crate::eval::statements::assign_target(state, var_expr, entered, tools).await?;
+                }
+                managers.push(cm);
+            }
+            (0, managers)
+        }
+    };
+
+    match step_with_body(state, &node.body, start, &managers, tools).await {
+        TryStep::Yielded(v) => Err(EvalError::Signal(ControlFlow::Yield(v))),
+        // Body finished / errored: exit the managers in reverse now (with
+        // CPython's `__exit__` suppression rules), not on the intermediate yields.
+        TryStep::Completed => exit_context_managers(state, managers, None, tools).await,
+        TryStep::Errored(e) => exit_context_managers(state, managers, Some(e), tools).await,
+    }
+}
+
+/// Step the body of a `with` from `start`; on a `yield`, record the resume
+/// position and the entered managers, then return `Yielded`. Mirrors
+/// `step_try_phase`, delegating nested compound statements to their own
+/// suspend steppers.
+async fn step_with_body(
+    state: &mut InterpreterState,
+    stmts: &[Stmt],
+    start: usize,
+    managers: &[Value],
+    tools: &crate::tools::Tools,
+) -> TryStep {
+    let mut i = start;
+    while i < stmts.len() {
+        let stmt_yields = super::definitions::contains_yield_stmts(std::slice::from_ref(&stmts[i]));
+        let (result, nested) = match &stmts[i] {
+            Stmt::Try(nested_try) => {
+                (run_try_suspendable(state, nested_try, tools).await.map(|()| Value::None), true)
+            }
+            Stmt::If(if_node)
+                if stmt_yields
+                    && if_branch_suspendable(&if_node.body)
+                    && if_branch_suspendable(&if_node.orelse) =>
+            {
+                (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+            }
+            Stmt::While(w)
+                if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
+            {
+                (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
+            }
+            Stmt::With(w) if stmt_yields && if_branch_suspendable(&w.body) => {
+                (run_with_suspendable(state, w, tools).await.map(|()| Value::None), true)
+            }
+            _ => (eval_stmt(state, &stmts[i], tools).await, false),
+        };
+        match result {
+            Ok(_) => {
+                i += 1;
+                clear_resume_at_yield(state);
+            }
+            Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                push_with_resume(
+                    state,
+                    crate::state::WithResume { index: i, managers: managers.to_vec() },
+                );
+                if !nested {
+                    set_resume_at_yield(state);
+                }
+                return TryStep::Yielded(v);
+            }
+            Err(other) => return TryStep::Errored(other),
+        }
+    }
+    TryStep::Completed
+}
+
+fn push_with_resume(state: &mut InterpreterState, resume: crate::state::WithResume) {
+    if let Some(&id) = state.active_generator_stack.last() {
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.with_stack.push(resume);
+        }
+    }
+}
+
+fn pop_with_resume(state: &mut InterpreterState) -> Option<crate::state::WithResume> {
+    let id = *state.active_generator_stack.last()?;
+    state.generators.get_mut(&id)?.with_stack.pop()
 }
 
 fn push_if_resume(state: &mut InterpreterState, resume: crate::state::IfResume) {

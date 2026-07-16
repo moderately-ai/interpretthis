@@ -109,6 +109,12 @@ pub struct GeneratorFrame {
     /// exactly at the yield without re-running the branch or re-evaluating the
     /// condition. Empty when no `if` is mid-suspension.
     pub if_stack: Vec<IfResume>,
+    /// Resume state for the stack of `with` statements the generator is
+    /// suspended inside (outermost first, LIFO). Carries the already-entered
+    /// context managers so `__exit__` runs at the real block exit — not on
+    /// each `yield` — which is what lets a `@contextmanager` generator yield
+    /// from inside a `with`. Empty when no `with` is mid-suspension.
+    pub with_stack: Vec<WithResume>,
     /// Value a delegated (`yield from`) sub-generator returned, captured when
     /// the sub-generator was drained on the first pass and handed back as the
     /// value of the `yield from` expression when this frame resumes past it.
@@ -126,6 +132,17 @@ pub struct TryResume {
     pub phase: TryPhase,
     /// Statement index within the current phase's body.
     pub index: usize,
+}
+
+/// Where a suspended generator is inside a `with` statement, plus the
+/// context managers it already entered (so `__exit__` can run in reverse
+/// order at the real block exit).
+#[derive(Debug, Clone)]
+pub struct WithResume {
+    /// Statement index within the `with` body to resume at.
+    pub index: usize,
+    /// The entered context-manager objects, in declaration order.
+    pub managers: Vec<crate::value::Value>,
 }
 
 /// Where a suspended generator is inside an `if` statement.

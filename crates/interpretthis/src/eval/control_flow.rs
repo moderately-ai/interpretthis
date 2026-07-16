@@ -266,16 +266,35 @@ pub async fn eval_with(
 
     // Phase 2 — execute body.
     let body_result = eval_body(state, &node.body, tools).await;
-    let signal_to_propagate = match &body_result {
-        Err(EvalError::Signal(_)) => body_result.as_ref().err().cloned(),
+
+    // Phase 3+4 — exit in REVERSE order (with suppression) and propagate.
+    exit_context_managers(state, managers, body_result.as_ref().err().cloned(), tools).await?;
+    body_result.map_or_else(|_| Ok(Value::None), Ok)
+}
+
+/// Exit a stack of already-entered context managers in REVERSE order,
+/// applying `__exit__`'s suppression rules against `body_err` (the error
+/// or signal that escaped the `with` body, if any). Returns `Ok(())` when
+/// the block exits cleanly or the body's exception was suppressed; `Err`
+/// with the surviving error/signal otherwise. Shared by the eager
+/// `eval_with` and the generator `with`-suspend stepper so both apply
+/// identical exit semantics.
+pub(crate) async fn exit_context_managers(
+    state: &mut InterpreterState,
+    managers: Vec<Value>,
+    body_err: Option<EvalError>,
+    tools: &Tools,
+) -> Result<(), EvalError> {
+    // Signals (break/continue/return) propagate unconditionally — `__exit__`
+    // still runs, but its truthy return cannot suppress them.
+    let signal_to_propagate = match &body_err {
+        Some(EvalError::Signal(_)) => body_err.clone(),
         _ => None,
     };
-    let mut current_error: Option<EvalError> = match &body_result {
-        Err(EvalError::Signal(_)) => None,
-        _ => body_result.as_ref().err().cloned(),
+    let mut current_error = match &body_err {
+        Some(EvalError::Signal(_)) | None => None,
+        _ => body_err,
     };
-
-    // Phase 3 — exit in REVERSE order, with potential suppression.
     for cm in managers.into_iter().rev() {
         let (is_suppressible, exit_args) = build_exit_args(current_error.as_ref());
         match call_context_method(state, &cm, "__exit__", &exit_args, tools).await {
@@ -289,20 +308,13 @@ pub async fn eval_with(
             }
         }
     }
-
-    // Phase 4 — propagate. Signals always win (cannot be suppressed
-    // by __exit__). If current_error is still Some, propagate it
-    // (may be a fresh error raised by __exit__ itself). If
-    // current_error is None but body_result was Err, the body's
-    // exception was suppressed — return None rather than the
-    // original Err.
     if let Some(sig) = signal_to_propagate {
         return Err(sig);
     }
     if let Some(err) = current_error {
         return Err(err);
     }
-    body_result.map_or_else(|_| Ok(Value::None), Ok)
+    Ok(())
 }
 
 /// Construct the `(exc_type, exc_value, traceback)` triple for an
