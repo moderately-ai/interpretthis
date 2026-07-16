@@ -1599,18 +1599,26 @@ pub(super) async fn try_builtin(
         }
         "iter" => {
             check_arg_count(name, args, 1, 2)?;
-            // Two-arg form: `iter(callable, sentinel)` calls `callable` with
-            // no arguments until the result equals `sentinel`. Eagerly
-            // materialise into a list so it slots into the rest of the
-            // interpreter's snapshot-iteration model.
+            // Two-arg form: `iter(callable, sentinel)` calls `callable` with no
+            // arguments on each `next()`, stopping when the result equals
+            // `sentinel`. Lazy (CPython's `callable_iterator`) via a synthetic
+            // generator, so `iter(int, 1)` and other unbounded forms stream a
+            // value at a time rather than materialising — the sandbox's global
+            // op/iteration limits bound any downstream consumption.
             if args.len() == 2 {
                 let callable = args[0].clone();
                 let sentinel = args[1].clone();
+                if let Some(g) = lazy_gen_builtin(
+                    state,
+                    "<callable_iterator>",
+                    "while True:\n    _v = _c()\n    if _v == _s:\n        return\n    yield _v\n",
+                    &[("_c", callable.clone()), ("_s", sentinel.clone())],
+                ) {
+                    return Ok(Some(g));
+                }
+                // Fallback (body not suspend-drivable): eagerly materialise with
+                // a hard cap so a non-terminating callable can't lock the loop.
                 let mut out: Vec<Value> = Vec::new();
-                // Hard upper bound matches `for` loop semantics elsewhere
-                // in the interpreter — protects against an infinite
-                // callable; CPython has no cap but a malicious snippet
-                // can lock the interpreter indefinitely.
                 const ITER_CALLABLE_LIMIT: usize = 1_000_000;
                 for _ in 0..ITER_CALLABLE_LIMIT {
                     let next =
