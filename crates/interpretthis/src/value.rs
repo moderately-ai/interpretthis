@@ -2663,6 +2663,9 @@ impl fmt::Display for Value {
             // CPython prefixes it (`<class '__main__.Foo'>`). This stateless
             // path uses the bare name for nested classes — the state-aware
             // `render` path supplies the full `Outer.Inner` qualname.
+            // `typing` aliases repr as their bare dotted name (`typing.List`,
+            // `typing.List[int]`), not the `<class '...'>` form builtin types use.
+            Self::Type(n) if n.starts_with("typing.") => write!(f, "{n}"),
             Self::Type(n) => write!(f, "<class '{n}'>"),
             Self::Class(n) => write!(f, "<class '__main__.{n}'>"),
             Self::Module(n) => write!(f, "<module '{n}'>"),

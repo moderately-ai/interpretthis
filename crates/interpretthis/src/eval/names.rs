@@ -1032,17 +1032,40 @@ async fn eval_subscript_inner(
         return Ok(synthesised);
     }
 
-    // Subscripting a `typing` sentinel (`Optional[int]`, `Generic[T]`,
-    // `Dict[str, int]`) is a type-erased no-op: the parametrised alias behaves
-    // like its origin. Return it unchanged so chained subscripts compose and a
-    // subscripted generic (`class Stack(Generic[T])`) can serve as a base.
+    // Subscripting a `typing` alias (`Optional[int]`, `Dict[str, int]`,
+    // `Generic[T]`) is type-erased at evaluation time, but the parameterised
+    // alias reprs as `typing.List[int]` (CPython's `_GenericAlias`), which
+    // shows up in `__annotations__`. Fold the parameters into the type name;
+    // it still behaves like its origin (a subscripted `Generic[T]` can serve as
+    // a base — the class-def base loop skips any unrecognised `typing.*` name).
     if let Value::Type(name) = &obj {
         if name.starts_with("typing.") {
-            return Ok(obj);
+            return Ok(Value::Type(format!("{name}[{}]", typing_arg_repr(&index))));
         }
     }
 
     crate::eval::op::getitem(state, &obj, &index, tools).await
+}
+
+/// The annotation-style repr of a subscript parameter for a `typing` alias:
+/// builtin/type names render bare (`int`), `typing` aliases keep their dotted
+/// (already-parameterised) name, a tuple joins with `, ` (`Dict[str, int]`), a
+/// list re-wraps in brackets (`Callable[[int], str]`), and `...`/`None` render
+/// literally.
+fn typing_arg_repr(v: &Value) -> String {
+    match v {
+        Value::Type(n) | Value::Class(n) | Value::BuiltinName(n) | Value::ExceptionType(n) => {
+            n.clone()
+        }
+        Value::Ellipsis => "...".to_string(),
+        Value::None => "None".to_string(),
+        Value::Tuple(items) => items.iter().map(typing_arg_repr).collect::<Vec<_>>().join(", "),
+        Value::List(items) => {
+            let inner = items.lock().iter().map(typing_arg_repr).collect::<Vec<_>>().join(", ");
+            format!("[{inner}]")
+        }
+        other => other.repr(),
+    }
 }
 
 /// Public re-export of `invoke_factory` so the aug-assign pre-touch
