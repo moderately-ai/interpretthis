@@ -39,6 +39,29 @@ fn opt_size(args: &[Value]) -> Option<usize> {
     }
 }
 
+/// Write `s` at the stream's current cursor (overwriting then extending),
+/// advance the cursor, and return the number of characters written. Shared
+/// by `StringIO.write` and `print(..., file=<StringIO>)`.
+pub(crate) fn write_string(stream: &SharedStringIo, s: &str) -> usize {
+    let incoming: Vec<char> = s.chars().collect();
+    let written = incoming.len();
+    let mut g = stream.lock();
+    let mut chars: Vec<char> = g.buf.chars().collect();
+    let start = g.pos.min(chars.len());
+    // StringIO never gaps (pos<=len is maintained by seek clamping); overwrite
+    // then extend from the cursor.
+    for (i, c) in incoming.into_iter().enumerate() {
+        if start + i < chars.len() {
+            chars[start + i] = c;
+        } else {
+            chars.push(c);
+        }
+    }
+    g.buf = chars.into_iter().collect();
+    g.pos = start + written;
+    written
+}
+
 pub(crate) fn dispatch_stringio_method(
     stream: &SharedStringIo,
     method: &str,
@@ -49,22 +72,7 @@ pub(crate) fn dispatch_stringio_method(
         "write" => {
             reject_kwargs(method, kwargs)?;
             let s = require_str(method, args)?;
-            let incoming: Vec<char> = s.chars().collect();
-            let written = incoming.len();
-            let mut g = stream.lock();
-            let mut chars: Vec<char> = g.buf.chars().collect();
-            let start = g.pos.min(chars.len());
-            // Pad with nothing (StringIO never gaps — pos<=len is maintained by
-            // seek clamping) and overwrite/extend from the cursor.
-            for (i, c) in incoming.into_iter().enumerate() {
-                if start + i < chars.len() {
-                    chars[start + i] = c;
-                } else {
-                    chars.push(c);
-                }
-            }
-            g.buf = chars.into_iter().collect();
-            g.pos = start + written;
+            let written = write_string(stream, s);
             Ok(MethodOutcome::grew(Value::Int(written as i64), s.len()))
         }
         "writelines" => {

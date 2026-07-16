@@ -709,6 +709,16 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
         "value" if exc.type_name == "StopIteration" || exc.type_name == "StopAsyncIteration" => {
             Ok(exc.args.first().cloned().unwrap_or(Value::None))
         }
+        // `SystemExit.code` is the exit argument: `None` with no args, the sole
+        // arg with one, else the full args tuple (CPython). A user-set field of
+        // the same name still wins.
+        "code" if exc.type_name == "SystemExit" && !exc.fields.contains_key("code") => {
+            Ok(match exc.args.len() {
+                0 => Value::None,
+                1 => exc.args[0].clone(),
+                _ => Value::Tuple(exc.args.clone()),
+            })
+        }
         // `__cause__` is the explicit `raise X from Y` cause; `__context__` is
         // the implicit chain (the exception being handled when X was raised),
         // stored in the fields map by `chain_context`. They are distinct.

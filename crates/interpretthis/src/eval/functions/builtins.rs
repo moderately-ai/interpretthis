@@ -263,8 +263,24 @@ pub(super) async fn try_builtin(
             }
             let sep = kwargs.get("sep").map_or_else(|| " ".to_string(), |v| format!("{v}"));
             let end = kwargs.get("end").map_or_else(|| "\n".to_string(), |v| format!("{v}"));
-            state.append_print(&parts.join(&sep)).map_err(EvalError::Interpreter)?;
-            state.append_print(&end).map_err(EvalError::Interpreter)?;
+            let text = format!("{}{}", parts.join(&sep), end);
+            // `file=` routes the output. Absent or `sys.stdout` → the capture
+            // buffer; a StringIO → its buffer (reference-semantic); `sys.stderr`
+            // → discarded from captured stdout, matching CPython's separate
+            // stderr stream. `flush=` is accepted and ignored (we don't buffer).
+            match kwargs.get("file") {
+                Some(Value::StringIO(stream)) => {
+                    crate::eval::functions::methods::stringio::write_string(stream, &text);
+                }
+                Some(Value::Type(sentinel))
+                    if sentinel == crate::eval::modules::sys_mod::STDERR_SENTINEL =>
+                {
+                    // stderr: not part of captured stdout.
+                }
+                _ => {
+                    state.append_print(&text).map_err(EvalError::Interpreter)?;
+                }
+            }
             Ok(Some(Value::None))
         }
         "len" => {
