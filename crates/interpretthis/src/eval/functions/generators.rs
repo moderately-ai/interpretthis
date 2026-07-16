@@ -92,44 +92,15 @@ fn top_level_suspendable(stmt: &Stmt) -> bool {
     }
 }
 
-/// Yields inside a `for`/`while` body can only be suspended when the loop
-/// stepper (`run_for_suspendable` / `run_while_suspendable`) can re-enter the
-/// exact statement on resume. Those steppers step through a nested `if` (via
-/// `run_if_suspendable`) but re-run any other compound statement from its top,
-/// so a yield directly inside a nested `try`/`for`/`while`/`with`/`match` child
-/// forces the eager buffer. (A `try` reached *through* an `if` is fine — the
-/// `if` stepper handles it — hence the `if` branches use `if_branch_suspendable`.)
-fn loop_body_suspendable(stmts: &[Stmt]) -> bool {
-    stmts.iter().all(|stmt| match stmt {
-        // A nested `if` recurses *strictly* into `loop_body_suspendable` (not
-        // `if_branch_suspendable`), because the generator frame can suspend at
-        // most one loop at a time: `for_stack`'s resume slot is single-loop and
-        // `while_resume` is one field. If a nested `if`/`try` inside this loop
-        // body were allowed to carry a yielding `for`/`while`, stepping it would
-        // suspend a second loop while this one is live and corrupt the resume
-        // state (observed as an infinite re-yield). So no yielding loop may
-        // appear anywhere transitively inside a loop body.
-        Stmt::If(node) => loop_body_suspendable(&node.body) && loop_body_suspendable(&node.orelse),
-        Stmt::For(_)
-        | Stmt::While(_)
-        | Stmt::With(_)
-        | Stmt::Try(_)
-        | Stmt::TryStar(_)
-        | Stmt::Match(_) => !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)),
-        _ => true,
-    })
-}
-
-/// A top-level loop body the suspend engine can re-enter with ONE level of
-/// nested loops (depth 2). A nested `for` (name-target, no `else`) or `while`
-/// (no `else`) is allowed when its own body is strictly loop-free
-/// (`loop_body_suspendable`). Each `for` keys its own `for_stack` frame by
-/// target and each `while` its own `while_resume` entry by AST offset, so any
-/// depth-2 combination — `for`-in-`for`, `while`-in-`while`, or the `for`↔`while`
-/// mix — keeps both loops live at once. Deeper same-kind nesting
-/// (for-in-for-in-for) and `with`/`try`/`match` carrying a yield stay on the
-/// eager buffer. Mirrors exactly what the loop steppers' `Stmt::For`/`Stmt::While`
-/// arms delegate.
+/// A top-level loop body the suspend engine can re-enter, to ANY depth of nested
+/// loops. A nested `for` (bare-name target, no `else`) or `while` (no `else`) is
+/// allowed when its own body is itself loop-nest-suspendable — each `for` keys
+/// its `for_stack` frame by target and each `while` its `while_resume` entry by
+/// AST offset, so every loop in the nest keeps a distinct live frame
+/// (`for i: for j: for k: yield`, `while a: while b: yield`, any mix). Only
+/// `with`/`try`/`match` carrying a yield inside a loop, or a tuple-target /
+/// `else`-clause loop, force the eager buffer. Mirrors exactly what the loop
+/// steppers' `Stmt::For`/`Stmt::While` arms delegate.
 fn loop_nest_suspendable(stmts: &[Stmt]) -> bool {
     stmts.iter().all(|stmt| {
         let yields = super::definitions::contains_yield_stmts(std::slice::from_ref(stmt));
@@ -137,8 +108,8 @@ fn loop_nest_suspendable(stmts: &[Stmt]) -> bool {
             Stmt::If(node) => {
                 loop_nest_suspendable(&node.body) && loop_nest_suspendable(&node.orelse)
             }
-            Stmt::For(f) => !yields || for_loop_suspendable(f),
-            Stmt::While(w) => !yields || (w.orelse.is_empty() && loop_body_suspendable(&w.body)),
+            Stmt::For(f) => !yields || (for_delegatable(f) && loop_nest_suspendable(&f.body)),
+            Stmt::While(w) => !yields || (while_delegatable(w) && loop_nest_suspendable(&w.body)),
             Stmt::With(_) | Stmt::Try(_) | Stmt::TryStar(_) | Stmt::Match(_) => !yields,
             _ => true,
         }
@@ -155,13 +126,22 @@ fn for_name_target(f: &rustpython_parser::ast::StmtFor) -> Option<&str> {
     }
 }
 
-/// A yield-bearing `for` that `run_for_suspendable` can suspend and resume: a
-/// bare-name target, no `else` clause, and a loop-suspendable body (yields only
-/// in direct statements or a nested `if`). Any other shape forces the eager
-/// buffer. Shared by every stepper that steps a `for` (`run_generator_body`,
-/// `step_try_phase`, `step_with_body`, `run_if_suspendable`).
-fn for_loop_suspendable(f: &rustpython_parser::ast::StmtFor) -> bool {
-    for_name_target(f).is_some() && f.orelse.is_empty() && loop_body_suspendable(&f.body)
+/// A `for` whose SHAPE the suspend engine can step (bare-name target, no
+/// `else`) — used by the loop steppers' delegation arms. Unlike
+/// `for_loop_suspendable` it does NOT constrain the body, because arbitrary loop
+/// nesting is supported: each `for` keys its own `for_stack` frame by target, so
+/// `for i: for j: for k: yield` keeps three frames live. The gate
+/// (`loop_nest_suspendable`) validates the whole nest before the suspend path is
+/// taken, so the stepper arm only needs the shape.
+fn for_delegatable(f: &rustpython_parser::ast::StmtFor) -> bool {
+    for_name_target(f).is_some() && f.orelse.is_empty()
+}
+
+/// A `while` whose shape the suspend engine can step (no `else`). Each `while`
+/// keys its own `while_resume` entry by AST offset, so arbitrary while nesting
+/// is supported; the gate validates the nest.
+fn while_delegatable(w: &rustpython_parser::ast::StmtWhile) -> bool {
+    w.orelse.is_empty()
 }
 
 /// Yields inside an `if` branch or `try` phase can be suspended by the `if`
@@ -188,13 +168,18 @@ fn if_branch_suspendable(stmts: &[Stmt]) -> bool {
         // suspendable shape. The `for`'s position-based resume survives the
         // parent re-entry because the parent's resume record routes back into
         // `run_for_suspendable`, which restores its slot from `for_stack`.
+        // A nested loop is stepped by its own suspend engine. Its BODY must be
+        // `loop_nest_suspendable` (deep loop nesting is fine — each loop keys its
+        // own resume frame — but a `try`/`with` inside a loop body cannot be
+        // stepped by the loop stepper, so those stay eager). The loop itself is
+        // reachable here through the `if`/`try` steppers' delegation arms.
         Stmt::While(w) => {
             !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
-                || (w.orelse.is_empty() && loop_body_suspendable(&w.body))
+                || (while_delegatable(w) && loop_nest_suspendable(&w.body))
         }
         Stmt::For(f) => {
             !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
-                || for_loop_suspendable(f)
+                || (for_delegatable(f) && loop_nest_suspendable(&f.body))
         }
         Stmt::With(_) | Stmt::TryStar(_) | Stmt::Match(_) => {
             !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
@@ -872,15 +857,13 @@ async fn run_for_suspendable(
             // `for i in …: while c: yield` suspends correctly.
             let (result, nested) = match stmt {
                 Stmt::If(if_node)
-                    if if_branch_suspendable(&if_node.body)
-                        && if_branch_suspendable(&if_node.orelse)
-                        && stmt_yields =>
+                    if stmt_yields
+                        && loop_nest_suspendable(&if_node.body)
+                        && loop_nest_suspendable(&if_node.orelse) =>
                 {
                     (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
                 }
-                Stmt::While(w)
-                    if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
-                {
+                Stmt::While(w) if stmt_yields && while_delegatable(w) => {
                     // Boxed: `run_for` ↔ `run_while` is a mutual async recursion.
                     (
                         Box::pin(run_while_suspendable(state, w, tools))
@@ -891,7 +874,7 @@ async fn run_for_suspendable(
                 }
                 // A nested `for` keys its own `for_stack` frame by target, so
                 // `for i in …: for j in …: yield` keeps both live at once.
-                Stmt::For(inner) if stmt_yields && for_loop_suspendable(inner) => {
+                Stmt::For(inner) if stmt_yields && for_delegatable(inner) => {
                     let inner_target = for_name_target(inner).unwrap_or_default().to_string();
                     // Boxed: direct async self-recursion.
                     (
@@ -1013,23 +996,17 @@ async fn run_for_lazy(
             // in …: yield` (infinite outer) keeps both loops live.
             let (result, nested) = match stmt {
                 Stmt::If(if_node)
-                    if if_branch_suspendable(&if_node.body)
-                        && if_branch_suspendable(&if_node.orelse)
-                        && stmt_yields =>
+                    if stmt_yields
+                        && loop_nest_suspendable(&if_node.body)
+                        && loop_nest_suspendable(&if_node.orelse) =>
                 {
                     (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
                 }
-                Stmt::While(w)
-                    if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
-                {
-                    (
-                        Box::pin(run_while_suspendable(state, w, tools))
-                            .await
-                            .map(|()| Value::None),
-                        true,
-                    )
-                }
-                Stmt::For(inner) if stmt_yields && for_loop_suspendable(inner) => {
+                Stmt::While(w) if stmt_yields && while_delegatable(w) => (
+                    Box::pin(run_while_suspendable(state, w, tools)).await.map(|()| Value::None),
+                    true,
+                ),
+                Stmt::For(inner) if stmt_yields && for_delegatable(inner) => {
                     let inner_target = for_name_target(inner).unwrap_or_default().to_string();
                     (
                         Box::pin(run_for_suspendable(state, inner, &inner_target, tools))
@@ -1154,7 +1131,7 @@ async fn run_while_suspendable(
                 Stmt::If(if_node) => {
                     (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
                 }
-                Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+                Stmt::For(f) if stmt_yields && for_delegatable(f) => {
                     let target = for_name_target(f).unwrap_or_default().to_string();
                     // Boxed: `run_while` ↔ `run_for` is a mutual async recursion.
                     (
@@ -1166,9 +1143,7 @@ async fn run_while_suspendable(
                 }
                 // A nested `while` keys its own `while_resume` entry by AST
                 // offset, so `while a: while b: yield` keeps both live.
-                Stmt::While(w)
-                    if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
-                {
+                Stmt::While(w) if stmt_yields && while_delegatable(w) => {
                     // Boxed: direct async self-recursion.
                     (
                         Box::pin(run_while_suspendable(state, w, tools))
@@ -1392,12 +1367,10 @@ async fn step_with_body(
             {
                 (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
             }
-            Stmt::While(w)
-                if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
-            {
+            Stmt::While(w) if stmt_yields && while_delegatable(w) => {
                 (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
             }
-            Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+            Stmt::For(f) if stmt_yields && for_delegatable(f) => {
                 let target = for_name_target(f).unwrap_or_default().to_string();
                 (run_for_suspendable(state, f, &target, tools).await.map(|()| Value::None), true)
             }
@@ -1494,12 +1467,10 @@ async fn run_if_suspendable_inner(
                 (run_try_suspendable(state, t, tools).await.map(|()| Value::None), true)
             }
             Stmt::If(n) => (run_if_suspendable(state, n, tools).await.map(|()| Value::None), true),
-            Stmt::While(w)
-                if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
-            {
+            Stmt::While(w) if stmt_yields && while_delegatable(w) => {
                 (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
             }
-            Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+            Stmt::For(f) if stmt_yields && for_delegatable(f) => {
                 let target = for_name_target(f).unwrap_or_default().to_string();
                 (run_for_suspendable(state, f, &target, tools).await.map(|()| Value::None), true)
             }
@@ -1564,12 +1535,10 @@ async fn step_try_phase(
             // draining the loop and running `finally` too early. On resume the
             // `try`'s own resume record re-enters this arm, which restores the
             // loop from `while_resume`/`for_stack`.
-            Stmt::While(w)
-                if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
-            {
+            Stmt::While(w) if stmt_yields && while_delegatable(w) => {
                 (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
             }
-            Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+            Stmt::For(f) if stmt_yields && for_delegatable(f) => {
                 let target = for_name_target(f).unwrap_or_default().to_string();
                 (run_for_suspendable(state, f, &target, tools).await.map(|()| Value::None), true)
             }
