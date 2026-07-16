@@ -5,11 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] — 2026-07-16
 
-Post-0.4 hardening: closing CPython parity gaps found by widening the differential
-parity corpus, plus a sandbox-robustness pass over the host-binding, resource-limit,
-and state-resume seams. No new host-boundary surface.
+The debut of the Python (PyPI) and Node (npm) bindings, wrapped in a hardening
+and parity pass for embedding: sandbox-constructible input can no longer abort or
+OOM the host, list/dict memory sizing is O(1) per assignment, and a batch of
+CPython parity gaps (Decimal/Fraction/typing) is closed — with no new
+host-boundary surface. The repository also became a Cargo workspace to house the
+binding crates.
 
 ### Security / robustness
 
@@ -41,32 +44,6 @@ and state-resume seams. No new host-boundary surface.
 
 ### Added
 
-- `Decimal` total-order and fused arithmetic methods: `compare_total`,
-  `copy_sign`, `fma`, `remainder_near`, and `adjusted` (finite operands), plus a
-  standalone `decimal.Context(prec=…, rounding=…)` constructor. `to_integral_value`
-  / `to_integral` / `to_integral_exact` now honour an explicit `rounding=` keyword.
-- `Fraction.from_decimal` classmethod (exact conversion of a `Decimal`), alongside
-  the existing `Fraction.from_float`.
-
-### Changed
-
-- `Decimal.copy_sign` now takes its sign from `-0`/`-Inf` operands (the sign lives
-  on the value's kind, not its zero payload).
-- `typing` runtime reprs match CPython: a `TypeVar`/`ParamSpec` reprs as `~T`, and
-  `None` inside a generic alias reprs as `NoneType` (`Union[int, None]` →
-  `typing.Union[int, NoneType]`). `Union[...]` compares equal regardless of member
-  order (`Union[int, str] == Union[str, int]`).
-- `x.__class__` is now readable (returns the type object, identical to `type(x)`);
-  assigning to `__class__` remains blocked. No new host-boundary surface — the
-  result only names classes already reachable in the sandbox.
-- ASCII decode errors now carry CPython's full detail
-  (`'ascii' codec can't decode byte 0xNN in position P: ordinal not in range(128)`)
-  instead of a truncated message.
-
-## [0.4.0] — 2026-07-13
-
-### Added
-
 - **Python bindings, shipping to PyPI as `interpretthis`.** A `cp311-abi3` wheel
   per platform (CPython >= 3.11), no runtime dependencies. Tools may be sync
   `def` or `async def`; `execute()` blocks, `await execute_async()` runs on the
@@ -76,6 +53,12 @@ and state-resume seams. No new host-boundary surface.
   for macOS, Linux (glibc + musl), and Windows on x64 and arm64; Node 22+. Tools
   may be `function` or `async function`. `execute()` is async by necessity: a JS
   tool callback can only resolve while the event loop is free.
+- `Decimal` total-order and fused arithmetic methods: `compare_total`,
+  `copy_sign`, `fma`, `remainder_near`, and `adjusted` (finite operands), plus a
+  standalone `decimal.Context(prec=…, rounding=…)` constructor. `to_integral_value`
+  / `to_integral` / `to_integral_exact` now honour an explicit `rounding=` keyword.
+- `Fraction.from_decimal` classmethod (exact conversion of a `Decimal`), alongside
+  the existing `Fraction.from_float`.
 - `release-python.yml` and `release-npm.yml`: every artifact is built *and*
   install-smoked on a native runner, and publishing is gated behind a manual
   dispatch plus a protected environment with a required reviewer. A tag builds; it
@@ -114,6 +97,18 @@ and state-resume seams. No new host-boundary surface.
   `RELEASING.md`).
 - `Cargo.lock` is now committed. The workspace will ship prebuilt binaries, and
   those must build from a pinned, auditable dependency graph.
+- `Decimal.copy_sign` now takes its sign from `-0`/`-Inf` operands (the sign lives
+  on the value's kind, not its zero payload).
+- `typing` runtime reprs match CPython: a `TypeVar`/`ParamSpec` reprs as `~T`, and
+  `None` inside a generic alias reprs as `NoneType` (`Union[int, None]` →
+  `typing.Union[int, NoneType]`). `Union[...]` compares equal regardless of member
+  order (`Union[int, str] == Union[str, int]`).
+- `x.__class__` is now readable (returns the type object, identical to `type(x)`);
+  assigning to `__class__` remains blocked. No new host-boundary surface — the
+  result only names classes already reachable in the sandbox.
+- ASCII decode errors now carry CPython's full detail
+  (`'ascii' codec can't decode byte 0xNN in position P: ordinal not in range(128)`)
+  instead of a truncated message.
 
 ## [0.3.0] — 2026-07-09
 
@@ -213,6 +208,7 @@ for untrusted and LLM-generated code.
 - Not an embedded CPython; language surface is intentional — see
   [`CONFORMANCE.md`](./CONFORMANCE.md) and [`THREAT_MODEL.md`](./THREAT_MODEL.md).
 
+[0.4.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.4.0
 [0.3.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.3.0
 [0.2.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.2.0
 [0.1.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.1.0

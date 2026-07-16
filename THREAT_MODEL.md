@@ -58,6 +58,8 @@ These are intentional DoS controls — the operations themselves are legal in th
 - **Stdout** — `max_stdout_bytes`, default 64 KiB.
 - **Wall-clock** — optional `max_execution_time`; checked cooperatively every 100 ops (does not pre-empt a blocked tool future).
 - **Collection / string multiply caps** — fixed ceilings on list/string repetition size (`MAX_COLLECTION_SIZE` / `MAX_STRING_SIZE` in `crates/interpretthis/src/eval/operations.rs`), independent of the memory budget.
+- **Eager-allocation caps** — `list(range(n))`, `bytes(n)`/`bytearray(n)`, and integer `**` are bounded by the O(1) predicted size (element count / byte count / result bit-length) *before* allocating, so a single expression cannot allocate its way to an uncatchable `SIGABRT` before a limit is evaluated.
+- **Stack growth on deep recursion** — the evaluator, the value-size walk, deep-value `Drop`, and both bindings' host↔value conversion run under `stacker`, and conversion is additionally depth-capped, so a deeply-nested or self-referential value raises `RecursionError`/a clean conversion error instead of overflowing the native stack.
 - **Integer overflow** — arithmetic uses `checked_*` ops where applicable; overflow surfaces as a typed error, not a panic or wrap. Very large integer exponents may take a float fast-path rather than counting ops.
 
 Defaults live in `crates/interpretthis/src/config.rs`; `InterpreterConfig` lets callers tighten or loosen each independently.
