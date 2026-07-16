@@ -1090,8 +1090,8 @@ static DEQUE_TYPE: TypeObject = TypeObject {
     arith_slot: noimpl_arith,
     iter_slot: Some(deque_iter),
     get_item_slot: Some(deque_get_item),
-    set_item_slot: None,
-    del_item_slot: None,
+    set_item_slot: Some(deque_set_item),
+    del_item_slot: Some(deque_del_item),
     missing_slot: None,
     len_slot: Some(deque_len),
     get_attr_slot: Some(deque_get_attr),
@@ -3653,6 +3653,27 @@ fn deque_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> 
     let raw = int_index(index, "deque")?;
     let idx = normalize_seq_index(raw, items.len(), "deque")?;
     Ok(items[idx].clone())
+}
+
+fn deque_set_item(container: &mut Value, index: &Value, value: Value) -> Result<isize, EvalError> {
+    let Value::Deque { items, .. } = container else {
+        unreachable!("deque_set_item only on DEQUE_TYPE")
+    };
+    let raw = int_index(index, "deque")?;
+    let idx = normalize_seq_index(raw, items.len(), "deque")?;
+    let new_size = crate::state::estimate_value_size(&value);
+    let old = std::mem::replace(&mut items[idx], value);
+    Ok(crate::eval::place::size_delta(crate::state::estimate_value_size(&old), new_size))
+}
+
+fn deque_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalError> {
+    let Value::Deque { items, .. } = container else {
+        unreachable!("deque_del_item only on DEQUE_TYPE")
+    };
+    let raw = int_index(index, "deque")?;
+    let idx = normalize_seq_index(raw, items.len(), "deque")?;
+    let removed = items.remove(idx);
+    Ok(-crate::eval::place::to_isize(removed.as_ref().map_or(0, crate::state::estimate_value_size)))
 }
 
 #[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]

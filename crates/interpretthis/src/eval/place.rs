@@ -377,20 +377,6 @@ fn set_index(container: &mut Value, key: &Value, value: Value) -> Result<isize, 
         );
         return Ok(delta);
     }
-    // `deque[i] = v` assigns in place at a (possibly negative) index — a deque
-    // is a mutable sequence but has no `set_item_slot` type-object entry.
-    if let Value::Deque { items, .. } = container {
-        let idx = seq_index(items.len(), key)?;
-        let new_size = estimate_value_size(&value);
-        return items.get_mut(idx).map_or_else(
-            || Err(InterpreterError::Runtime("deque index out of range".into()).into()),
-            |slot| {
-                let delta = size_delta(estimate_value_size(slot), new_size);
-                *slot = value;
-                Ok(delta)
-            },
-        );
-    }
     crate::types::dispatch_setitem(container, key, value)
 }
 
