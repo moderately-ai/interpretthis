@@ -58,7 +58,10 @@ test('dangerous builtins do not exist', async () => {
 })
 
 test('introspection escapes are a security error', async () => {
-  const result = await new Interpreter().execute('x = ().__class__')
+  // Reading `__class__` is allowed (it just returns the type). The escape is the
+  // next hop — `__mro__`/`__bases__` off that type walk toward `object` — so
+  // those attributes stay blocked.
+  const result = await new Interpreter().execute('x = ().__class__.__mro__')
   assert.equal(result.error.kind, 'security')
 })
 
@@ -297,6 +300,15 @@ test('an unsupported sandbox value throws naming the type', async () => {
   const interp = new Interpreter()
   await interp.execute('def f():\n    pass')
   assert.throws(() => interp.getVariable('f'), /function/)
+})
+
+test('a self-referential value throws instead of aborting the process', async () => {
+  // A cyclic list is constructible in the sandbox; converting it back must throw
+  // cleanly rather than recurse until the native stack overflows and takes the
+  // whole Node process down across the FFI boundary.
+  const interp = new Interpreter()
+  await interp.execute('a = []\na.append(a)')
+  assert.throws(() => interp.getVariable('a'))
 })
 
 // --- state persistence ----------------------------------------------------
