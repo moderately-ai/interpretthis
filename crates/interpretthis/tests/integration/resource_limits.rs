@@ -781,3 +781,71 @@ async fn dos_deep_nested_statements_clean_error() {
     let resp = interp.execute(&code, &Tools::new(), HashMap::new()).await;
     let _ = resp.error; // bounded outcome, never a crash
 }
+
+// --- Materialisation / allocation caps: these must fail closed with a clean
+// error, never allocate their way to an uncatchable process abort (SIGABRT). ---
+
+#[tokio::test]
+async fn resource_limits_list_of_huge_range_is_rejected_not_oom() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let resp = interp.execute("x = list(range(10**12))", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "materialising a 10**12 range must error, not OOM");
+    let msg = format!("{:?}", resp.error.unwrap());
+    assert!(msg.contains("too large") || msg.contains("limit"), "unexpected error: {msg}");
+}
+
+#[tokio::test]
+async fn resource_limits_bytes_of_huge_count_is_rejected_not_oom() {
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let resp = interp.execute("x = bytes(10**12)", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "bytes(10**12) must error, not allocate a terabyte");
+    let msg = format!("{:?}", resp.error.unwrap());
+    assert!(msg.contains("maximum size") || msg.contains("limit"), "unexpected error: {msg}");
+}
+
+#[tokio::test]
+async fn resource_limits_giant_integer_power_is_rejected_before_computing() {
+    // (2**1000000)**1000000 would be a ~10**12-bit (~130 GB) integer; the
+    // predicted-bit-length check must reject it before `pow` builds it.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let resp = interp.execute("x = (2**1000000) ** 1000000", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_some(), "an over-limit integer power must error, not OOM");
+    let msg = format!("{:?}", resp.error.unwrap());
+    assert!(msg.contains("too large") || msg.contains("Overflow"), "unexpected error: {msg}");
+}
+
+#[tokio::test]
+async fn resource_limits_legal_large_power_still_computes() {
+    // The predictive reject must not be over-eager: 2**1000000 fits the default
+    // max_int_bits (1_048_576) and must still succeed.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    let resp = interp.execute("x = 2 ** 1000000\nprint(x > 0)", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_none(), "2**1000000 is legal: {:?}", resp.error);
+    assert_eq!(resp.stdout, "True\n");
+}
+
+#[tokio::test]
+async fn resource_limits_deeply_nested_value_build_does_not_overflow_stack() {
+    // Loop-built deep nesting never trips the recursion limit, yet every walk
+    // over the value (memory sizing on each assignment, drop at teardown) must
+    // grow the stack rather than overflow it and abort the process.
+    let interp =
+        Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
+    // Depth 2000 keeps the pre-incremental-accounting O(n^2) sizing fast; it is
+    // still far past the ~1000-frame native-stack overflow the stacker guard
+    // prevents. (Raised once memory sizing is O(1) per assignment.)
+    let resp = interp
+        .execute(
+            "a = []\nfor _ in range(2000):\n    a = [a]\nprint('built')",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    // The assertion is simply that we returned at all (no SIGSEGV/SIGABRT).
+    assert!(resp.error.is_none(), "deep nesting should build cleanly: {:?}", resp.error);
+    assert_eq!(resp.stdout, "built\n");
+}

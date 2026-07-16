@@ -2839,14 +2839,28 @@ fn dict_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
 /// `iter(range)` — materialize the arithmetic progression as a `Vec<Int>`.
 /// Step is validated at range-construction time (step != 0); the loop here
 /// just walks until the stop bound respecting the sign.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "IterSlot protocol; range walk cannot fail (step != 0 is enforced at construction)"
-)]
 fn range_iter(value: &Value) -> Result<Vec<Value>, EvalError> {
     let Value::Range { start, stop, step } = value else {
         unreachable!("range_iter only on RANGE_TYPE")
     };
+    // Materialising allocates one `Value` per element, so `list(range(10**18))`
+    // would OOM-abort the process before any operation limit fires. Reject by
+    // the O(1) length first; count in i128 so extreme i64 bounds cannot overflow
+    // the length computation itself.
+    let (s, e, st) = (i128::from(*start), i128::from(*stop), i128::from(*step));
+    let span = e - s;
+    let count: i128 = if (st > 0 && span > 0) || (st < 0 && span < 0) {
+        span / st + i128::from(span % st != 0)
+    } else {
+        0
+    };
+    if count > crate::eval::operations::MAX_COLLECTION_SIZE as i128 {
+        return Err(InterpreterError::LimitExceeded(format!(
+            "range with {count} elements is too large to materialise (limit: {})",
+            crate::eval::operations::MAX_COLLECTION_SIZE
+        ))
+        .into());
+    }
     let mut items = Vec::new();
     let mut i = *start;
     match (*step).cmp(&0) {

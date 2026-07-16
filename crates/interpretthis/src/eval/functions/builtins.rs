@@ -1770,6 +1770,16 @@ pub(super) async fn try_builtin(
                         let count = usize::try_from(*n).map_err(|_| {
                             EvalError::from(InterpreterError::ValueError("negative count".into()))
                         })?;
+                        // `bytes(10**18)` would allocate exabytes and abort the
+                        // process before any memory limit is consulted; bound it
+                        // up front like a string of that length.
+                        if count > crate::eval::operations::MAX_STRING_SIZE {
+                            return Err(InterpreterError::LimitExceeded(format!(
+                                "bytes({count}) exceeds the maximum size ({} bytes)",
+                                crate::eval::operations::MAX_STRING_SIZE
+                            ))
+                            .into());
+                        }
                         vec![0u8; count]
                     }
                     Value::Bytes(b) => b.clone(),

@@ -47,6 +47,25 @@ def test_injects_variables_and_reads_them_back() -> None:
     assert "total" in interp.state_keys()
 
 
+def test_cyclic_value_conversion_raises_not_crashes() -> None:
+    # A self-referential list is constructible inside the sandbox; converting it
+    # back to a Python object must raise cleanly rather than recurse until the
+    # native stack overflows and aborts the whole host process.
+    interp = Interpreter()
+    interp.execute("a = []\na.append(a)")
+    with pytest.raises(TypeError):
+        interp.get_variable("a")
+
+
+def test_deeply_nested_value_conversion_raises_not_crashes() -> None:
+    # Deep-but-finite nesting (built by a loop, so it never trips the recursion
+    # limit) must also hit the converter depth bound, not overflow the stack.
+    interp = Interpreter()
+    interp.execute("a = []\nfor _ in range(5000):\n    a = [a]")
+    with pytest.raises(TypeError):
+        interp.get_variable("a")
+
+
 def test_version_and_state_format_version_are_exposed() -> None:
     assert isinstance(interpretthis.__version__, str)
     assert isinstance(interpretthis.STATE_FORMAT_VERSION, int)

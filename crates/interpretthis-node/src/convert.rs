@@ -29,6 +29,8 @@
 //! | `Set`              | `Set`                    | `Set`           |
 //! | `Dict`             | plain object, or `Map` when a key is not a string | object / `Map` |
 //! | `DateTime`/`Date`  | `Date`                   | `Date`          |
+//! | `Decimal`/`Fraction` | exact `string`         | — (a string is a `str`) |
+//! | `Complex`/`Time`/`TimeDelta`/`TimeZone`/`Ellipsis` | Python `string` form | — |
 //!
 //! Two consequences worth stating plainly, because they surprise people:
 //!
@@ -67,6 +69,52 @@ const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 fn type_error(message: String) -> Error {
     Error::new(Status::InvalidArg, message)
+}
+
+/// Maximum nesting depth when converting a value across the FFI boundary.
+/// Matches the interpreter's `max_recursion_depth` default. A cyclic value
+/// (`a = []; a.push(a)`, constructible inside the sandbox) or a pathologically
+/// deep one would otherwise recurse until the native stack overflows and
+/// *aborts the host process*; this bound turns that into a clean error.
+const MAX_CONVERT_DEPTH: usize = 1000;
+
+/// The depth guard bounds *how many* frames recurse; `stacker` ensures those
+/// frames have stack to run in. Without it, the legal (bounded) recursion
+/// overflows the thread's base stack long before reaching `MAX_CONVERT_DEPTH`
+/// — the same crate and constants the core evaluator uses.
+const CONVERT_STACK_RED_ZONE: usize = 1024 * 1024;
+const CONVERT_STACK_GROW: usize = 32 * 1024 * 1024;
+
+thread_local! {
+    static CONVERT_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII depth counter shared by both conversion directions. napi conversion for
+/// a call runs on a single thread, so a thread-local is the right scope, and it
+/// works even though the recursion re-enters through napi's trait machinery
+/// (`SandboxValue`'s `ToNapiValue`).
+struct DepthGuard;
+
+impl DepthGuard {
+    fn enter() -> Result<Self> {
+        CONVERT_DEPTH.with(|d| {
+            if d.get() >= MAX_CONVERT_DEPTH {
+                return Err(type_error(
+                    "interpretthis: value is nested too deeply to convert across the sandbox \
+                     boundary (a reference cycle, or excessive nesting)"
+                        .to_string(),
+                ));
+            }
+            d.set(d.get() + 1);
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        CONVERT_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
 }
 
 /// A [`Value`] as it crosses the JavaScript boundary.
@@ -124,6 +172,13 @@ impl ToNapiValue for SandboxValue {
 /// silently handing back `null` for a value that *is* something turns a boundary
 /// error into a wrong answer somewhere downstream.
 pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>> {
+    let _depth = DepthGuard::enter()?;
+    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || {
+        value_to_js_inner(env, value)
+    })
+}
+
+fn value_to_js_inner<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>> {
     match value {
         Value::None | Value::NotImplemented => Null.into_unknown(env),
         Value::Bool(b) => b.into_unknown(env),
@@ -194,15 +249,21 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
         }
 
         Value::DateTime { dt, tz_offset_secs } => {
-            let utc: DateTime<Utc> = tz_offset_secs.map_or_else(
-                || DateTime::<Utc>::from_naive_utc_and_offset(*dt, Utc),
-                |secs| {
-                    DateTime::<Utc>::from_naive_utc_and_offset(
-                        *dt - chrono::TimeDelta::seconds(i64::from(secs)),
-                        Utc,
+            // `checked_sub_signed` rather than `-`: chrono's `Sub` panics when the
+            // shifted instant leaves the representable range (near year ±262143),
+            // and a panic here would abort the host process across the FFI edge.
+            let naive_utc = match tz_offset_secs {
+                Some(secs) => dt
+                    .checked_sub_signed(chrono::TimeDelta::seconds(i64::from(*secs)))
+                    .ok_or_else(|| {
+                    type_error(
+                        "datetime with that UTC offset is out of range for a JavaScript Date"
+                            .to_string(),
                     )
-                },
-            );
+                })?,
+                None => *dt,
+            };
+            let utc: DateTime<Utc> = DateTime::<Utc>::from_naive_utc_and_offset(naive_utc, Utc);
             utc.into_unknown(env)
         }
         Value::Date(d) => {
@@ -221,6 +282,17 @@ pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>>
             Value::Decimal(d.clone(), *kind).to_string().into_unknown(env)
         }
         Value::Fraction(f) => f.to_string().into_unknown(env),
+
+        // Types JavaScript has no analogue for cross as their exact Python
+        // string form — the same one-way, lossy convention as Decimal/Fraction
+        // (a JS caller gets an inspectable value instead of a hard error). The
+        // Python binding has native targets for these, so this is a Node-only
+        // projection; it does not round-trip (a JS string comes back a `str`).
+        Value::Complex(_)
+        | Value::Ellipsis
+        | Value::Time(_)
+        | Value::TimeDelta(_)
+        | Value::TimeZone(_) => value.to_string().into_unknown(env),
 
         // Value is #[non_exhaustive]; the rest is interpreter-internal.
         other => Err(type_error(format!(
@@ -349,6 +421,13 @@ impl FromNapiValue for SandboxValue {
 /// Returns an error for JavaScript values with no sandbox analogue (functions,
 /// symbols, class instances), and for unhashable dict keys.
 pub fn js_to_value(env: &Env, value: Unknown<'_>) -> Result<Value> {
+    let _depth = DepthGuard::enter()?;
+    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || {
+        js_to_value_inner(env, value)
+    })
+}
+
+fn js_to_value_inner(env: &Env, value: Unknown<'_>) -> Result<Value> {
     match value.get_type()? {
         ValueType::Null | ValueType::Undefined => Ok(Value::None),
         ValueType::Boolean => Ok(Value::Bool(value.coerce_to_bool()?)),

@@ -28,10 +28,12 @@ use crate::{
     value::{Value, shared_list},
 };
 
-/// Maximum number of elements in a collection created by multiplication.
-const MAX_COLLECTION_SIZE: usize = 10_000_000;
-/// Maximum string size in bytes from multiplication.
-const MAX_STRING_SIZE: usize = 100 * 1024 * 1024;
+/// Maximum number of elements in a collection created by multiplication or by
+/// materialising a lazy sequence (e.g. `list(range(n))`).
+pub(crate) const MAX_COLLECTION_SIZE: usize = 10_000_000;
+/// Maximum size in bytes of a `str`/`bytes` created by multiplication or by a
+/// count constructor (`bytes(n)`).
+pub(crate) const MAX_STRING_SIZE: usize = 100 * 1024 * 1024;
 
 /// Convert a validated-positive i64 repeat count into a `usize` for
 /// container replication. Saturates to `usize::MAX` on 32-bit platforms
@@ -924,6 +926,21 @@ fn pow_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, E
                 return Err(EvalError::Exception(crate::value::ExceptionValue::new(
                     "OverflowError",
                     "exponent too large for integer power",
+                )));
+            }
+            // Reject *before* computing when the result must exceed the bit
+            // limit: a base of `nbits` bits raised to `exp` has at least
+            // (nbits-1)*exp bits. Without this, `(2**1000000) ** 1000000`
+            // materialises a ~130 GB integer before the post-hoc bit check in
+            // `int_from_bigint_limited` can reject it — an uncatchable OOM abort.
+            // The lower-bound estimate never rejects a value that would actually
+            // fit (it can only under-estimate), so a legal `2**1000000` still
+            // computes; the base then bounds the built integer to < 2x the limit.
+            let nbits = l.bits();
+            if nbits >= 2 && (nbits - 1).saturating_mul(u64::from(exp)) >= max_int_bits {
+                return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                    "OverflowError",
+                    "integer power result too large to represent",
                 )));
             }
             crate::value::int_from_bigint_limited(l.pow(exp), max_int_bits)

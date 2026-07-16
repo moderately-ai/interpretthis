@@ -41,6 +41,52 @@ use pyo3::{
     },
 };
 
+/// Maximum nesting depth when converting a value across the FFI boundary.
+/// Matches the interpreter's `max_recursion_depth` default. A cyclic value
+/// (`a = []; a.append(a)`, constructible inside the sandbox) or a
+/// pathologically deep one would otherwise recurse until the native stack
+/// overflows and *aborts the host process*; this bound turns that into a clean
+/// `TypeError` at the boundary.
+const MAX_CONVERT_DEPTH: usize = 1000;
+
+/// The depth guard bounds *how many* frames recurse; `stacker` ensures those
+/// frames have stack to run in. Without it, the legal (bounded) recursion
+/// overflows the thread's base stack long before reaching `MAX_CONVERT_DEPTH`
+/// — the same crate and constants the core evaluator uses.
+const CONVERT_STACK_RED_ZONE: usize = 1024 * 1024;
+const CONVERT_STACK_GROW: usize = 32 * 1024 * 1024;
+
+thread_local! {
+    static CONVERT_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII depth counter shared by both conversion directions. Conversion is
+/// single-threaded per call (pyo3 holds the GIL), so a thread-local is the
+/// right scope, and it works even though the recursion re-enters through
+/// pyo3's own trait machinery.
+struct DepthGuard;
+
+impl DepthGuard {
+    fn enter() -> PyResult<Self> {
+        CONVERT_DEPTH.with(|d| {
+            if d.get() >= MAX_CONVERT_DEPTH {
+                return Err(PyTypeError::new_err(
+                    "interpretthis: value is nested too deeply to convert across the sandbox \
+                     boundary (a reference cycle, or excessive nesting)",
+                ));
+            }
+            d.set(d.get() + 1);
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        CONVERT_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// A `Value` the sandbox can hold but Python cannot receive.
 fn unsupported_outbound(value: &Value) -> PyErr {
     PyTypeError::new_err(format!(
@@ -74,6 +120,11 @@ fn unsupported_inbound(ob: &Bound<'_, PyAny>) -> PyErr {
 /// Returns `TypeError` for variants with no Python analogue (functions,
 /// classes, instances, generators, pending tool proxies, ...).
 pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
+    let _depth = DepthGuard::enter()?;
+    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || value_to_py_inner(py, value))
+}
+
+fn value_to_py_inner<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
     Ok(match value {
         Value::None => py.None().into_bound(py),
         Value::NotImplemented => py.NotImplemented().into_bound(py),
@@ -197,6 +248,11 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
 /// Returns `TypeError` for Python objects with no sandbox analogue, and for
 /// unhashable dict/set keys.
 pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let _depth = DepthGuard::enter()?;
+    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || py_to_value_inner(ob))
+}
+
+fn py_to_value_inner(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     if ob.is_none() {
         return Ok(Value::None);
     }

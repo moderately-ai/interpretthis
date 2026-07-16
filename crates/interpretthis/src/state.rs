@@ -783,11 +783,24 @@ const INDEXMAP_PER_ENTRY_BYTES: usize = 16;
 /// the sandbox so honest accounting is load-bearing for resource
 /// protection — under-reporting let snippets allocate ~10× their
 /// configured budget before tripping the limit.
+pub fn estimate_value_size(value: &crate::value::Value) -> usize {
+    // A value can nest arbitrarily deep (`a = []; for _ in range(9999): a = [a]`
+    // is loop-built, so it never trips the recursion limit), and this walk
+    // recurses once per level. Grow the host stack on demand — the same crate
+    // and reason as the evaluator — so a deep-but-finite value is sized rather
+    // than overflowing the stack and aborting the process. The `try_lock`
+    // arms already handle self-referential cycles.
+    stacker::maybe_grow(EST_STACK_RED_ZONE, EST_STACK_GROW, || estimate_value_size_inner(value))
+}
+
+const EST_STACK_RED_ZONE: usize = 512 * 1024;
+const EST_STACK_GROW: usize = 32 * 1024 * 1024;
+
 #[expect(
     clippy::match_same_arms,
     reason = "match arms are grouped by variant family (numerics, sequences, mappings, Track D types) for readability; merging same-body arms would scatter them across the table"
 )]
-pub fn estimate_value_size(value: &crate::value::Value) -> usize {
+fn estimate_value_size_inner(value: &crate::value::Value) -> usize {
     use crate::value::Value;
     match value {
         Value::None | Value::NotImplemented | Value::Ellipsis => 0,
@@ -981,6 +994,12 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
 
 /// Estimate the memory size of a `ValueKey` in bytes.
 pub fn estimate_key_size(key: &crate::value::ValueKey) -> usize {
+    // A nested tuple/frozenset key can be loop-built arbitrarily deep, like a
+    // value; grow the stack so sizing it cannot overflow.
+    stacker::maybe_grow(EST_STACK_RED_ZONE, EST_STACK_GROW, || estimate_key_size_inner(key))
+}
+
+fn estimate_key_size_inner(key: &crate::value::ValueKey) -> usize {
     use crate::value::ValueKey;
     match key {
         ValueKey::None | ValueKey::Ellipsis => 0,
