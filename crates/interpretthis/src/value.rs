@@ -1262,6 +1262,11 @@ pub struct ClassValue {
     /// the class itself) rather than a "not subscriptable" TypeError.
     #[serde(default)]
     pub is_generic: bool,
+    /// Field names annotated `InitVar[...]` — pseudo-fields passed to a
+    /// `@dataclass`'s `__init__` and `__post_init__` but never stored on the
+    /// instance nor listed by `fields()`.
+    #[serde(default)]
+    pub initvar_fields: Vec<String>,
 }
 
 impl ClassValue {
@@ -1291,6 +1296,7 @@ impl ClassValue {
             metaclass: None,
             qualname: name,
             is_generic: false,
+            initvar_fields: Vec::new(),
         }
     }
 }
@@ -1318,6 +1324,11 @@ pub struct DataclassField {
     pub init: bool,
     pub repr: bool,
     pub compare: bool,
+    /// `True` for an `InitVar[...]` pseudo-field: it appears in `__init__` and is
+    /// forwarded to `__post_init__`, but is never stored on the instance and is
+    /// excluded from `fields()` / `asdict` / `repr` / comparison.
+    #[serde(default)]
+    pub init_only: bool,
 }
 
 /// Enum kind drives EnumMember equality + arithmetic semantics.

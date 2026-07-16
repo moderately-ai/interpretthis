@@ -202,6 +202,7 @@ pub async fn eval_class_def(
     // re-order them alphabetically and break the synthesized `__init__`
     // parameter order.
     let mut annotations: Vec<String> = Vec::new();
+    let mut initvar_fields: Vec<String> = Vec::new();
     // Enum member names in declaration order, for order-preserving iteration.
     let mut enum_members: Vec<String> = Vec::new();
     // Next value an `auto()` member resolves to (see `wrap_enum_member`).
@@ -387,9 +388,19 @@ pub async fn eval_class_def(
                 Stmt::AnnAssign(ann) => {
                     if let Expr::Name(target) = ann.target.as_ref() {
                         let attr_name = target.id.as_str().to_string();
-                        // Record every annotated name, with or without a value,
-                        // in declaration order so `@dataclass` can read fields.
-                        if !annotations.contains(&attr_name) {
+                        // `x: ClassVar[T]` is a class variable, NOT a dataclass
+                        // field — keep it out of `annotations` (so @dataclass
+                        // skips it) but still bind its value. `x: InitVar[T]` IS
+                        // a pseudo-field (passed to __init__/__post_init__, never
+                        // stored) — record it in both lists.
+                        let head = annotation_head_name(ann.annotation.as_ref());
+                        let is_classvar = head == Some("ClassVar");
+                        if head == Some("InitVar") && !initvar_fields.contains(&attr_name) {
+                            initvar_fields.push(attr_name.clone());
+                        }
+                        // Record every annotated name (except ClassVar), with or
+                        // without a value, in declaration order for @dataclass.
+                        if !is_classvar && !annotations.contains(&attr_name) {
                             annotations.push(attr_name.clone());
                         }
                         if let Some(value_expr) = &ann.value {
@@ -505,6 +516,7 @@ pub async fn eval_class_def(
         cv.enum_kind = enum_kind;
         cv.enum_members = enum_members;
         cv.annotations = annotations;
+        cv.initvar_fields = initvar_fields;
         cv.slots = slots;
         cv.slot_names = slot_names;
         cv.abstract_methods = abstract_methods;
@@ -573,6 +585,18 @@ pub async fn eval_class_def(
     }
 
     Ok(Value::None)
+}
+
+/// The head identifier of an annotation expression, for recognising the
+/// `ClassVar[...]` / `InitVar[...]` (or bare) markers: `Name("ClassVar")`,
+/// `typing.ClassVar[int]` (Subscript/Attribute), etc. all yield `"ClassVar"`.
+fn annotation_head_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(n) => Some(n.id.as_str()),
+        Expr::Attribute(a) => Some(a.attr.as_str()),
+        Expr::Subscript(s) => annotation_head_name(s.value.as_ref()),
+        _ => None,
+    }
 }
 
 /// Whether a decorator is `@abstractmethod` — as a bare name, `abc.`-qualified,
@@ -965,6 +989,7 @@ fn finalize_typing_namedtuple(
     crate::eval::modules::collections::call_namedtuple_with_state(
         state,
         &[Value::String(class_name.into()), Value::Tuple(field_vals)],
+        &IndexMap::new(),
     )?;
     // Restore the user's own methods and apply the field defaults to __init__.
     if let Some(class) = state.classes.get_mut(class_name) {
@@ -1462,6 +1487,9 @@ async fn dataclass_instantiate(
     }
 
     let mut instance_fields: BTreeMap<String, Value> = BTreeMap::new();
+    // `InitVar` values are bound from __init__ args like any field, but forwarded
+    // to __post_init__ instead of being stored on the instance.
+    let mut initvar_values: Vec<Value> = Vec::new();
 
     for (index, field) in init_fields.iter().enumerate() {
         let positional = args.get(index).cloned();
@@ -1489,7 +1517,11 @@ async fn dataclass_instantiate(
                 }
             }
         };
-        instance_fields.insert(field.name.clone(), value);
+        if field.init_only {
+            initvar_values.push(value);
+        } else {
+            instance_fields.insert(field.name.clone(), value);
+        }
     }
 
     // Non-init fields: seed from default / default_factory unconditionally.
@@ -1508,11 +1540,11 @@ async fn dataclass_instantiate(
         class_name: class_name.to_string(),
         fields: crate::value::shared_fields(instance_fields),
     });
-    // CPython's synthesized `__init__` calls `__post_init__(self)` after the
-    // fields are set, letting a dataclass derive computed fields. (InitVar
-    // pass-through is not modelled; the common no-arg form is.)
+    // CPython's synthesized `__init__` calls `__post_init__(self, *initvars)`
+    // after the fields are set, letting a dataclass derive computed fields and
+    // consume its `InitVar` inputs.
     if let Some((_, post)) = lookup_method_in_mro(state, class_name, "__post_init__") {
-        let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+        let call = CallArgs { positional: &initvar_values, keyword: &IndexMap::new() };
         let (_returned, updated) = call_method(state, &post, instance, call, tools).await?;
         return Ok(updated);
     }

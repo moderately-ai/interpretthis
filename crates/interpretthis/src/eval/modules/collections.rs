@@ -283,6 +283,7 @@ fn is_python_keyword(s: &str) -> bool {
 pub(crate) fn call_namedtuple_with_state(
     state: &mut crate::state::InterpreterState,
     args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
     let class_name = match args.first() {
         Some(Value::String(s)) => s.clone(),
@@ -331,12 +332,31 @@ pub(crate) fn call_namedtuple_with_state(
     use std::collections::BTreeMap;
 
     use crate::value::{ClassValue, FunctionDef, FunctionParams, Param};
+    // `defaults=` (keyword-only) supplies defaults for the RIGHTMOST fields:
+    // `namedtuple("P", "x y z", defaults=[0, 0])` => y and z default to 0.
+    let default_values: Vec<Value> = match kwargs.get("defaults") {
+        None | Some(Value::None) => Vec::new(),
+        Some(Value::List(items)) => items.lock().clone(),
+        Some(Value::Tuple(items)) => items.clone(),
+        Some(other) => {
+            let mut collected = Vec::new();
+            for v in crate::eval::control_flow::iterate_value(other)? {
+                collected.push(v);
+            }
+            collected
+        }
+    };
+    if default_values.len() > fields.len() {
+        return Err(crate::eval::modules::value_error(
+            "Got more default values than field names".to_string(),
+        ));
+    }
     let init_params = FunctionParams {
         args: std::iter::once(Param { name: "self".to_string(), annotation: None })
             .chain(fields.iter().map(|f| Param { name: f.clone(), annotation: None }))
             .collect(),
-        defaults: Vec::new(),
-        default_values: Vec::new(),
+        defaults: default_values.iter().map(|v| v.repr()).collect(),
+        default_values: default_values.clone(),
         vararg: None,
         kwonlyargs: Vec::new(),
         kw_defaults: Vec::new(),
@@ -592,6 +612,18 @@ pub(crate) fn call_namedtuple_with_state(
         Value::Tuple(fields.iter().map(|s| Value::String(s.as_str().into())).collect());
     class_attrs.insert("_fields".to_string(), fields_tuple.clone());
     class_attrs.insert("__match_args__".to_string(), fields_tuple);
+    // `_field_defaults`: {field: default} for the trailing fields with a default,
+    // matching CPython (defaults align to the rightmost fields).
+    let mut field_defaults: indexmap::IndexMap<crate::value::ValueKey, Value> =
+        indexmap::IndexMap::new();
+    let default_start = fields.len().saturating_sub(default_values.len());
+    for (field, dv) in fields[default_start..].iter().zip(default_values.iter()) {
+        field_defaults.insert(crate::value::ValueKey::String(field.as_str().into()), dv.clone());
+    }
+    class_attrs.insert(
+        "_field_defaults".to_string(),
+        Value::Dict(crate::value::shared_dict(field_defaults)),
+    );
     let class_name_str = class_name.to_string();
     state.classes.insert(class_name_str.clone(), {
         let mut cv = ClassValue::new(class_name_str.clone());
@@ -625,7 +657,7 @@ impl crate::eval::modules::Module for CollectionsModule {
         tools: &crate::tools::Tools,
     ) -> EvalResult {
         match func {
-            "namedtuple" => call_namedtuple_with_state(state, args),
+            "namedtuple" => call_namedtuple_with_state(state, args, kwargs),
             // Counter needs the async hash/eq path when tallying instance
             // elements; the sync `call` handles every other constructor.
             "Counter" if counter_has_instance_items(args) => {

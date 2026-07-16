@@ -1043,7 +1043,7 @@ pub fn dispatch_eq(state: &InterpreterState, lhs: &Value, rhs: &Value) -> EvalRe
                             let mut equal = true;
                             let af = inst.fields.lock();
                             let bf = other_inst.fields.lock();
-                            for field in fields.iter().filter(|f| f.compare) {
+                            for field in fields.iter().filter(|f| f.compare && !f.init_only) {
                                 match (af.get(&field.name), bf.get(&field.name)) {
                                     (Some(a), Some(b)) => {
                                         let cmp = dispatch_eq(state, a, b)?;

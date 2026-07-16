@@ -132,6 +132,7 @@ pub fn call(
             // attributes, not dict keys.
             let field_values: Vec<Value> = fields
                 .iter()
+                .filter(|f| !f.init_only)
                 .map(|f| {
                     let mut entry = std::collections::BTreeMap::new();
                     entry.insert("name".to_string(), Value::String(f.name.as_str().into()));
@@ -219,7 +220,8 @@ fn asdict_recursive(state: &InterpreterState, inst: &InstanceValue) -> EvalResul
             inst.class_name
         )))
     })?;
-    let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+    let field_names: Vec<String> =
+        fields.iter().filter(|f| !f.init_only).map(|f| f.name.clone()).collect();
     let mut out: IndexMap<crate::value::ValueKey, Value> = IndexMap::new();
     for name in field_names {
         let raw = inst.fields.lock().get(&name).cloned().unwrap_or(Value::None);
@@ -281,7 +283,8 @@ fn astuple_recursive(state: &InterpreterState, inst: &InstanceValue) -> EvalResu
             inst.class_name
         )))
     })?;
-    let field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+    let field_names: Vec<String> =
+        fields.iter().filter(|f| !f.init_only).map(|f| f.name.clone()).collect();
     let mut out = Vec::with_capacity(field_names.len());
     for name in field_names {
         let raw = inst.fields.lock().get(&name).cloned().unwrap_or(Value::None);
@@ -390,19 +393,24 @@ pub(crate) fn apply_dataclass(
         .classes
         .get(class_name)
         .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
+    let initvar_fields = class.initvar_fields.clone();
     for name in &annotations {
         // A class attribute matching the annotation name supplies the
         // default. If the attribute is a `field(...)` sentinel, unpack it
         // into the field's flag set + defaults.
         let class_attr = class.class_attrs.get(name).cloned();
-        push_or_update(build_field(name.clone(), class_attr), &mut fields);
+        let init_only = initvar_fields.contains(name);
+        push_or_update(build_field(name.clone(), class_attr, init_only), &mut fields);
     }
 
     // CPython rule: a non-default field cannot follow a default field —
     // the `__init__` signature would be ambiguous. Match the exact
     // error wording so call sites that catch on substring keep working.
+    // Only `__init__` parameters (init=true) participate in the ordering rule;
+    // an `init=False` field carries a default of its own and never appears in the
+    // signature, so it can't make a later field "follow a default".
     let mut seen_default = None;
-    for field in &fields {
+    for field in fields.iter().filter(|f| f.init) {
         if field.default.is_some() || field.default_factory.is_some() {
             seen_default = Some(field.name.clone());
         } else if let Some(prior) = &seen_default {
@@ -417,7 +425,11 @@ pub(crate) fn apply_dataclass(
     // Install __match_args__ as a tuple of the field names so PEP 634
     // class patterns work on dataclass instances without further work.
     let match_args = Value::Tuple(
-        fields.iter().filter(|f| f.init).map(|f| Value::String(f.name.as_str().into())).collect(),
+        fields
+            .iter()
+            .filter(|f| f.init && !f.init_only)
+            .map(|f| Value::String(f.name.as_str().into()))
+            .collect(),
     );
 
     let class_mut = state
@@ -425,6 +437,9 @@ pub(crate) fn apply_dataclass(
         .get_mut(class_name)
         .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(class_name)))?;
     class_mut.class_attrs.insert("__match_args__".to_string(), match_args);
+    // Note: an `InitVar` default (`x: InitVar[int] = 2`) is deliberately LEFT as a
+    // class attribute — CPython keeps it (`Cls.x == 2`, so `hasattr(inst, "x")` is
+    // True through the class), even though it's never an instance field.
     if slots {
         let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
         let slot_tup =
@@ -442,7 +457,7 @@ pub(crate) fn apply_dataclass(
 /// Translate a (possibly-`field()`-sentinel) class-attribute value into
 /// a per-field [`DataclassField`] entry. A plain literal becomes the
 /// `default`; a `field(...)` dict carries the per-field flags.
-fn build_field(name: String, class_attr: Option<Value>) -> DataclassField {
+fn build_field(name: String, class_attr: Option<Value>, init_only: bool) -> DataclassField {
     let mut default = None;
     let mut default_factory = None;
     let mut init = true;
@@ -459,7 +474,7 @@ fn build_field(name: String, class_attr: Option<Value>) -> DataclassField {
             default = Some(value);
         }
     }
-    DataclassField { name, default, default_factory, init, repr, compare }
+    DataclassField { name, default, default_factory, init, repr, compare, init_only }
 }
 
 /// Build the dict returned by `field(...)`. A small `Value::Dict` keyed
@@ -531,6 +546,12 @@ pub struct DataclassesModule;
 impl crate::eval::modules::Module for DataclassesModule {
     fn name(&self) -> &'static str {
         "dataclasses"
+    }
+    fn constant(&self, name: &str) -> Option<Value> {
+        // `InitVar` / `KW_ONLY` markers — used only in annotations (which the
+        // class-body walker inspects by AST head, never evaluating them), so a
+        // bare type sentinel is enough for `from dataclasses import InitVar`.
+        matches!(name, "InitVar" | "KW_ONLY").then(|| Value::Type(format!("dataclasses.{name}")))
     }
     fn has_function(&self, name: &str) -> bool {
         has_function(name)

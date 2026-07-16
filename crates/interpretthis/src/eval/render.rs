@@ -336,7 +336,7 @@ fn render_dataclass(
     out.push_str(class_name);
     out.push('(');
     let mut first = true;
-    for field in fields.iter().filter(|f| f.repr) {
+    for field in fields.iter().filter(|f| f.repr && !f.init_only) {
         if !first {
             out.push_str(", ");
         }
