@@ -565,7 +565,7 @@ pub(crate) fn dispatch_string_method(
                     result.push(ch);
                     capitalize_next = true;
                 } else if capitalize_next {
-                    result.extend(ch.to_uppercase());
+                    push_titlecase(&mut result, ch);
                     capitalize_next = false;
                 } else {
                     result.extend(ch.to_lowercase());
@@ -577,8 +577,11 @@ pub(crate) fn dispatch_string_method(
             let mut chars = s.chars();
             let result = chars.next().map_or_else(String::new, |first| {
                 let rest: String = chars.flat_map(char::to_lowercase).collect();
-                let upper: String = first.to_uppercase().collect();
-                format!("{upper}{rest}")
+                // CPython titlecases (not uppercases) the leading char, so a
+                // digraph like `ǆ` capitalises to `ǅ`, not `Ǆ`.
+                let mut head = String::new();
+                push_titlecase(&mut head, first);
+                format!("{head}{rest}")
             });
             Ok(Value::String(result.into()))
         }
@@ -829,6 +832,27 @@ fn is_identifier(s: &str) -> bool {
 /// Whether `s` is title-cased: every run of cased characters starts with an
 /// uppercase letter and the rest are lowercase, and there is at least one
 /// cased character.
+/// Push the Unicode titlecase mapping of `c` onto `out` — used for the
+/// word-initial char of `str.title()`/`str.capitalize()`. Titlecase equals
+/// uppercase for almost every character; the exceptions are the Latin digraph
+/// letters (dž/lj/nj/dz), whose titlecase is the mixed-case form (`ǅ`, not `Ǆ`),
+/// and the Georgian Mkhedruli letters, which have no titlecase (they stay
+/// lowercase; only uppercase maps to Mtavruli). Residual: the Greek polytonic
+/// iota-subscript forms and the Latin/Armenian ligatures (ß→Ss, ﬁ→Fi, …) still
+/// use the uppercase mapping — their titlecase is a multi-char, context-
+/// sensitive expansion that needs the full Unicode SpecialCasing table.
+fn push_titlecase(out: &mut String, c: char) {
+    match c {
+        '\u{01C4}' | '\u{01C5}' | '\u{01C6}' => out.push('\u{01C5}'),
+        '\u{01C7}' | '\u{01C8}' | '\u{01C9}' => out.push('\u{01C8}'),
+        '\u{01CA}' | '\u{01CB}' | '\u{01CC}' => out.push('\u{01CB}'),
+        '\u{01F1}' | '\u{01F2}' | '\u{01F3}' => out.push('\u{01F2}'),
+        // Georgian Mkhedruli has no titlecase — the letter is its own titlecase.
+        '\u{10D0}'..='\u{10FF}' => out.push(c),
+        _ => out.extend(c.to_uppercase()),
+    }
+}
+
 fn is_title(s: &str) -> bool {
     let mut seen_cased = false;
     let mut prev_cased = false;
