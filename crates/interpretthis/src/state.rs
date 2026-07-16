@@ -89,12 +89,14 @@ pub struct GeneratorFrame {
     pub stmt_index: usize,
     /// Nested for-loop / yield-from resume states (innermost last).
     pub for_stack: Vec<GeneratorForState>,
-    /// Resume index within a suspended top-level `while` loop's body. `Some(i)`
-    /// means "re-enter the while body at statement `i` without re-checking the
-    /// condition" (we suspended on a `yield` there); `None` means no while is
-    /// mid-suspension. Only top-level whiles with direct-statement yields take
-    /// this path (see `generator_suspendable`); anything else stays eager.
-    pub while_resume: Option<usize>,
+    /// Resume positions for suspended `while` loops, keyed by the loop's AST
+    /// node byte-offset (stable across resumes since it is the same parsed
+    /// node). Each entry `(offset, i)` means "re-enter that while's body at
+    /// statement `i` without re-checking the condition". A stack rather than a
+    /// single slot so a `while` nested in another `while`
+    /// (`while a: while b: yield`) keeps both live — analogous to `for_stack`'s
+    /// per-target keying.
+    pub while_resume: Vec<(u32, usize)>,
     /// Resume positions for the stack of nested `try` blocks the
     /// generator is suspended inside. `try_stack[d]` is the position at
     /// nesting depth `d` (outermost first): which phase (body / matched

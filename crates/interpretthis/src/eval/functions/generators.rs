@@ -63,11 +63,9 @@ fn top_level_suspendable(stmt: &Stmt) -> bool {
         // (each keys its own `for_stack` frame) plus at most one `while`. A
         // top-level `while` consumes that single while-budget.
         Stmt::For(f) => {
-            for_name_target(f).is_some()
-                && f.orelse.is_empty()
-                && loop_nest_suspendable(&f.body, true)
+            for_name_target(f).is_some() && f.orelse.is_empty() && loop_nest_suspendable(&f.body)
         }
-        Stmt::While(w) => w.orelse.is_empty() && loop_nest_suspendable(&w.body, false),
+        Stmt::While(w) => w.orelse.is_empty() && loop_nest_suspendable(&w.body),
         Stmt::If(n) => if_branch_suspendable(&n.body) && if_branch_suspendable(&n.orelse),
         Stmt::Try(t) => {
             if_branch_suspendable(&t.body)
@@ -123,29 +121,24 @@ fn loop_body_suspendable(stmts: &[Stmt]) -> bool {
 }
 
 /// A top-level loop body the suspend engine can re-enter with ONE level of
-/// nested loops (depth 2). A nested `for` (name-target, no `else`) is allowed
-/// when its own body is strictly loop-free (`loop_body_suspendable`) — each
-/// keys its own `for_stack` frame by target, so `for i in ...: for j in ...:
-/// yield` keeps both live. A nested `while` is additionally gated on
-/// `while_available` (the frame has a single `while_resume` slot, so at most one
-/// `while` may be active — a top-level `while` already consumes the budget,
-/// making while-in-while eager). `for`↔`while` mix freely (disjoint resume
-/// state). Deeper same-kind nesting (for-in-for-in-for) and `with`/`try`/`match`
-/// with a yield stay on the eager buffer. This mirrors exactly what the loop
-/// steppers' `Stmt::For`/`Stmt::While` arms delegate.
-fn loop_nest_suspendable(stmts: &[Stmt], while_available: bool) -> bool {
+/// nested loops (depth 2). A nested `for` (name-target, no `else`) or `while`
+/// (no `else`) is allowed when its own body is strictly loop-free
+/// (`loop_body_suspendable`). Each `for` keys its own `for_stack` frame by
+/// target and each `while` its own `while_resume` entry by AST offset, so any
+/// depth-2 combination — `for`-in-`for`, `while`-in-`while`, or the `for`↔`while`
+/// mix — keeps both loops live at once. Deeper same-kind nesting
+/// (for-in-for-in-for) and `with`/`try`/`match` carrying a yield stay on the
+/// eager buffer. Mirrors exactly what the loop steppers' `Stmt::For`/`Stmt::While`
+/// arms delegate.
+fn loop_nest_suspendable(stmts: &[Stmt]) -> bool {
     stmts.iter().all(|stmt| {
         let yields = super::definitions::contains_yield_stmts(std::slice::from_ref(stmt));
         match stmt {
             Stmt::If(node) => {
-                loop_nest_suspendable(&node.body, while_available)
-                    && loop_nest_suspendable(&node.orelse, while_available)
+                loop_nest_suspendable(&node.body) && loop_nest_suspendable(&node.orelse)
             }
             Stmt::For(f) => !yields || for_loop_suspendable(f),
-            Stmt::While(w) => {
-                !yields
-                    || (while_available && w.orelse.is_empty() && loop_body_suspendable(&w.body))
-            }
+            Stmt::While(w) => !yields || (w.orelse.is_empty() && loop_body_suspendable(&w.body)),
             Stmt::With(_) | Stmt::Try(_) | Stmt::TryStar(_) | Stmt::Match(_) => !yields,
             _ => true,
         }
@@ -281,7 +274,7 @@ pub(crate) fn create_generator(
             pending_throw: None,
             stmt_index: 0,
             for_stack: Vec::new(),
-            while_resume: None,
+            while_resume: Vec::new(),
             try_stack: Vec::new(),
             if_stack: Vec::new(),
             with_stack: Vec::new(),
@@ -509,6 +502,7 @@ fn mark_generator_closed(state: &mut InterpreterState, id: u64) {
         frame.for_stack.clear();
         frame.try_stack.clear();
         frame.with_stack.clear();
+        frame.while_resume.clear();
     }
 }
 
@@ -1111,12 +1105,16 @@ async fn run_while_suspendable(
 ) -> Result<(), EvalError> {
     use crate::eval::eval_expr;
 
-    // `while_resume == Some(i)` means we suspended on a yield at body statement
-    // `i`; re-enter there and skip the condition check for that first pass.
-    let clear_resume = |state: &mut InterpreterState| {
+    // This while is keyed by its AST byte-offset (stable across resumes), so a
+    // nested inner while's resume entry doesn't collide with this one's — the
+    // `while_resume` stack can hold both.
+    let node_key = node.range.start().to_u32();
+    // A resume entry for THIS while means we suspended on a yield at that body
+    // statement; re-enter there and skip the condition check for that pass.
+    let clear_resume = move |state: &mut InterpreterState| {
         if let Some(&id) = state.active_generator_stack.last() {
             if let Some(frame) = state.generators.get_mut(&id) {
-                frame.while_resume = None;
+                frame.while_resume.retain(|(k, _)| *k != node_key);
             }
         }
     };
@@ -1126,7 +1124,9 @@ async fn run_while_suspendable(
             .last()
             .copied()
             .and_then(|id| state.generators.get(&id))
-            .and_then(|frame| frame.while_resume);
+            .and_then(|frame| {
+                frame.while_resume.iter().rev().find(|(k, _)| *k == node_key).map(|(_, i)| *i)
+            });
         match saved {
             Some(i) => (i, true),
             None => (0, false),
@@ -1164,6 +1164,19 @@ async fn run_while_suspendable(
                         true,
                     )
                 }
+                // A nested `while` keys its own `while_resume` entry by AST
+                // offset, so `while a: while b: yield` keeps both live.
+                Stmt::While(w)
+                    if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
+                {
+                    // Boxed: direct async self-recursion.
+                    (
+                        Box::pin(run_while_suspendable(state, w, tools))
+                            .await
+                            .map(|()| Value::None),
+                        true,
+                    )
+                }
                 _ => (eval_stmt(state, stmt, tools).await, false),
             };
             match result {
@@ -1185,13 +1198,20 @@ async fn run_while_suspendable(
                 Err(EvalError::Signal(ControlFlow::Yield(v))) => {
                     if let Some(&id) = state.active_generator_stack.last() {
                         if let Some(frame) = state.generators.get_mut(&id) {
-                            // A nested `if`/`for` stepper already recorded its own
-                            // resume position; only a direct yield needs
+                            // A nested `if`/`for`/`while` stepper already recorded
+                            // its own resume; only a direct yield needs
                             // `resume_at_yield` set here.
                             if !nested {
                                 frame.resume_at_yield = true;
                             }
-                            frame.while_resume = Some(body_index); // re-enter this stmt
+                            // Upsert THIS while's resume position (keyed by offset).
+                            if let Some(slot) =
+                                frame.while_resume.iter_mut().find(|(k, _)| *k == node_key)
+                            {
+                                slot.1 = body_index;
+                            } else {
+                                frame.while_resume.push((node_key, body_index));
+                            }
                         }
                     }
                     return Err(EvalError::Signal(ControlFlow::Yield(v)));
