@@ -27,11 +27,18 @@ use crate::{
 };
 
 /// Dispatch a method call on a `Decimal` receiver.
-pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Value]) -> EvalResult {
+pub(crate) fn dispatch_decimal_method(
+    d: &BigDecimal,
+    method: &str,
+    args: &[Value],
+    kwargs: &indexmap::IndexMap<String, Value>,
+) -> EvalResult {
     use num_traits::{Signed as _, Zero as _};
     match method {
-        // `quantize(exp)` rounds to the exponent (decimal scale) of `exp`,
-        // using banker's rounding (CPython's default ROUND_HALF_EVEN).
+        // `quantize(exp, rounding=…)` rounds to the exponent (decimal scale)
+        // of `exp`. The rounding mode defaults to the context's
+        // ROUND_HALF_EVEN (banker's) and may be overridden positionally or by
+        // keyword with a `decimal.ROUND_*` string constant.
         "quantize" => {
             let Some(Value::Decimal(exp, _)) = args.first() else {
                 return Err(InterpreterError::TypeError(
@@ -39,11 +46,19 @@ pub(crate) fn dispatch_decimal_method(d: &BigDecimal, method: &str, args: &[Valu
                 )
                 .into());
             };
+            let rounding = match args.get(1).or_else(|| kwargs.get("rounding")) {
+                Some(Value::String(s)) => rounding_mode(s)?,
+                Some(Value::None) | None => bigdecimal::RoundingMode::HalfEven,
+                Some(other) => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "quantize() rounding must be a decimal.ROUND_* constant, not '{}'",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
             let scale = exp.fractional_digit_count();
-            Ok(Value::Decimal(
-                Box::new(d.with_scale_round(scale, bigdecimal::RoundingMode::HalfEven)),
-                false,
-            ))
+            Ok(Value::Decimal(Box::new(d.with_scale_round(scale, rounding)), false))
         }
         "copy_abs" => Ok(Value::Decimal(Box::new(d.abs()), false)),
         "copy_negate" => Ok(Value::Decimal(Box::new(-d.clone()), false)),
@@ -347,6 +362,9 @@ impl crate::eval::modules::Module for DecimalModule {
     fn has_function(&self, name: &str) -> bool {
         has_function(name)
     }
+    fn constant(&self, name: &str) -> Option<Value> {
+        rounding_constant(name)
+    }
     async fn call(
         &self,
         state: &mut crate::state::InterpreterState,
@@ -357,4 +375,43 @@ impl crate::eval::modules::Module for DecimalModule {
     ) -> EvalResult {
         call(func, args, state)
     }
+}
+
+/// The `decimal` rounding-mode constants. CPython models each as a string
+/// equal to its own name (`decimal.ROUND_HALF_UP == 'ROUND_HALF_UP'`), so
+/// `quantize(exp, rounding=ROUND_HALF_UP)` receives the mode as a string.
+/// Map a `decimal.ROUND_*` string constant to a `bigdecimal` rounding mode.
+/// `ROUND_05UP` (round to nearest 0/5) has no `bigdecimal` equivalent and is
+/// approximated by round-away-from-zero — a documented rare-mode divergence.
+fn rounding_mode(name: &str) -> Result<bigdecimal::RoundingMode, EvalError> {
+    use bigdecimal::RoundingMode;
+    Ok(match name {
+        "ROUND_CEILING" => RoundingMode::Ceiling,
+        "ROUND_DOWN" => RoundingMode::Down,
+        "ROUND_FLOOR" => RoundingMode::Floor,
+        "ROUND_HALF_DOWN" => RoundingMode::HalfDown,
+        "ROUND_HALF_EVEN" => RoundingMode::HalfEven,
+        "ROUND_HALF_UP" => RoundingMode::HalfUp,
+        "ROUND_UP" | "ROUND_05UP" => RoundingMode::Up,
+        _ => {
+            return Err(
+                InterpreterError::ValueError(format!("invalid rounding mode: {name}")).into()
+            );
+        }
+    })
+}
+
+pub(crate) fn rounding_constant(name: &str) -> Option<Value> {
+    matches!(
+        name,
+        "ROUND_CEILING"
+            | "ROUND_DOWN"
+            | "ROUND_FLOOR"
+            | "ROUND_HALF_DOWN"
+            | "ROUND_HALF_EVEN"
+            | "ROUND_HALF_UP"
+            | "ROUND_UP"
+            | "ROUND_05UP"
+    )
+    .then(|| Value::String(name.into()))
 }

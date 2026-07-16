@@ -974,8 +974,13 @@ fn decimal_methods(
     let Value::Decimal(d, _) = obj else {
         return Err(type_mismatch("Decimal"));
     };
-    crate::eval::functions::reject_kwargs(method, kwargs)?;
-    crate::eval::modules::decimal::dispatch_decimal_method(d, method, args).map(MethodOutcome::pure)
+    // `quantize(exp, rounding=…)` is the only Decimal method that takes a
+    // keyword; every other rejects kwargs as CPython does.
+    if method != "quantize" {
+        crate::eval::functions::reject_kwargs(method, kwargs)?;
+    }
+    crate::eval::modules::decimal::dispatch_decimal_method(d, method, args, kwargs)
+        .map(MethodOutcome::pure)
 }
 
 fn hash_digest_methods(
