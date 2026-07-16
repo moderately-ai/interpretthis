@@ -723,8 +723,9 @@ pub(crate) fn dispatch_string_method(
         "istitle" => Ok(Value::Bool(is_title(s))),
         "isprintable" => {
             // CPython: printable = not "other" or "separator" category, except
-            // ASCII space. Empty string is printable.
-            Ok(Value::Bool(s.chars().all(|c| c == ' ' || (!c.is_control() && !c.is_whitespace()))))
+            // ASCII space. Empty string is printable. Shares the exact
+            // category-based predicate with `repr` escaping.
+            Ok(Value::Bool(s.chars().all(crate::value::char_is_printable)))
         }
         "isascii" => Ok(Value::Bool(s.is_ascii())),
         "isdecimal" => {

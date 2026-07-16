@@ -3097,6 +3097,7 @@ fn write_bytes_literal(f: &mut fmt::Formatter<'_>, b: &[u8]) -> fmt::Result {
 /// verbatim (matching `str.isprintable()` for the common ranges).
 #[must_use]
 pub fn python_str_repr(s: &str) -> String {
+    use std::fmt::Write as _;
     let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::with_capacity(s.len() + 2);
     out.push(quote);
@@ -3110,16 +3111,47 @@ pub fn python_str_repr(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
-                use std::fmt::Write as _;
-                // C0 controls and DEL render as \xNN, as CPython does.
-                let _ = write!(out, "\\x{:02x}", c as u32);
+            c if char_is_printable(c) => out.push(c),
+            // Every non-printable char (C0/C1 controls, DEL, format/separator
+            // categories, unassigned, ...) escapes as CPython does: `\xNN` up to
+            // U+00FF, `\uNNNN` to U+FFFF, then `\UNNNNNNNN`.
+            c => {
+                let u = c as u32;
+                if u <= 0xff {
+                    let _ = write!(out, "\\x{u:02x}");
+                } else if u <= 0xffff {
+                    let _ = write!(out, "\\u{u:04x}");
+                } else {
+                    let _ = write!(out, "\\U{u:08x}");
+                }
             }
-            c => out.push(c),
         }
     }
     out.push(quote);
     out
+}
+
+/// CPython `str.isprintable()` for a single char: printable unless its Unicode
+/// general category is Other (Cc/Cf/Cs/Co/Cn) or Separator (Zl/Zp/Zs). ASCII
+/// space (U+0020) is the sole exception — printable despite being a Zs
+/// separator. Drives both `str.isprintable()` and `repr` escaping so they agree.
+#[must_use]
+pub fn char_is_printable(c: char) -> bool {
+    use unicode_general_category::{GeneralCategory as G, get_general_category};
+    if c == ' ' {
+        return true;
+    }
+    !matches!(
+        get_general_category(c),
+        G::Control
+            | G::Format
+            | G::Surrogate
+            | G::PrivateUse
+            | G::Unassigned
+            | G::LineSeparator
+            | G::ParagraphSeparator
+            | G::SpaceSeparator
+    )
 }
 
 impl Value {
