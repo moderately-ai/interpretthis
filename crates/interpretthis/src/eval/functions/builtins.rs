@@ -767,6 +767,26 @@ pub(super) async fn try_builtin(
             };
             let class = state.classes.get(&child_name);
             let check_one = |target_name: &str| -> bool {
+                // `collections.abc` ABC target (`issubclass(list, Sequence)`):
+                // registered-builtin membership. A user class is registered only
+                // if it or an ancestor is a builtin whose type name is registered.
+                if crate::eval::functions::helpers::is_collections_abc(target_name) {
+                    if let Some(m) = crate::eval::functions::helpers::type_registered_abc(
+                        &child_name,
+                        target_name,
+                    ) {
+                        if m {
+                            return true;
+                        }
+                    }
+                    if let Some(c) = class {
+                        return c.mro.iter().any(|a| {
+                            crate::eval::functions::helpers::type_registered_abc(a, target_name)
+                                == Some(true)
+                        });
+                    }
+                    return false;
+                }
                 if let Some(c) = class {
                     if target_name == "object" || c.mro.iter().any(|a| a == target_name) {
                         return true;

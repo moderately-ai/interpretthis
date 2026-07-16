@@ -585,6 +585,153 @@ pub(crate) async fn dsu_sort(
     Ok(sorted)
 }
 
+/// Whether `name` (possibly `collections.abc.`-qualified) is a recognised
+/// `collections.abc` abstract base class.
+pub(crate) fn is_collections_abc(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next().unwrap_or(name),
+        "Hashable"
+            | "Iterable"
+            | "Iterator"
+            | "Reversible"
+            | "Generator"
+            | "Sized"
+            | "Container"
+            | "Callable"
+            | "Collection"
+            | "Sequence"
+            | "MutableSequence"
+            | "ByteString"
+            | "Set"
+            | "MutableSet"
+            | "Mapping"
+            | "MutableMapping"
+            | "MappingView"
+            | "KeysView"
+            | "ItemsView"
+            | "ValuesView"
+    )
+}
+
+/// Whether a builtin type (by `type_name`) is a registered virtual subclass of
+/// the `collections.abc` ABC `abc`. `None` when `abc` is not recognised. This is
+/// the `issubclass(list, Sequence)` table (mirrors CPython's ABC registrations).
+pub(super) fn type_registered_abc(type_name: &str, abc: &str) -> Option<bool> {
+    let seq = matches!(
+        type_name,
+        "list" | "tuple" | "str" | "bytes" | "bytearray" | "range" | "memoryview"
+    );
+    let mut_seq = matches!(type_name, "list" | "bytearray");
+    let bytestr = matches!(type_name, "bytes" | "bytearray");
+    let mapping = matches!(
+        type_name,
+        "dict" | "Counter" | "OrderedDict" | "defaultdict" | "ChainMap" | "mappingproxy"
+    );
+    let mut_map = matches!(type_name, "dict" | "Counter" | "OrderedDict" | "defaultdict");
+    let set_t = matches!(type_name, "set" | "frozenset");
+    let mapview = matches!(type_name, "dict_keys" | "dict_values" | "dict_items");
+    let iterator = matches!(type_name, "generator")
+        || type_name.ends_with("_iterator")
+        || matches!(type_name, "reversed" | "map" | "filter" | "zip" | "enumerate");
+    let iterable = seq || mapping || set_t || mapview || iterator || matches!(type_name, "deque");
+    let sized = seq || mapping || set_t || mapview || matches!(type_name, "deque");
+    Some(match abc.rsplit('.').next().unwrap_or(abc) {
+        "Sequence" => seq,
+        "MutableSequence" => mut_seq,
+        "ByteString" => bytestr,
+        "Mapping" => mapping,
+        "MutableMapping" => mut_map,
+        "Set" => set_t,
+        "MutableSet" => type_name == "set",
+        "MappingView" => mapview,
+        "KeysView" => type_name == "dict_keys",
+        "ItemsView" => type_name == "dict_items",
+        "ValuesView" => type_name == "dict_values",
+        "Iterable" => iterable,
+        "Iterator" => iterator,
+        "Generator" => type_name == "generator",
+        "Collection" | "Container" | "Sized" => sized,
+        "Reversible" => {
+            matches!(
+                type_name,
+                "list" | "tuple" | "str" | "bytes" | "bytearray" | "range" | "dict" | "OrderedDict"
+            )
+        }
+        "Callable" => {
+            matches!(type_name, "function" | "builtin_function_or_method" | "type" | "method")
+        }
+        "Hashable" => !matches!(
+            type_name,
+            "list"
+                | "dict"
+                | "set"
+                | "bytearray"
+                | "Counter"
+                | "OrderedDict"
+                | "defaultdict"
+                | "ChainMap"
+                | "deque"
+        ),
+        _ => return None,
+    })
+}
+
+/// Whether `obj` matches the `collections.abc` ABC `abc` for `isinstance`.
+/// `None` when `abc` is not an ABC. The "one-trick pony" ABCs (Iterable /
+/// Iterator / Sized / Container / Callable / Hashable) check structurally — for
+/// a builtin via its dunder table, for a user instance via its MRO — so a class
+/// defining `__iter__` is an `Iterable`. The collection ABCs (Sequence, Mapping,
+/// Set, …) match only the registered builtin types, mirroring CPython where an
+/// unregistered user class is not a virtual subclass.
+pub(super) fn value_matches_abc(state: &InterpreterState, obj: &Value, abc: &str) -> Option<bool> {
+    let bare = abc.rsplit('.').next().unwrap_or(abc);
+    if !is_collections_abc(bare) {
+        return None;
+    }
+    let has_dunder = |dunder: &str| -> bool {
+        if let Value::Instance(inst) = obj {
+            crate::eval::classes::lookup_method_in_mro(state, &inst.class_name, dunder).is_some()
+        } else {
+            crate::types::builtin_dunder_present(obj, dunder)
+        }
+    };
+    // A builtin whose type is registered for this ABC matches even when its
+    // dunder table doesn't surface the method (e.g. dict views expose no
+    // `__iter__` slot yet are Iterable).
+    let registered = |a: &str| type_registered_abc(obj.type_name(), a) == Some(true);
+    match bare {
+        "Callable" => Some(super::builtins::value_is_callable(state, obj)),
+        "Iterable" => Some(has_dunder("__iter__") || registered("Iterable")),
+        "Iterator" => Some(
+            matches!(obj, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. })
+                || registered("Iterator")
+                || (matches!(obj, Value::Instance(_)) && has_dunder("__next__")),
+        ),
+        "Sized" => Some(has_dunder("__len__") || registered("Sized")),
+        "Container" => Some(has_dunder("__contains__") || registered("Container")),
+        "Hashable" => Some(!matches!(
+            obj,
+            Value::List(_)
+                | Value::Dict(_)
+                | Value::Set(_)
+                | Value::ByteArray(_)
+                | Value::Counter(_)
+                | Value::OrderedDict(_)
+                | Value::DefaultDict { .. }
+                | Value::ChainMap(_)
+                | Value::Deque { .. }
+        )),
+        // Collection ABCs: only registered builtins match; a user instance is
+        // not a virtual subclass without explicit registration.
+        _ => {
+            if matches!(obj, Value::Instance(_)) {
+                return Some(false);
+            }
+            type_registered_abc(obj.type_name(), bare)
+        }
+    }
+}
+
 /// Check if a value is an instance of a type by name. For user-class
 /// instances, walks the class's MRO so `isinstance(child, Parent)`
 /// returns True (Track B1 multi-level inheritance).
@@ -592,6 +739,10 @@ pub(super) fn check_isinstance(state: &InterpreterState, obj: &Value, type_name:
     // Everything is an `object`.
     if type_name == "object" {
         return true;
+    }
+    // `collections.abc` abstract base classes (Sequence, Iterable, Callable, …).
+    if let Some(matched) = value_matches_abc(state, obj, type_name) {
+        return matched;
     }
     // Every type object is an instance of `type` (the metaclass): `int`, `str`,
     // a user `class C`, an exception class, `type` itself.

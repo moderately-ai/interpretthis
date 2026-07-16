@@ -166,6 +166,16 @@ pub fn is_auto_imported(name: &str) -> bool {
 pub fn eval_import(state: &mut InterpreterState, node: &ast::StmtImport) -> EvalResult {
     for alias in &node.names {
         let module = alias.name.as_str();
+        // `import collections.abc [as x]` — the only supported submodule. With
+        // an alias it binds the alias; bare it binds `collections` (CPython
+        // binds the top package, whose `.abc` attribute then resolves).
+        if module == "collections.abc" {
+            let bind = alias.asname.as_ref().map_or("collections", |a| a.as_str());
+            state
+                .set_variable(bind, Value::Module(module.to_string()))
+                .map_err(EvalError::Interpreter)?;
+            continue;
+        }
         if !is_known_module(module) {
             return Err(module_not_found(module));
         }
@@ -204,6 +214,25 @@ pub async fn eval_import_from(
                 "relative imports are not supported (see CONFORMANCE.md#import-allowlist)".into(),
             ))
         })?;
+    // `from collections.abc import Sequence, Mapping, …` — the ABCs are pure
+    // sentinels used only by isinstance/issubclass; bind each to a type marker.
+    if module == "collections.abc" {
+        for alias in &node.names {
+            let name = alias.name.as_str();
+            if !crate::eval::functions::helpers::is_collections_abc(name) {
+                return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                    "ImportError",
+                    format!("cannot import name '{name}' from 'collections.abc'"),
+                )));
+            }
+            let bind =
+                alias.asname.as_ref().map_or(name, rustpython_parser::ast::Identifier::as_str);
+            state
+                .set_variable(bind, Value::Type(format!("collections.abc.{name}")))
+                .map_err(EvalError::Interpreter)?;
+        }
+        return Ok(Value::None);
+    }
     if !is_known_module(module) {
         return Err(module_not_found(module));
     }
@@ -233,6 +262,20 @@ pub async fn eval_import_from(
 /// returns its value; a function returns a callable [`Value::ModuleFunction`]
 /// handle.
 pub fn module_member(module: &str, name: &str) -> EvalResult {
+    // `collections.abc.Sequence` (module bound via `import collections.abc as x`)
+    // and `collections.abc` reached as the `.abc` attribute of `collections`.
+    if module == "collections.abc" {
+        if crate::eval::functions::helpers::is_collections_abc(name) {
+            return Ok(Value::Type(format!("collections.abc.{name}")));
+        }
+        return Err(InterpreterError::AttributeError(format!(
+            "module 'collections.abc' has no attribute '{name}'"
+        ))
+        .into());
+    }
+    if module == "collections" && name == "abc" {
+        return Ok(Value::Module("collections.abc".to_string()));
+    }
     if let Some(value) = constant(module, name) {
         return Ok(value);
     }
