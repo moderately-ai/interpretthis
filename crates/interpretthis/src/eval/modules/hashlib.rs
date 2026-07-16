@@ -4,7 +4,8 @@
 
 //! Emulation of Python's `hashlib` module.
 //!
-//! Supports md5 / sha1 / sha256 / sha512 via the RustCrypto crates,
+//! Supports md5 / sha1 / sha224 / sha256 / sha384 / sha512 (and `hashlib.new`)
+//! via the RustCrypto crates,
 //! returning a `Value::HashDigest` that carries the algorithm name and the
 //! accumulated *input* bytes. The digest is computed lazily on
 //! `.hexdigest()` / `.digest()`, so the CPython create-then-`update` pattern
