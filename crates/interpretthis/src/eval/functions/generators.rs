@@ -59,14 +59,15 @@ fn top_level_suspendable(stmt: &Stmt) -> bool {
         return true;
     }
     match stmt {
-        // A top-level `for`/`while` may nest the opposite loop kind (disjoint
-        // resume state) — `for i: while c: yield` / `while True: for j: yield`.
+        // A top-level `for`/`while` may nest further loops: any depth of `for`s
+        // (each keys its own `for_stack` frame) plus at most one `while`. A
+        // top-level `while` consumes that single while-budget.
         Stmt::For(f) => {
             for_name_target(f).is_some()
                 && f.orelse.is_empty()
-                && cross_loop_body_suspendable(&f.body, false)
+                && loop_nest_suspendable(&f.body, true)
         }
-        Stmt::While(w) => w.orelse.is_empty() && cross_loop_body_suspendable(&w.body, true),
+        Stmt::While(w) => w.orelse.is_empty() && loop_nest_suspendable(&w.body, false),
         Stmt::If(n) => if_branch_suspendable(&n.body) && if_branch_suspendable(&n.orelse),
         Stmt::Try(t) => {
             if_branch_suspendable(&t.body)
@@ -121,34 +122,31 @@ fn loop_body_suspendable(stmts: &[Stmt]) -> bool {
     })
 }
 
-/// A top-level loop body in which a nested loop of the OPPOSITE kind may carry a
-/// yield: a `while` body may contain a `for`, and a `for` body a `while`. The
-/// two kinds use disjoint resume state (`while_resume` vs `for_stack`), so one
-/// of each can be suspended simultaneously — but the nested loop's own body must
-/// be strictly loop-free (`loop_body_suspendable`) so no THIRD loop ever becomes
-/// active, and same-kind nesting (for-in-for / while-in-while) stays forbidden.
-/// `enclosing_is_while` picks which nested kind is permitted. Nested `if`s
-/// recurse with the same rule.
-fn cross_loop_body_suspendable(stmts: &[Stmt], enclosing_is_while: bool) -> bool {
+/// A top-level loop body the suspend engine can re-enter with ONE level of
+/// nested loops (depth 2). A nested `for` (name-target, no `else`) is allowed
+/// when its own body is strictly loop-free (`loop_body_suspendable`) — each
+/// keys its own `for_stack` frame by target, so `for i in ...: for j in ...:
+/// yield` keeps both live. A nested `while` is additionally gated on
+/// `while_available` (the frame has a single `while_resume` slot, so at most one
+/// `while` may be active — a top-level `while` already consumes the budget,
+/// making while-in-while eager). `for`↔`while` mix freely (disjoint resume
+/// state). Deeper same-kind nesting (for-in-for-in-for) and `with`/`try`/`match`
+/// with a yield stay on the eager buffer. This mirrors exactly what the loop
+/// steppers' `Stmt::For`/`Stmt::While` arms delegate.
+fn loop_nest_suspendable(stmts: &[Stmt], while_available: bool) -> bool {
     stmts.iter().all(|stmt| {
         let yields = super::definitions::contains_yield_stmts(std::slice::from_ref(stmt));
         match stmt {
             Stmt::If(node) => {
-                cross_loop_body_suspendable(&node.body, enclosing_is_while)
-                    && cross_loop_body_suspendable(&node.orelse, enclosing_is_while)
+                loop_nest_suspendable(&node.body, while_available)
+                    && loop_nest_suspendable(&node.orelse, while_available)
             }
-            // Opposite-kind nested loop: permitted once, with a loop-free body.
-            Stmt::For(f) if enclosing_is_while => !yields || for_loop_suspendable(f),
-            Stmt::While(w) if !enclosing_is_while => {
-                !yields || (w.orelse.is_empty() && loop_body_suspendable(&w.body))
+            Stmt::For(f) => !yields || for_loop_suspendable(f),
+            Stmt::While(w) => {
+                !yields
+                    || (while_available && w.orelse.is_empty() && loop_body_suspendable(&w.body))
             }
-            // Same-kind loop, or with/try/match: no yield may appear here.
-            Stmt::For(_)
-            | Stmt::While(_)
-            | Stmt::With(_)
-            | Stmt::Try(_)
-            | Stmt::TryStar(_)
-            | Stmt::Match(_) => !yields,
+            Stmt::With(_) | Stmt::Try(_) | Stmt::TryStar(_) | Stmt::Match(_) => !yields,
             _ => true,
         }
     })
@@ -800,6 +798,22 @@ async fn run_generator_body(
     Ok(())
 }
 
+/// Insert or replace the `for_stack` resume frame for `entry.target`. A frame
+/// already recorded for that target is updated in place (so a suspended loop
+/// keeps ONE slot); a fresh target is inserted below any trailing yield-from
+/// drain frames (empty target), which must stay on top for `step_generator`'s
+/// drain. Keying by target — rather than assuming the top-of-stack is ours —
+/// is what lets two `for` loops (`for i in …: for j in …: yield`) each keep a
+/// distinct live frame simultaneously.
+fn upsert_for_frame(for_stack: &mut Vec<GeneratorForState>, entry: GeneratorForState) {
+    if let Some(slot) = for_stack.iter_mut().find(|fs| fs.target == entry.target) {
+        *slot = entry;
+        return;
+    }
+    let insert_at = for_stack.iter().rposition(|fs| !fs.target.is_empty()).map_or(0, |i| i + 1);
+    for_stack.insert(insert_at, entry);
+}
+
 async fn run_for_suspendable(
     state: &mut InterpreterState,
     node: &rustpython_parser::ast::StmtFor,
@@ -814,8 +828,9 @@ async fn run_for_suspendable(
     let resume = {
         let id = state.active_generator_stack.last().copied();
         id.and_then(|id| state.generators.get(&id))
-            .and_then(|frame| frame.for_stack.last())
-            .filter(|fs| fs.target == target)
+            // Search by target (topmost-first), not just the top — a nested
+            // inner `for`'s frame may sit above this loop's frame.
+            .and_then(|frame| frame.for_stack.iter().rev().find(|fs| fs.target == target))
             .map(|fs| {
                 (
                     fs.lazy_source.clone(),
@@ -880,6 +895,18 @@ async fn run_for_suspendable(
                         true,
                     )
                 }
+                // A nested `for` keys its own `for_stack` frame by target, so
+                // `for i in …: for j in …: yield` keeps both live at once.
+                Stmt::For(inner) if stmt_yields && for_loop_suspendable(inner) => {
+                    let inner_target = for_name_target(inner).unwrap_or_default().to_string();
+                    // Boxed: direct async self-recursion.
+                    (
+                        Box::pin(run_for_suspendable(state, inner, &inner_target, tools))
+                            .await
+                            .map(|()| Value::None),
+                        true,
+                    )
+                }
                 _ => (eval_stmt(state, stmt, tools).await, false),
             };
             match result {
@@ -918,30 +945,7 @@ async fn run_for_suspendable(
                                 lazy_source: None,
                                 current_item: None,
                             };
-                            // Preserve yield-from drain frames on top.
-                            if frame.for_stack.last().is_some_and(|t| t.target.is_empty()) {
-                                let yf = frame.for_stack.pop();
-                                if let Some(top) = frame.for_stack.last_mut() {
-                                    if top.target == target {
-                                        *top = entry;
-                                    } else {
-                                        frame.for_stack.push(entry);
-                                    }
-                                } else {
-                                    frame.for_stack.push(entry);
-                                }
-                                if let Some(yf) = yf {
-                                    frame.for_stack.push(yf);
-                                }
-                            } else if let Some(top) = frame.for_stack.last_mut() {
-                                if top.target == target {
-                                    *top = entry;
-                                } else {
-                                    frame.for_stack.push(entry);
-                                }
-                            } else {
-                                frame.for_stack.push(entry);
-                            }
+                            upsert_for_frame(&mut frame.for_stack, entry);
                         }
                     }
                     return Err(EvalError::Signal(ControlFlow::Yield(v)));
@@ -954,11 +958,9 @@ async fn run_for_suspendable(
         body_index = 0;
         if let Some(&id) = state.active_generator_stack.last() {
             if let Some(frame) = state.generators.get_mut(&id) {
-                if let Some(top) = frame.for_stack.last_mut() {
-                    if top.target == target {
-                        top.pos = pos;
-                        top.body_index = 0;
-                    }
+                if let Some(slot) = frame.for_stack.iter_mut().find(|fs| fs.target == target) {
+                    slot.pos = pos;
+                    slot.body_index = 0;
                 }
             }
         }
@@ -1011,13 +1013,36 @@ async fn run_for_lazy(
         }
         while body_index < node.body.len() {
             let stmt = &node.body[body_index];
-            let (result, is_if) = match stmt {
+            let stmt_yields = super::definitions::contains_yield_stmts(std::slice::from_ref(stmt));
+            // Nested `if`/`for`/`while` step through their own suspend engines,
+            // exactly as in `run_for_suspendable` — so `for i in count(): for j
+            // in …: yield` (infinite outer) keeps both loops live.
+            let (result, nested) = match stmt {
                 Stmt::If(if_node)
                     if if_branch_suspendable(&if_node.body)
                         && if_branch_suspendable(&if_node.orelse)
-                        && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)) =>
+                        && stmt_yields =>
                 {
                     (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+                }
+                Stmt::While(w)
+                    if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
+                {
+                    (
+                        Box::pin(run_while_suspendable(state, w, tools))
+                            .await
+                            .map(|()| Value::None),
+                        true,
+                    )
+                }
+                Stmt::For(inner) if stmt_yields && for_loop_suspendable(inner) => {
+                    let inner_target = for_name_target(inner).unwrap_or_default().to_string();
+                    (
+                        Box::pin(run_for_suspendable(state, inner, &inner_target, tools))
+                            .await
+                            .map(|()| Value::None),
+                        true,
+                    )
                 }
                 _ => (eval_stmt(state, stmt, tools).await, false),
             };
@@ -1044,7 +1069,7 @@ async fn run_for_lazy(
                 Err(EvalError::Signal(ControlFlow::Yield(v))) => {
                     if let Some(&id) = state.active_generator_stack.last() {
                         if let Some(frame) = state.generators.get_mut(&id) {
-                            if !is_if {
+                            if !nested {
                                 frame.resume_at_yield = true;
                             }
                             let entry = GeneratorForState {
@@ -1055,31 +1080,7 @@ async fn run_for_lazy(
                                 lazy_source: Some(source.clone()),
                                 current_item: current_item.clone(),
                             };
-                            // Same yield-from-drain-frame preservation as the
-                            // materialised path.
-                            if frame.for_stack.last().is_some_and(|t| t.target.is_empty()) {
-                                let yf = frame.for_stack.pop();
-                                if let Some(top) = frame.for_stack.last_mut() {
-                                    if top.target == target {
-                                        *top = entry;
-                                    } else {
-                                        frame.for_stack.push(entry);
-                                    }
-                                } else {
-                                    frame.for_stack.push(entry);
-                                }
-                                if let Some(yf) = yf {
-                                    frame.for_stack.push(yf);
-                                }
-                            } else if let Some(top) = frame.for_stack.last_mut() {
-                                if top.target == target {
-                                    *top = entry;
-                                } else {
-                                    frame.for_stack.push(entry);
-                                }
-                            } else {
-                                frame.for_stack.push(entry);
-                            }
+                            upsert_for_frame(&mut frame.for_stack, entry);
                         }
                     }
                     return Err(EvalError::Signal(ControlFlow::Yield(v)));
