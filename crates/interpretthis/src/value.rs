@@ -482,6 +482,8 @@ pub enum LazyKind {
     // `reversed(...)` results.
     ListReverseIterator,
     DictReverseKeyIterator,
+    DictReverseValueIterator,
+    DictReverseItemIterator,
     Reversed,
 }
 
@@ -523,6 +525,8 @@ impl LazyKind {
             Self::BytesIterator => "bytes_iterator",
             Self::ListReverseIterator => "list_reverseiterator",
             Self::DictReverseKeyIterator => "dict_reversekeyiterator",
+            Self::DictReverseValueIterator => "dict_reversevalueiterator",
+            Self::DictReverseItemIterator => "dict_reverseitemiterator",
             Self::Reversed => "reversed",
         }
     }

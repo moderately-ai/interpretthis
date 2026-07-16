@@ -1420,6 +1420,7 @@ pub(super) async fn try_builtin(
                     | Value::Array { .. }
                     | Value::Dict(_)
                     | Value::OrderedDict(_)
+                    | Value::DictView { .. }
                     | Value::Instance(_)
             );
             if !reversible {
@@ -1439,6 +1440,11 @@ pub(super) async fn try_builtin(
                 Value::List(_) => LazyKind::ListReverseIterator,
                 Value::Range { .. } => LazyKind::RangeIterator,
                 Value::Dict(_) | Value::OrderedDict(_) => LazyKind::DictReverseKeyIterator,
+                Value::DictView { kind, .. } => match kind {
+                    crate::value::DictViewKind::Keys => LazyKind::DictReverseKeyIterator,
+                    crate::value::DictViewKind::Values => LazyKind::DictReverseValueIterator,
+                    crate::value::DictViewKind::Items => LazyKind::DictReverseItemIterator,
+                },
                 Value::Tuple(_)
                 | Value::String(_)
                 | Value::Bytes(_)
