@@ -38,7 +38,7 @@ pub(crate) use generators::{
 pub(crate) use method_dispatch::{
     CallArgs, MethodOutcome, arg1, bind_method_params, reject_kwargs, require_param,
 };
-pub(crate) use params::{bind_params, evaluate_param_defaults, execute_body};
+pub(crate) use params::{bind_params_named, evaluate_param_defaults, execute_body};
 
 /// Convert a Python-visible `i64` index into a `usize` slot after caller-side
 /// sign-and-bounds validation. Fails with a clean `RuntimeError` on invariant

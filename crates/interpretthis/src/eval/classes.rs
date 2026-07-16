@@ -44,7 +44,7 @@ use crate::{
     eval::{
         eval_expr,
         functions::{
-            CallArgs, bind_params, build_function_params, call_lambda, call_user_function,
+            CallArgs, bind_params_named, build_function_params, call_lambda, call_user_function,
             execute_body, extract_function_source,
         },
     },
@@ -1617,18 +1617,26 @@ async fn call_method_inner(
     full_args.push(self_value);
     full_args.extend_from_slice(call.positional);
 
-    let local_scope =
-        match bind_params(&method.params, &full_args, call.keyword, state, tools).await {
-            Ok(scope) => scope,
-            Err(e) => {
-                if frame_pushed {
-                    state.method_frame_stack.pop();
-                }
-                state.frame_cell_owners.pop();
-                state.exit_call();
-                return Err(e);
+    let local_scope = match bind_params_named(
+        &method.params,
+        &method.name,
+        &full_args,
+        call.keyword,
+        state,
+        tools,
+    )
+    .await
+    {
+        Ok(scope) => scope,
+        Err(e) => {
+            if frame_pushed {
+                state.method_frame_stack.pop();
             }
-        };
+            state.frame_cell_owners.pop();
+            state.exit_call();
+            return Err(e);
+        }
+    };
     let self_param = self_local_name.clone();
 
     // Snapshot only the names this method frame can touch — its

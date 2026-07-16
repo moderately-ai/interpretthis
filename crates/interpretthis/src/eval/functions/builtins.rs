@@ -1036,13 +1036,18 @@ pub(super) async fn try_builtin(
         }
         "round" => {
             check_arg_count(name, args, 1, 2)?;
+            // `ndigits` may be positional or a keyword (`round(x, ndigits=2)`).
+            let ndigits_arg = args.get(1).or_else(|| kwargs.get("ndigits"));
             // A user-class instance rounds through its own `__round__`.
             if let Some(result) =
-                crate::eval::op::instance_round_dunder(state, &args[0], args.get(1), tools).await
+                crate::eval::op::instance_round_dunder(state, &args[0], ndigits_arg, tools).await
             {
                 return Ok(Some(result?));
             }
-            let ndigits = if args.len() >= 2 { Some(value_to_i64(&args[1])?) } else { None };
+            let ndigits = match ndigits_arg {
+                Some(Value::None) | None => None,
+                Some(v) => Some(value_to_i64(v)?),
+            };
             match &args[0] {
                 // CPython's `round(int, n)` returns an int rounded to the
                 // nearest multiple of 10**(-n) for n<0; rounding is

@@ -96,8 +96,35 @@ pub(crate) async fn evaluate_param_defaults(
 }
 
 /// Bind function arguments to parameter names.
-pub(crate) async fn bind_params(
+/// CPython's `f() missing N required positional argument(s): 'x' and 'y'`.
+fn missing_positional_error(func_name: &str, missing: &[String]) -> EvalError {
+    let names = match missing {
+        [] => String::new(),
+        [a] => format!("'{a}'"),
+        [a, b] => format!("'{a}' and '{b}'"),
+        many => {
+            let init = many[..many.len() - 1]
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{init}, and '{}'", many[many.len() - 1])
+        }
+    };
+    let n = missing.len();
+    let plural = if n == 1 { "" } else { "s" };
+    let prefix = if func_name.is_empty() { String::new() } else { format!("{func_name}() ") };
+    InterpreterError::TypeError(format!(
+        "{prefix}missing {n} required positional argument{plural}: {names}"
+    ))
+    .into()
+}
+
+/// [`bind_params`] with the callable's name for CPython-shaped arity errors
+/// (`f() missing 1 required positional argument: 'y'`).
+pub(crate) async fn bind_params_named(
     params: &FunctionParams,
+    func_name: &str,
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
     state: &mut InterpreterState,
@@ -116,14 +143,19 @@ pub(crate) async fn bind_params(
     // them. Without this, `def f(a): ...; f(1, 2, 3)` silently bound `a = 1` and
     // discarded the rest.
     if params.vararg.is_none() && args.len() > num_params {
+        let prefix = if func_name.is_empty() { String::new() } else { format!("{func_name}() ") };
         return Err(InterpreterError::TypeError(format!(
-            "takes {num_params} positional argument{} but {} {} given",
+            "{prefix}takes {num_params} positional argument{} but {} {} given",
             if num_params == 1 { "" } else { "s" },
             args.len(),
             if args.len() == 1 { "was" } else { "were" },
         ))
         .into());
     }
+
+    // Missing required positional args are collected and reported together, as
+    // CPython does (`f() missing 2 required positional arguments: 'x' and 'y'`).
+    let mut missing: Vec<String> = Vec::new();
 
     // Bind positional arguments. Defaults prefer the def-time
     // evaluated values; the source-string re-eval path is the
@@ -154,21 +186,17 @@ pub(crate) async fn bind_params(
                         .await
                         .unwrap_or(Value::None)
                 } else {
-                    return Err(InterpreterError::TypeError(format!(
-                        "missing required argument: '{}'",
-                        param.name
-                    ))
-                    .into());
+                    missing.push(param.name.clone());
+                    continue;
                 };
                 scope.insert(param.name.clone(), default_val);
             } else {
-                return Err(InterpreterError::TypeError(format!(
-                    "missing required argument: '{}'",
-                    param.name
-                ))
-                .into());
+                missing.push(param.name.clone());
             }
         }
+    }
+    if !missing.is_empty() {
+        return Err(missing_positional_error(func_name, &missing));
     }
 
     // Bind *args

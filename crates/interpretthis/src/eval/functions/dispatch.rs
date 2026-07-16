@@ -13,7 +13,7 @@ use super::{
     },
     helpers::{bytes_fromhex, dict_fromkeys},
     method_dispatch::{CallArgs, dispatch_method},
-    params::{bind_params, execute_body},
+    params::{bind_params_named, execute_body},
 };
 use crate::{
     error::{ControlFlow, EvalError, EvalResult, InterpreterError},
@@ -154,7 +154,8 @@ async fn call_user_function_inner(
     state.frame_cell_owners.push(rustc_hash::FxHashMap::default());
 
     // Build local scope from parameters
-    let bind_outcome = bind_params(&func_def.params, args, kwargs, state, tools).await;
+    let bind_outcome =
+        bind_params_named(&func_def.params, &func_def.name, args, kwargs, state, tools).await;
     let local_scope = match bind_outcome {
         Ok(s) => s,
         Err(e) => {
@@ -383,7 +384,8 @@ async fn call_lambda_inner(
     // Frame-depth bound — same reasoning as `call_user_function`.
     state.enter_call().map_err(EvalError::Interpreter)?;
 
-    let bind_outcome = bind_params(&lambda_def.params, args, kwargs, state, tools).await;
+    let bind_outcome =
+        bind_params_named(&lambda_def.params, "<lambda>", args, kwargs, state, tools).await;
     let local_scope = match bind_outcome {
         Ok(s) => s,
         Err(e) => {
