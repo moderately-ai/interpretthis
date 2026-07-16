@@ -1406,9 +1406,67 @@ pub(super) async fn try_builtin(
         }
         "reversed" => {
             check_arg_count(name, args, 1, 1)?;
-            // `reversed` is stricter than `iter`: it needs a reversible sequence
-            // (or a class defining `__reversed__`), not just any iterable — a
-            // set/frozenset/generator is iterable but NOT reversible.
+            // A user instance is reversible when it defines `__reversed__` (call
+            // it, return its iterator directly) or the `__len__` + `__getitem__`
+            // sequence protocol (reverse-index it). An instance with only
+            // `__iter__` is iterable but NOT reversible — CPython raises.
+            if let Value::Instance(inst) = &args[0] {
+                let class_name = inst.class_name.clone();
+                if let Some((_, method)) =
+                    crate::eval::classes::lookup_method_in_mro(state, &class_name, "__reversed__")
+                {
+                    let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+                    let (result, _self) = crate::eval::classes::call_method(
+                        state,
+                        &method,
+                        args[0].clone(),
+                        call,
+                        tools,
+                    )
+                    .await?;
+                    return Ok(Some(result));
+                }
+                let getitem =
+                    crate::eval::classes::lookup_method_in_mro(state, &class_name, "__getitem__");
+                let len_method =
+                    crate::eval::classes::lookup_method_in_mro(state, &class_name, "__len__");
+                let (Some((_, getitem)), Some((_, len_method))) = (getitem, len_method) else {
+                    return Err(InterpreterError::TypeError(format!(
+                        "'{class_name}' object is not reversible"
+                    ))
+                    .into());
+                };
+                // CPython's sequence reverse-iterator indexes `len-1 .. 0` via
+                // `__getitem__`; it relies on `__len__` for the bound rather than
+                // iterating forward (a `__getitem__` that never raises IndexError
+                // would otherwise never terminate).
+                let empty = IndexMap::new();
+                let (len_val, _self) = crate::eval::classes::call_method(
+                    state,
+                    &len_method,
+                    args[0].clone(),
+                    CallArgs { positional: &[], keyword: &empty },
+                    tools,
+                )
+                .await?;
+                let n = value_to_i64(&len_val)?;
+                let mut items = Vec::with_capacity(usize::try_from(n.max(0)).unwrap_or(0));
+                for i in (0..n).rev() {
+                    let (item, _self) = crate::eval::classes::call_method(
+                        state,
+                        &getitem,
+                        args[0].clone(),
+                        CallArgs { positional: &[Value::Int(i)], keyword: &empty },
+                        tools,
+                    )
+                    .await?;
+                    items.push(item);
+                }
+                return Ok(Some(into_iter_value(state, items, LazyKind::Reversed)));
+            }
+            // `reversed` is stricter than `iter`: it needs a reversible sequence,
+            // not just any iterable — a set/frozenset/generator is iterable but
+            // NOT reversible.
             let reversible = matches!(
                 &args[0],
                 Value::List(_)
@@ -1421,7 +1479,6 @@ pub(super) async fn try_builtin(
                     | Value::Dict(_)
                     | Value::OrderedDict(_)
                     | Value::DictView { .. }
-                    | Value::Instance(_)
             );
             if !reversible {
                 return Err(InterpreterError::TypeError(format!(
