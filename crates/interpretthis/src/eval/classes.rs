@@ -1574,6 +1574,35 @@ async fn instance_attr_call_fallback(
         .await?;
         return Ok((result, instance));
     }
+    // A `collections.namedtuple` inherits tuple's read-only `count` / `index`
+    // methods (it subclasses tuple). Dispatch them over the field values.
+    if matches!(method_name, "count" | "index") {
+        if let Value::Instance(inst) = &instance {
+            if let Some(Value::Tuple(field_names)) = state
+                .classes
+                .get(inst.class_name.as_str())
+                .and_then(|c| c.class_attrs.get("_fields"))
+                .cloned()
+            {
+                let items: Vec<Value> = field_names
+                    .iter()
+                    .filter_map(|n| match n {
+                        Value::String(f) => {
+                            Some(inst.fields.lock().get(f.as_str()).cloned().unwrap_or(Value::None))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let result = crate::eval::functions::methods::tuple::dispatch_tuple_method(
+                    &items,
+                    method_name,
+                    call.positional,
+                    call.keyword,
+                )?;
+                return Ok((result, instance));
+            }
+        }
+    }
     Err(InterpreterError::AttributeError(format!(
         "'{class_name}' object has no attribute '{method_name}'"
     ))

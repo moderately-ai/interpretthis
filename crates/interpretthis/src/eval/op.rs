@@ -89,6 +89,23 @@ pub async fn getitem(
             invoke_slot(state, container, &method, std::slice::from_ref(index), tools).await?;
         return Ok(returned);
     }
+    // A `collections.namedtuple` (and the builtin namedtuple-shaped results like
+    // struct_time / IsoCalendarDate / DecimalTuple) has no `__getitem__` slot but
+    // indexes and slices like the tuple it subclasses — a slice yields a plain
+    // tuple. Integer subscripts on a Name receiver are handled inline in
+    // `eval_subscript`, but slice syntax and `slice()` objects route here.
+    if let Some(items) = namedtuple_items(state, container) {
+        let tuple = Value::Tuple(items);
+        if let Value::Slice(s) = index {
+            return crate::eval::names::apply_value_slice(
+                &tuple,
+                Some(&s.start),
+                Some(&s.stop),
+                Some(&s.step),
+            );
+        }
+        return crate::types::dispatch_getitem(&tuple, index);
+    }
     if let (Some(map), Value::Instance(_)) = (container.as_dict(), index) {
         return match dict_get_instance_key(state, map, index, tools).await? {
             Some(v) => Ok(v),
@@ -631,6 +648,21 @@ pub async fn binop(
             if !matches!(returned, Value::NotImplemented) {
                 return Ok(returned);
             }
+        }
+    }
+    // A namedtuple has no arithmetic dunders but concatenates (`p + (4, 5)`) and
+    // repeats (`p * 2`) like the tuple it subclasses, yielding a plain tuple.
+    if matches!(op, Operator::Add | Operator::Mult) {
+        let l = namedtuple_items(state, left).map(Value::Tuple);
+        let r = namedtuple_items(state, right).map(Value::Tuple);
+        if l.is_some() || r.is_some() {
+            return crate::eval::operations::apply_binop(
+                l.as_ref().unwrap_or(left),
+                r.as_ref().unwrap_or(right),
+                op,
+                state.decimal_prec,
+                state.config.max_int_bits,
+            );
         }
     }
     crate::eval::operations::apply_binop(
