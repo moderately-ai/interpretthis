@@ -103,6 +103,9 @@ jobs:
               apk add --no-cache curl build-base
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
               . "$HOME/.cargo/env"
+              # rustc defaults the musl target linker to `<arch>-linux-musl-gcc`,
+              # which does not exist in a native Alpine (the compiler is `gcc`).
+              export "CARGO_TARGET_$(uname -m | tr a-z A-Z)_UNKNOWN_LINUX_MUSL_LINKER=gcc"
               npm install --no-audit --no-fund
               npx napi build --platform --release --manifest-path Cargo.toml --dts-header dts-header.d.ts
               node --test "__test__/**/*.test.mjs"
