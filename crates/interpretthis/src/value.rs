@@ -1257,6 +1257,11 @@ pub struct ClassValue {
     /// deserialized from an older snapshot — callers fall back to `name`.
     #[serde(default)]
     pub qualname: String,
+    /// `True` if the class declares a `typing.Generic[...]` base (or is otherwise
+    /// parameterisable). Makes `Cls[params]` a type-erased subscript (returning
+    /// the class itself) rather than a "not subscriptable" TypeError.
+    #[serde(default)]
+    pub is_generic: bool,
 }
 
 impl ClassValue {
@@ -1285,6 +1290,7 @@ impl ClassValue {
             abstract_methods: Vec::new(),
             metaclass: None,
             qualname: name,
+            is_generic: false,
         }
     }
 }
@@ -2769,9 +2775,11 @@ impl fmt::Display for Value {
             // CPython prefixes it (`<class '__main__.Foo'>`). This stateless
             // path uses the bare name for nested classes — the state-aware
             // `render` path supplies the full `Outer.Inner` qualname.
-            // `typing` aliases repr as their bare dotted name (`typing.List`,
-            // `typing.List[int]`), not the `<class '...'>` form builtin types use.
-            Self::Type(n) if n.starts_with("typing.") => write!(f, "{n}"),
+            // `typing` aliases and PEP 585 builtin generic aliases repr as their
+            // bare name (`typing.List[int]`, `list[int]`), not the `<class '...'>`
+            // form plain builtin types use. A parametrised alias always carries a
+            // `[` — that's what distinguishes `list[int]` from bare `list`.
+            Self::Type(n) if n.starts_with("typing.") || n.contains('[') => write!(f, "{n}"),
             Self::Type(n) => write!(f, "<class '{n}'>"),
             Self::Class(n) => write!(f, "<class '__main__.{n}'>"),
             Self::Module(n) => write!(f, "<module '{n}'>"),

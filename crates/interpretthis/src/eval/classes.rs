@@ -104,6 +104,7 @@ pub async fn eval_class_def(
     // `class P(NamedTuple):` — a typing.NamedTuple class becomes a namedtuple
     // built from its annotations (with defaults) after the body is processed.
     let mut is_typing_namedtuple = false;
+    let mut is_generic = false;
     for base in &node.bases {
         // Resolve bare names from the environment, or evaluate computed
         // base expressions (`collections.UserList`, `mod.Base`, …).
@@ -146,6 +147,11 @@ pub async fn eval_class_def(
                 // registered ClassValue — the abstract-method tracking below
                 // makes the class abstract, so the sentinel itself is skipped.
                 "abc.ABC" | "abc.ABCMeta" => {}
+                // `Generic[T]` / `typing.Generic` base — the class becomes
+                // parameterisable (`Cls[int]` type-erases to `Cls`).
+                n if n == "typing.Generic" || n.starts_with("typing.Generic[") => {
+                    is_generic = true;
+                }
                 _ => {}
             }
             continue;
@@ -504,6 +510,7 @@ pub async fn eval_class_def(
         cv.abstract_methods = abstract_methods;
         cv.metaclass = metaclass_name.clone();
         cv.qualname = qualname;
+        cv.is_generic = is_generic;
         cv
     });
     state
@@ -2772,5 +2779,10 @@ fn parse_slots_attr(attr: Option<&Value>) -> (bool, Vec<String>) {
         }
         _ => return (false, Vec::new()),
     };
-    (true, names)
+    // `__dict__` (or `__weakref__`) listed in `__slots__` re-enables a real
+    // instance dict, so arbitrary attributes are allowed — the slot restriction
+    // does not apply (CPython). The declared names still surface via
+    // `cls.__slots__`, which reads the original class attribute, not this flag.
+    let enforced = !names.iter().any(|n| n == "__dict__");
+    (enforced, names)
 }

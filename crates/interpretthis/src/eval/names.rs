@@ -1044,6 +1044,38 @@ async fn eval_subscript_inner(
         }
     }
 
+    // PEP 585 builtin generic aliases: `list[int]`, `dict[str, int]`, etc.
+    // reprs bare (`list[int]`, no `typing.` prefix). Only the container types and
+    // `type` are subscriptable; `int[...]`/`str[...]` raise, as in CPython.
+    if let Value::BuiltinName(name) = &obj {
+        const GENERIC_BUILTINS: &[&str] = &["list", "dict", "tuple", "set", "frozenset", "type"];
+        if GENERIC_BUILTINS.contains(&name.as_str()) {
+            return Ok(Value::Type(format!("{name}[{}]", typing_arg_repr(&index))));
+        }
+    }
+
+    // Subscripting a class: a user `__class_getitem__` classmethod handles it;
+    // otherwise a `Generic[...]`-parameterised class type-erases `Cls[params]`
+    // back to `Cls` (so `Stack[int]()` instantiates `Stack`). Everything else
+    // (enum member lookup `Color["RED"]`, plain classes) falls through to
+    // `op::getitem`, which keeps the existing behaviour and errors.
+    if let Value::Class(class_name) = &obj {
+        if let Some((_, method)) =
+            crate::eval::classes::lookup_method_in_mro(state, class_name, "__class_getitem__")
+        {
+            let call = crate::eval::functions::CallArgs {
+                positional: std::slice::from_ref(&index),
+                keyword: &indexmap::IndexMap::new(),
+            };
+            let (returned, _self) =
+                crate::eval::classes::call_method(state, &method, obj.clone(), call, tools).await?;
+            return Ok(returned);
+        }
+        if state.classes.get(class_name).is_some_and(|c| c.is_generic) {
+            return Ok(obj.clone());
+        }
+    }
+
     crate::eval::op::getitem(state, &obj, &index, tools).await
 }
 
