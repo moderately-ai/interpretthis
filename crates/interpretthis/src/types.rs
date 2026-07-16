@@ -3120,7 +3120,10 @@ fn str_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
 /// (`b"abc"[0]` is `97`).
 fn bytes_get_item(container: &Value, index: &Value) -> Result<Value, EvalError> {
     let b = bytes_view(container).unwrap_or_default();
-    let raw = int_index(index, "bytes")?;
+    // Shared by `bytes` and `bytearray`; the index-type error names the actual
+    // container ("bytearray indices ..." vs "byte indices ...").
+    let name = if matches!(container, Value::ByteArray(_)) { "bytearray" } else { "bytes" };
+    let raw = int_index(index, name)?;
     let idx = normalize_seq_index(raw, b.len(), "bytes")?;
     Ok(Value::Int(i64::from(b[idx])))
 }
@@ -3262,11 +3265,18 @@ fn int_index(index: &Value, container_name: &str) -> Result<i64, EvalError> {
             kind: crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag,
             ..
         } => int_index(value, container_name),
-        other => Err(InterpreterError::TypeError(format!(
-            "{container_name} indices must be integers, not '{}'",
-            other.type_name()
-        ))
-        .into()),
+        other => {
+            let ty = other.type_name();
+            // CPython's wording is container-specific: `str` quotes the type and
+            // omits "or slices"; `bytes` reports itself as "byte"; every other
+            // sequence says "integers or slices, not <type>" (unquoted).
+            let msg = match container_name {
+                "string" => format!("string indices must be integers, not '{ty}'"),
+                "bytes" => format!("byte indices must be integers or slices, not {ty}"),
+                _ => format!("{container_name} indices must be integers or slices, not {ty}"),
+            };
+            Err(InterpreterError::TypeError(msg).into())
+        }
     }
 }
 

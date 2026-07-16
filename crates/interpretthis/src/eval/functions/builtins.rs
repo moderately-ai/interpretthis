@@ -1397,6 +1397,29 @@ pub(super) async fn try_builtin(
         }
         "reversed" => {
             check_arg_count(name, args, 1, 1)?;
+            // `reversed` is stricter than `iter`: it needs a reversible sequence
+            // (or a class defining `__reversed__`), not just any iterable — a
+            // set/frozenset/generator is iterable but NOT reversible.
+            let reversible = matches!(
+                &args[0],
+                Value::List(_)
+                    | Value::Tuple(_)
+                    | Value::String(_)
+                    | Value::Range { .. }
+                    | Value::Bytes(_)
+                    | Value::ByteArray(_)
+                    | Value::Array { .. }
+                    | Value::Dict(_)
+                    | Value::OrderedDict(_)
+                    | Value::Instance(_)
+            );
+            if !reversible {
+                return Err(InterpreterError::TypeError(format!(
+                    "'{}' object is not reversible",
+                    args[0].type_name()
+                ))
+                .into());
+            }
             let mut items = crate::eval::op::iter(state, &args[0], tools).await?;
             items.reverse();
             Ok(Some(into_iter_value(state, items)))
@@ -1496,16 +1519,22 @@ pub(super) async fn try_builtin(
             if !args.is_empty() {
                 // dict from iterable of pairs
                 let items = crate::eval::op::iter(state, &args[0], tools).await?;
-                for item in items {
+                // CPython reports the offending element's position and length:
+                // a wrong-length pair is a ValueError, a non-sequence element a
+                // TypeError, each carrying `element #<i>`.
+                let wrong_len = |i: usize, len: usize| -> EvalError {
+                    InterpreterError::ValueError(format!(
+                        "dictionary update sequence element #{i} has length {len}; 2 is required"
+                    ))
+                    .into()
+                };
+                for (i, item) in items.into_iter().enumerate() {
                     if let Value::Tuple(pair) = &item {
                         if pair.len() == 2 {
                             let key = value_to_key(&pair[0])?;
                             map.insert(key, pair[1].clone());
                         } else {
-                            return Err(InterpreterError::TypeError(
-                                "dict() requires key-value pairs".into(),
-                            )
-                            .into());
+                            return Err(wrong_len(i, pair.len()));
                         }
                     } else if let Value::List(pair) = &item {
                         // Snapshot the pair so the lock guard's scope
@@ -1515,15 +1544,12 @@ pub(super) async fn try_builtin(
                             let key = value_to_key(&snapshot[0])?;
                             map.insert(key, snapshot[1].clone());
                         } else {
-                            return Err(InterpreterError::TypeError(
-                                "dict() requires key-value pairs".into(),
-                            )
-                            .into());
+                            return Err(wrong_len(i, snapshot.len()));
                         }
                     } else {
-                        return Err(InterpreterError::TypeError(
-                            "dict() requires an iterable of pairs".into(),
-                        )
+                        return Err(InterpreterError::TypeError(format!(
+                            "cannot convert dictionary update sequence element #{i} to a sequence"
+                        ))
                         .into());
                     }
                 }

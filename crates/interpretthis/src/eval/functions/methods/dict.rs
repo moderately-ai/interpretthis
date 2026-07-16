@@ -70,9 +70,10 @@ pub(crate) fn dispatch_dict_method(
             // CPython: update([other], **kwargs). `other` may be a mapping or
             // omitted; kwargs always merge last (string keys).
             if args.len() > 1 {
-                return Err(InterpreterError::TypeError(
-                    "update() takes at most 1 positional argument".into(),
-                )
+                return Err(InterpreterError::TypeError(format!(
+                    "update expected at most 1 argument, got {}",
+                    args.len()
+                ))
                 .into());
             }
             let mut delta = 0isize;

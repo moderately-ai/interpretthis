@@ -327,7 +327,7 @@ fn seq_index(len: usize, key: &Value) -> Result<usize, EvalError> {
         Value::Bool(b) => i64::from(*b),
         other => {
             return Err(InterpreterError::TypeError(format!(
-                "list indices must be integers, not '{}'",
+                "list indices must be integers or slices, not {}",
                 other.type_name()
             ))
             .into());

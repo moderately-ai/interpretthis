@@ -206,7 +206,13 @@ pub(crate) fn dispatch_set_method(
                 Ok(MethodOutcome::shrank(val, freed))
             }
             None => {
-                Err(EvalError::Exception(ExceptionValue::new("KeyError", "pop from an empty set")))
+                // KeyError renders `message` verbatim, so the string must carry
+                // its own repr quotes (CPython: `KeyError('pop from an empty
+                // set')` → `'pop from an empty set'`).
+                Err(EvalError::Exception(ExceptionValue::new(
+                    "KeyError",
+                    "'pop from an empty set'",
+                )))
             }
         },
         "clear" => {

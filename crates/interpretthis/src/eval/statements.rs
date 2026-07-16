@@ -369,7 +369,7 @@ async fn assign_unpacking(
         }
         let non_star = elts.len() - 1;
         if items.len() < non_star {
-            return Err(InterpreterError::Runtime(format!(
+            return Err(InterpreterError::ValueError(format!(
                 "not enough values to unpack (expected at least {non_star}, got {})",
                 items.len()
             ))
@@ -395,11 +395,21 @@ async fn assign_unpacking(
         return Ok(());
     }
 
-    if elts.len() != items.len() {
-        return Err(InterpreterError::Runtime(format!(
+    // CPython distinguishes the two directions: fewer supplied values than
+    // targets is "not enough values"; more is "too many values" (which omits
+    // the `got` count). Both are ValueError, not RuntimeError.
+    if items.len() < elts.len() {
+        return Err(InterpreterError::ValueError(format!(
             "not enough values to unpack (expected {}, got {})",
             elts.len(),
             items.len()
+        ))
+        .into());
+    }
+    if items.len() > elts.len() {
+        return Err(InterpreterError::ValueError(format!(
+            "too many values to unpack (expected {})",
+            elts.len()
         ))
         .into());
     }

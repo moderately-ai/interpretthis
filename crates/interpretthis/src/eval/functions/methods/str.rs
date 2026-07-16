@@ -174,10 +174,11 @@ pub(crate) fn dispatch_string_method(
                     };
                     Ok(Value::List(shared_list(parts)))
                 }
-                Some(_) => {
-                    Err(InterpreterError::TypeError("must be str or None, not other type".into())
-                        .into())
-                }
+                Some(other) => Err(InterpreterError::TypeError(format!(
+                    "must be str or None, not {}",
+                    other.type_name()
+                ))
+                .into()),
             }
         }
         "rsplit" => {
@@ -203,10 +204,11 @@ pub(crate) fn dispatch_string_method(
                     };
                     Ok(Value::List(shared_list(parts)))
                 }
-                Some(_) => {
-                    Err(InterpreterError::TypeError("must be str or None, not other type".into())
-                        .into())
-                }
+                Some(other) => Err(InterpreterError::TypeError(format!(
+                    "must be str or None, not {}",
+                    other.type_name()
+                ))
+                .into()),
             }
         }
         "join" => {
@@ -216,7 +218,11 @@ pub(crate) fn dispatch_string_method(
                 )
                 .into());
             }
-            let items = iterate_value(&args[0])?;
+            // A non-iterable argument to `str.join` reports "can only join an
+            // iterable", not the generic "not iterable".
+            let items = iterate_value(&args[0]).map_err(|_| {
+                EvalError::from(InterpreterError::TypeError("can only join an iterable".into()))
+            })?;
             // CPython names the offending index and type:
             // `sequence item 0: expected str instance, int found`.
             let parts: Result<Vec<compact_str::CompactString>, _> = items
