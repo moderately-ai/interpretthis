@@ -153,6 +153,29 @@ pub(crate) async fn bind_params_named(
         .into());
     }
 
+    // Positional-only parameters (the first `posonly_count`, declared before
+    // `/`) cannot be filled by keyword. Naming one in the call is an error —
+    // unless a `**kwargs` is present, which absorbs it instead (the param then
+    // binds positionally or reports as missing). CPython lists every offending
+    // name in declaration order.
+    let posonly = params.posonly_count.min(params.args.len());
+    if posonly > 0 && params.kwarg.is_none() {
+        let bad: Vec<String> = params.args[..posonly]
+            .iter()
+            .filter(|p| kwargs.contains_key(&p.name))
+            .map(|p| p.name.clone())
+            .collect();
+        if !bad.is_empty() {
+            let prefix =
+                if func_name.is_empty() { String::new() } else { format!("{func_name}() ") };
+            return Err(InterpreterError::TypeError(format!(
+                "{prefix}got some positional-only arguments passed as keyword arguments: '{}'",
+                bad.join(", ")
+            ))
+            .into());
+        }
+    }
+
     // Missing required positional args are collected and reported together, as
     // CPython does (`f() missing 2 required positional arguments: 'x' and 'y'`).
     let mut missing: Vec<String> = Vec::new();
@@ -162,10 +185,14 @@ pub(crate) async fn bind_params_named(
     // legacy fallback for state imported before def-time evaluation
     // landed (`default_values` will be empty in that case).
     for (i, param) in params.args.iter().enumerate() {
+        // A positional-only param never consults kwargs: a matching keyword
+        // belongs to `**kwargs` (or was already rejected above).
+        let is_posonly = i < posonly;
         if i < args.len() {
             // The same parameter cannot be filled positionally and by keyword.
-            // Previously the keyword was silently dropped.
-            if kwargs.contains_key(&param.name) {
+            // Previously the keyword was silently dropped. (Positional-only
+            // names are exempt — a same-named keyword rides `**kwargs`.)
+            if !is_posonly && kwargs.contains_key(&param.name) {
                 return Err(InterpreterError::TypeError(format!(
                     "got multiple values for argument '{}'",
                     param.name
@@ -173,7 +200,7 @@ pub(crate) async fn bind_params_named(
                 .into());
             }
             scope.insert(param.name.clone(), args[i].clone());
-        } else if let Some(val) = kwargs.get(&param.name) {
+        } else if let Some(val) = kwargs.get(&param.name).filter(|_| !is_posonly) {
             scope.insert(param.name.clone(), val.clone());
         } else {
             // Check defaults
@@ -230,8 +257,14 @@ pub(crate) async fn bind_params_named(
     // f(1, b=99)`) was silently dropped.
     if let Some(ref kwarg_name) = params.kwarg {
         let mut extra_kwargs = IndexMap::new();
-        let param_names: Vec<&str> =
-            params.args.iter().chain(params.kwonlyargs.iter()).map(|p| p.name.as_str()).collect();
+        // Positional-only names are NOT claimed by the parameter list here — a
+        // same-named keyword is absorbed into `**kwargs` (CPython semantics),
+        // so exclude the first `posonly` args from the claimed set.
+        let param_names: Vec<&str> = params.args[posonly..]
+            .iter()
+            .chain(params.kwonlyargs.iter())
+            .map(|p| p.name.as_str())
+            .collect();
         for (k, v) in kwargs {
             if !param_names.contains(&k.as_str()) {
                 extra_kwargs.insert(ValueKey::String(k.clone().into()), v.clone());

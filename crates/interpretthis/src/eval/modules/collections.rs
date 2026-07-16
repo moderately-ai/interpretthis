@@ -342,6 +342,7 @@ pub(crate) fn call_namedtuple_with_state(
         kw_defaults: Vec::new(),
         kw_default_values: Vec::new(),
         kwarg: None,
+        posonly_count: 0,
     };
     // Build the body: self.field_n = field_n for each field.
     use rustpython_parser::{
@@ -454,6 +455,7 @@ pub(crate) fn call_namedtuple_with_state(
                 kw_defaults: Vec::new(),
                 kw_default_values: Vec::new(),
                 kwarg: None,
+                posonly_count: 0,
             },
             closure: BTreeMap::new(),
             source: String::new(),
@@ -510,6 +512,7 @@ pub(crate) fn call_namedtuple_with_state(
         kw_defaults: Vec::new(),
         kw_default_values: Vec::new(),
         kwarg,
+        posonly_count: 0,
     };
 
     let make_body = vec![Stmt::Return(StmtReturn {

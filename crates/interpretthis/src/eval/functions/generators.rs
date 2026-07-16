@@ -202,6 +202,7 @@ pub(crate) fn create_synthetic_generator(
             kw_defaults: Vec::new(),
             kw_default_values: Vec::new(),
             kwarg: None,
+            posonly_count: 0,
         },
         closure: std::collections::BTreeMap::new(),
         source: String::new(),

@@ -1987,6 +1987,12 @@ pub struct FunctionParams {
     pub kw_default_values: Vec<Option<Value>>,
     /// **kwargs parameter name.
     pub kwarg: Option<String>,
+    /// Number of leading `args` that are positional-only (declared before `/`).
+    /// These cannot be filled by keyword: naming one in a call is an error
+    /// unless a `**kwargs` absorbs it. `0` for the common no-`/` case and for
+    /// old state imports.
+    #[serde(default)]
+    pub posonly_count: usize,
 }
 
 /// A single function parameter.

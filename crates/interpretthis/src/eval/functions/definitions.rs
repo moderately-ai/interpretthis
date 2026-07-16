@@ -1245,6 +1245,7 @@ pub fn build_function_params(args: &ast::Arguments) -> Result<FunctionParams, Ev
         kw_defaults,
         kw_default_values: Vec::new(),
         kwarg,
+        posonly_count: args.posonlyargs.len(),
     })
 }
 
