@@ -100,19 +100,19 @@ pub(crate) fn dispatch_counter_method(
             }
             Ok(MethodOutcome::pure(Value::List(shared_list(out))))
         }
-        // `c.subtract(other)` decrements counts. Unlike +/- which
+        // `c.subtract(other, **kwargs)` decrements counts. Unlike +/- which
         // keep_positive, subtract allows zero and negative counts.
         "subtract" => {
-            crate::eval::functions::reject_kwargs(method, kwargs)?;
             counter_apply_in_place(map, args.first(), |cur, delta| cur - delta)?;
+            counter_apply_kwargs(map, kwargs, |cur, delta| cur - delta);
             Ok(MethodOutcome::pure(Value::None))
         }
-        // `c.update(other)` increments counts (DIFFERS from dict.update
-        // which overwrites). Same semantics as Counter(iter) on first
-        // construction.
+        // `c.update(other, **kwargs)` increments counts (DIFFERS from
+        // dict.update which overwrites). Same semantics as Counter(iter) on
+        // first construction; keyword counts merge last (`c.update(a=1)`).
         "update" => {
-            crate::eval::functions::reject_kwargs(method, kwargs)?;
             counter_apply_in_place(map, args.first(), |cur, delta| cur + delta)?;
+            counter_apply_kwargs(map, kwargs, |cur, delta| cur + delta);
             Ok(MethodOutcome::pure(Value::None))
         }
         // `c.total()` returns the sum of all counts.
@@ -132,6 +132,29 @@ pub(crate) fn dispatch_counter_method(
             "'Counter' object has no attribute '{method}'"
         ))
         .into()),
+    }
+}
+
+/// Apply keyword counts (`c.update(a=1, b=2)`) against `map` with `op`.
+/// Each keyword is a string key whose value is the integer delta.
+fn counter_apply_kwargs(
+    map: &mut IndexMap<ValueKey, Value>,
+    kwargs: &IndexMap<String, Value>,
+    op: fn(i64, i64) -> i64,
+) {
+    for (name, value) in kwargs {
+        let delta = match value {
+            Value::Int(i) => *i,
+            Value::Bool(b) => i64::from(*b),
+            _ => continue,
+        };
+        let key = ValueKey::String(name.as_str().into());
+        let cur = match map.get(&key) {
+            Some(Value::Int(i)) => *i,
+            Some(Value::Bool(b)) => i64::from(*b),
+            _ => 0,
+        };
+        map.insert(key, Value::Int(op(cur, delta)));
     }
 }
 

@@ -33,10 +33,8 @@ pub fn constant(name: &str) -> Option<Value> {
         | "Iterable" | "Iterator" | "Generator" | "Callable" | "Mapping" | "MutableMapping"
         | "Sequence" | "MutableSequence" | "Collection" | "Container" | "Hashable" | "Sized"
         | "Type" | "Final" | "Literal" | "ClassVar" | "Annotated" | "NoReturn" | "Never"
-        | "Self" | "TypeAlias" | "TypeGuard" | "Concatenate" | "ParamSpec" | "TypeVar"
-        | "NamedTuple" | "TypedDict" | "Protocol" | "Generic" => {
-            Some(Value::Type(format!("typing.{name}")))
-        }
+        | "Self" | "TypeAlias" | "TypeGuard" | "Concatenate" | "NamedTuple" | "TypedDict"
+        | "Protocol" | "Generic" => Some(Value::Type(format!("typing.{name}"))),
         _ => None,
     }
 }
@@ -44,7 +42,17 @@ pub fn constant(name: &str) -> Option<Value> {
 pub fn has_function(name: &str) -> bool {
     matches!(
         name,
-        "cast" | "NewType" | "TYPE_CHECKING" | "get_type_hints" | "get_args" | "get_origin"
+        "cast"
+            | "NewType"
+            | "TYPE_CHECKING"
+            | "get_type_hints"
+            | "get_args"
+            | "get_origin"
+            // `TypeVar`/`ParamSpec` are *called* to build type parameters
+            // (`T = TypeVar("T")`), so they must resolve as callables rather
+            // than bare `Type` sentinels.
+            | "TypeVar"
+            | "ParamSpec"
     )
 }
 
@@ -72,6 +80,14 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         "get_args" => Ok(Value::Tuple(Vec::new())),
         "get_origin" => Ok(Value::None),
         "get_type_hints" => Ok(Value::Dict(crate::value::shared_dict(indexmap::IndexMap::new()))),
+        // `TypeVar("T", ...)` / `ParamSpec("P")` — build a type-parameter
+        // sentinel named after the first argument. It only needs to be a
+        // subscriptable value usable in `Generic[T]` and annotations, both of
+        // which the evaluator erases; the name is carried for a faithful repr.
+        "TypeVar" | "ParamSpec" => {
+            let param_name = args.first().and_then(Value::as_str).unwrap_or("anon");
+            Ok(Value::Type(format!("typing.{func}:{param_name}")))
+        }
         // TYPE_CHECKING is a constant False (the runtime check). The
         // constant() path also resolves it; calling it as a function
         // shouldn't happen but we return False defensively.

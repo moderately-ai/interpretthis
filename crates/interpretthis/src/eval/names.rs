@@ -922,6 +922,16 @@ async fn eval_subscript_inner(
         return Ok(synthesised);
     }
 
+    // Subscripting a `typing` sentinel (`Optional[int]`, `Generic[T]`,
+    // `Dict[str, int]`) is a type-erased no-op: the parametrised alias behaves
+    // like its origin. Return it unchanged so chained subscripts compose and a
+    // subscripted generic (`class Stack(Generic[T])`) can serve as a base.
+    if let Value::Type(name) = &obj {
+        if name.starts_with("typing.") {
+            return Ok(obj);
+        }
+    }
+
     crate::eval::op::getitem(state, &obj, &index, tools).await
 }
 
