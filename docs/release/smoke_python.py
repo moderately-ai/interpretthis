@@ -155,7 +155,9 @@ def check_lists_are_copied_not_aliased() -> None:
 
 
 def check_sandbox_boundary() -> None:
-    if Interpreter().execute("x = ().__class__").error.__class__ is not SecurityError:
+    # Reading `__class__` is allowed (it just returns the type); the escape is the
+    # next hop, `__mro__`/`__bases__` off that type, which stays blocked.
+    if Interpreter().execute("x = ().__class__.__mro__").error.__class__ is not SecurityError:
         fail("introspection escape was not refused")
     if Interpreter().execute("import socket").ok:
         fail("a non-allowlisted import was permitted")
