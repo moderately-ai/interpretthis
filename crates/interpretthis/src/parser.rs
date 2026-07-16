@@ -14,7 +14,12 @@ use crate::error::InterpreterError;
 /// Applies CPython's compile-time private-name mangling (`__x` inside a class
 /// body → `_ClassName__x`) as a post-parse AST pass.
 pub fn parse(code: &str) -> Result<Suite, InterpreterError> {
-    let suite = ast::Suite::parse(code, "<interpreter>")
-        .map_err(|e| InterpreterError::Syntax(format!("{e}")))?;
+    let suite = ast::Suite::parse(code, "<interpreter>").map_err(|e| {
+        // rustpython appends " at byte offset N"; CPython's SyntaxError message
+        // carries no offset (the position lives in the traceback), so strip it.
+        let full = format!("{e}");
+        let msg = full.split(" at byte offset ").next().unwrap_or(&full).to_owned();
+        InterpreterError::Syntax(msg)
+    })?;
     Ok(crate::mangle::mangle_private_names(suite))
 }
