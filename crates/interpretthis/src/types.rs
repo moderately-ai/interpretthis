@@ -775,6 +775,12 @@ pub fn dispatch_binop(
     if !std::ptr::eq(lhs_u, lhs) || !std::ptr::eq(rhs_u, rhs) {
         return dispatch_binop(op, lhs_u, rhs_u, decimal_prec);
     }
+    // `array` concatenation / repetition (it has no migrated TypeObject slot).
+    if matches!(lhs, Value::Array { .. }) {
+        if let Some(result) = array_arith(op, lhs, rhs) {
+            return result;
+        }
+    }
     let lhs_type = type_of(lhs);
     if let Some(result) = (lhs_type.arith_slot)(op, lhs, rhs, decimal_prec) {
         return result;
@@ -2678,6 +2684,49 @@ fn list_arith(
         }
         BinOp::Mul if matches!(rhs, Value::Int(_) | Value::Bool(_)) => {
             Some(crate::eval::operations::apply_binop_builtin(op, lhs, rhs))
+        }
+        _ => None,
+    }
+}
+
+/// `array + array` (concat, matching typecodes) and `array * int` (repetition).
+/// Returns `None` for other ops so the caller falls through to its error path.
+fn array_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Option<Result<Value, EvalError>> {
+    let Value::Array { typecode, items } = lhs else { return None };
+    match op {
+        BinOp::Add => {
+            let Value::Array { typecode: rt, items: ri } = rhs else {
+                return Some(Err(InterpreterError::TypeError(format!(
+                    "can only append array (not \"{}\") to array",
+                    rhs.python_type_name()
+                ))
+                .into()));
+            };
+            if rt != typecode {
+                return Some(Err(InterpreterError::TypeError(
+                    "bad argument type for built-in operation".into(),
+                )
+                .into()));
+            }
+            let mut combined = items.lock().clone();
+            combined.extend(ri.lock().iter().cloned());
+            Some(Ok(Value::Array {
+                typecode: *typecode,
+                items: crate::value::shared_list(combined),
+            }))
+        }
+        BinOp::Mul => {
+            let n = match rhs {
+                Value::Int(i) => *i,
+                Value::Bool(b) => i64::from(*b),
+                _ => return None,
+            };
+            let src = items.lock().clone();
+            let mut out = Vec::new();
+            for _ in 0..n.max(0) {
+                out.extend(src.iter().cloned());
+            }
+            Some(Ok(Value::Array { typecode: *typecode, items: crate::value::shared_list(out) }))
         }
         _ => None,
     }
