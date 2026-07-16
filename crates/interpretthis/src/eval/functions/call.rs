@@ -736,7 +736,20 @@ async fn eval_call_inner(
                 return call_value_as_function(state, &accessor, &resolved_args, &kwargs, tools)
                     .await;
             }
-            return Ok(dispatch_method(&mut temp, method_name, &resolved_args, &kwargs)?.value);
+            // The receiver here is a builtin with a *synchronous* method table
+            // (str/list/dict/set/…) — module functions, generators, and
+            // exceptions were routed above. A live generator / lazy genexp
+            // passed as an argument (`", ".join(str(x) for x in gen)`) can't be
+            // stepped synchronously, so drain it to a materialised `Lazy` (a
+            // finite source succeeds; an infinite one hits the iteration cap).
+            let mut drained_args = resolved_args;
+            for arg in &mut drained_args {
+                if matches!(arg, Value::Generator { .. } | Value::BuiltinIter { .. }) {
+                    let items = crate::eval::op::iter(state, arg, tools).await?;
+                    *arg = state.alloc_lazy(items);
+                }
+            }
+            return Ok(dispatch_method(&mut temp, method_name, &drained_args, &kwargs)?.value);
         }
     }
 

@@ -200,16 +200,19 @@ pub async fn eval_generator_exp(
 ) -> EvalResult {
     check_walrus_rebind(&node.generators, &[&node.elt])?;
 
-    // A single-generator genexp whose element builds a closure must be
-    // evaluated *lazily* — a closure yielded mid-iteration has to be callable
-    // while the loop variable still holds its yield-time value (CPython's
-    // `[f() for f in (lambda: k for k in range(n))]` → `[0, 1, 2]`). Eager
-    // materialisation runs the loop to the end first, so every closure would
-    // see the final value. Route these through the real suspend engine; every
-    // other genexp keeps the proven eager path (observably identical for
-    // non-closure elements, which the surrounding sandbox bounds anyway).
-    if node.generators.len() == 1 && !node.generators[0].is_async && expr_builds_closure(&node.elt)
-    {
+    // A single-generator genexp is evaluated *lazily* (through the real suspend
+    // engine) in two cases:
+    //   1. the element builds a closure — a closure yielded mid-iteration must
+    //      be callable while the loop variable still holds its yield-time value
+    //      (CPython's `[f() for f in (lambda: k for k in range(n))]` → `[0,1,2]`;
+    //      eager materialisation would run the loop to the end first);
+    //   2. the source is itself a lazy/infinite iterator (a generator, another
+    //      genexp, `itertools.count()`, …) — eager materialisation would drain
+    //      or hang on it, so `next(x*x for x in count())` must stay lazy.
+    // Every other genexp (finite, materialisable source, non-closure element)
+    // keeps the proven eager path — its result is a `Lazy` buffer that the sync
+    // consumers (`str.join`, `dict()`, tuple-unpack) can still step.
+    if node.generators.len() == 1 && !node.generators[0].is_async {
         if let Some(generator) = try_lazy_genexp(state, node, tools).await? {
             return Ok(generator);
         }
@@ -293,6 +296,21 @@ async fn try_lazy_genexp(
     // Evaluate the outermost iterable eagerly (CPython) and stash it under the
     // hidden `.0` local — an invalid identifier, so no user name collides.
     let iter_value = resolve_proxy(&eval_expr(state, &comp.iter, tools).await?).await?;
+
+    // Only take the lazy path when it is actually needed: a closure-building
+    // element (loop-variable capture timing) or a lazy/infinite source (a
+    // generator / another genexp / `count()`), which the eager path would drain
+    // or hang on. A finite, materialisable source with a plain element stays
+    // eager so its `Lazy` result remains steppable by sync consumers
+    // (`str.join`, `dict()`). Falling back re-evaluates the source on the eager
+    // path — the same double-evaluation the closure path already accepted.
+    let source_is_lazy = matches!(
+        iter_value,
+        Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. }
+    );
+    if !source_is_lazy && !expr_builds_closure(&node.elt) {
+        return Ok(None);
+    }
 
     // Build `for <target> in .0: [if cond:]* yield <elt>`.
     let iter_ref = E::Name(ExprName {
