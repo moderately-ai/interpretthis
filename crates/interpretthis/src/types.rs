@@ -3198,11 +3198,11 @@ fn list_del_item(container: &mut Value, index: &Value) -> Result<isize, EvalErro
             Value::None => 1,
             Value::Int(n) => *n,
             Value::Bool(b) => i64::from(*b),
-            other => {
-                return Err(InterpreterError::TypeError(format!(
-                    "slice indices must be integers or None, not '{}'",
-                    other.type_name()
-                ))
+            _ => {
+                return Err(InterpreterError::TypeError(
+                    "slice indices must be integers or None or have an __index__ method"
+                        .to_string(),
+                )
                 .into());
             }
         };

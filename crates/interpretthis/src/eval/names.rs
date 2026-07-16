@@ -1099,11 +1099,10 @@ pub(crate) fn apply_value_slice(
         Some(Value::Int(s)) => *s,
         Some(Value::Bool(b)) => i64::from(*b),
         None | Some(Value::None) => 1,
-        Some(other) => {
-            return Err(InterpreterError::TypeError(format!(
-                "slice indices must be integers or None, not '{}'",
-                other.type_name()
-            ))
+        Some(_) => {
+            return Err(InterpreterError::TypeError(
+                "slice indices must be integers or None or have an __index__ method".to_string(),
+            )
             .into());
         }
     };
@@ -1172,10 +1171,10 @@ pub(crate) fn apply_value_slice(
                     None | Some(Value::None) => Ok(default),
                     Some(Value::Int(i)) => Ok(*i),
                     Some(Value::Bool(b)) => Ok(i64::from(*b)),
-                    Some(other) => Err(InterpreterError::TypeError(format!(
-                        "slice indices must be integers or None, not '{}'",
-                        other.type_name()
-                    ))
+                    Some(_) => Err(InterpreterError::TypeError(
+                        "slice indices must be integers or None or have an __index__ method"
+                            .to_string(),
+                    )
                     .into()),
                 }
             };
@@ -1220,10 +1219,9 @@ fn slice_sequence(
             None | Some(Value::None) => Ok(default),
             Some(Value::Int(i)) => Ok(*i),
             Some(Value::Bool(b)) => Ok(i64::from(*b)),
-            Some(other) => Err(InterpreterError::TypeError(format!(
-                "slice indices must be integers or None, not '{}'",
-                other.type_name()
-            ))
+            Some(_) => Err(InterpreterError::TypeError(
+                "slice indices must be integers or None or have an __index__ method".to_string(),
+            )
             .into()),
         }
     };

@@ -355,11 +355,10 @@ async fn delete_slice(
         None | Some(Value::None) => 1,
         Some(Value::Int(n)) => n,
         Some(Value::Bool(b)) => i64::from(b),
-        Some(other) => {
-            return Err(InterpreterError::TypeError(format!(
-                "slice indices must be integers or None, not '{}'",
-                other.type_name()
-            ))
+        Some(_) => {
+            return Err(InterpreterError::TypeError(
+                "slice indices must be integers or None or have an __index__ method".to_string(),
+            )
             .into());
         }
     };

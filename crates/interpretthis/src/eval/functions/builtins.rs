@@ -624,10 +624,10 @@ pub(super) async fn try_builtin(
                 match v {
                     Value::None | Value::Int(_) | Value::BigInt(_) => Ok(v.clone()),
                     Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
-                    other => Err(InterpreterError::TypeError(format!(
-                        "slice indices must be integers or None, not '{}'",
-                        other.type_name()
-                    ))
+                    _ => Err(InterpreterError::TypeError(
+                        "slice indices must be integers or None or have an __index__ method"
+                            .to_string(),
+                    )
                     .into()),
                 }
             };
@@ -1160,9 +1160,10 @@ pub(super) async fn try_builtin(
         }
         "min" => {
             if args.is_empty() {
-                return Err(
-                    InterpreterError::TypeError("min expected at least 1 argument".into()).into()
-                );
+                return Err(InterpreterError::TypeError(
+                    "min expected at least 1 argument, got 0".into(),
+                )
+                .into());
             }
             let items = if args.len() == 1 {
                 crate::eval::op::iter(state, &args[0], tools).await?
@@ -1175,9 +1176,10 @@ pub(super) async fn try_builtin(
                 if let Some(default) = kwargs.get("default") {
                     return Ok(Some(default.clone()));
                 }
-                return Err(
-                    InterpreterError::ValueError("min() arg is an empty sequence".into()).into()
-                );
+                return Err(InterpreterError::ValueError(
+                    "min() iterable argument is empty".into(),
+                )
+                .into());
             }
             let key_fn = kwargs.get("key");
             let mut min_val = items[0].clone();
@@ -1194,9 +1196,10 @@ pub(super) async fn try_builtin(
         }
         "max" => {
             if args.is_empty() {
-                return Err(
-                    InterpreterError::TypeError("max expected at least 1 argument".into()).into()
-                );
+                return Err(InterpreterError::TypeError(
+                    "max expected at least 1 argument, got 0".into(),
+                )
+                .into());
             }
             let items = if args.len() == 1 {
                 crate::eval::op::iter(state, &args[0], tools).await?
@@ -1209,9 +1212,10 @@ pub(super) async fn try_builtin(
                 if let Some(default) = kwargs.get("default") {
                     return Ok(Some(default.clone()));
                 }
-                return Err(
-                    InterpreterError::ValueError("max() arg is an empty sequence".into()).into()
-                );
+                return Err(InterpreterError::ValueError(
+                    "max() iterable argument is empty".into(),
+                )
+                .into());
             }
             let key_fn = kwargs.get("key");
             let mut max_val = items[0].clone();

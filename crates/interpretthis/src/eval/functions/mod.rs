@@ -350,13 +350,12 @@ pub(crate) fn value_to_i64(val: &Value) -> Result<i64, EvalError> {
             kind: crate::value::EnumKind::Int | crate::value::EnumKind::IntFlag,
             ..
         } => value_to_i64(value),
-        Value::Float(_) => Err(InterpreterError::TypeError(
-            "'float' object cannot be interpreted as an integer".into(),
-        )
+        // Every non-integer (float, str, list, …) reports the same CPython
+        // message; only `int(float)` truncates, and that path does not go here.
+        _ => Err(InterpreterError::TypeError(format!(
+            "'{}' object cannot be interpreted as an integer",
+            val.type_name()
+        ))
         .into()),
-        _ => {
-            Err(InterpreterError::TypeError(format!("expected integer, got '{}'", val.type_name()))
-                .into())
-        }
     }
 }

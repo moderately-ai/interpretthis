@@ -582,10 +582,9 @@ fn resolve_step(step: Option<&Value>) -> Result<i64, EvalError> {
         Some(Value::Int(s)) => Ok(*s),
         Some(Value::Bool(false)) => Err(zero()),
         Some(Value::Bool(true)) => Ok(1),
-        Some(other) => Err(InterpreterError::TypeError(format!(
-            "slice indices must be integers or None, not '{}'",
-            other.type_name()
-        ))
+        Some(_) => Err(InterpreterError::TypeError(
+            "slice indices must be integers or None or have an __index__ method".to_string(),
+        )
         .into()),
     }
 }
@@ -596,10 +595,9 @@ fn resolve_bound(val: Option<&Value>, default: i64) -> Result<i64, EvalError> {
         None | Some(Value::None) => Ok(default),
         Some(Value::Int(i)) => Ok(*i),
         Some(Value::Bool(b)) => Ok(i64::from(*b)),
-        Some(other) => Err(InterpreterError::TypeError(format!(
-            "slice indices must be integers or None, not '{}'",
-            other.type_name()
-        ))
+        Some(_) => Err(InterpreterError::TypeError(
+            "slice indices must be integers or None or have an __index__ method".to_string(),
+        )
         .into()),
     }
 }

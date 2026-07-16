@@ -1029,7 +1029,7 @@ fn resolve_format_arg(
         let idx = *auto_index;
         *auto_index += 1;
         args.get(idx).cloned().ok_or_else(|| {
-            EvalError_value_error(format!(
+            EvalError_index_error(format!(
                 "Replacement index {idx} out of range for positional args tuple"
             ))
         })?
@@ -1038,7 +1038,7 @@ fn resolve_format_arg(
             .parse()
             .map_err(|_| EvalError_value_error(format!("invalid positional field '{base}'")))?;
         args.get(idx).cloned().ok_or_else(|| {
-            EvalError_value_error(format!(
+            EvalError_index_error(format!(
                 "Replacement index {idx} out of range for positional args tuple"
             ))
         })?
@@ -1166,6 +1166,11 @@ fn idx_to_i64(idx: usize) -> Result<i64, EvalError> {
 )]
 fn EvalError_value_error(message: String) -> EvalError {
     InterpreterError::ValueError(message).into()
+}
+
+#[allow(non_snake_case, reason = "matches the sibling EvalError_value_error constructor name")]
+fn EvalError_index_error(message: String) -> EvalError {
+    EvalError::Exception(ExceptionValue::new("IndexError", message))
 }
 
 // ---------------------------------------------------------------------------
