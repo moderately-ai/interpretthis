@@ -593,6 +593,11 @@ pub(super) fn check_isinstance(state: &InterpreterState, obj: &Value, type_name:
     if type_name == "object" {
         return true;
     }
+    // Every type object is an instance of `type` (the metaclass): `int`, `str`,
+    // a user `class C`, an exception class, `type` itself.
+    if type_name == "type" {
+        return is_type_object(obj);
+    }
     if let Value::Instance(inst) = obj {
         if inst.class_name == type_name {
             return true;
@@ -623,6 +628,17 @@ pub(super) fn check_isinstance(state: &InterpreterState, obj: &Value, type_name:
             }
             _ => false,
         }
+}
+
+/// Whether `obj` is itself a type object (so `isinstance(obj, type)` is True):
+/// a user `class`, a built-in type name (`int`, not `len`), an exception class,
+/// or an explicit `type` sentinel.
+pub(super) fn is_type_object(obj: &Value) -> bool {
+    match obj {
+        Value::Class(_) | Value::Type(_) | Value::ExceptionType(_) => true,
+        Value::BuiltinName(n) => crate::value::is_builtin_type_name(n),
+        _ => false,
+    }
 }
 
 /// Extract the comparable type name from an `isinstance`/`issubclass` type

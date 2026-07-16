@@ -545,6 +545,11 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                 // The docstring, or None (CPython's `f.__doc__` for an
                 // undocumented function).
                 Ok(func_def.docstring.clone().map_or(Value::None, |d| Value::String(d.into())))
+            } else if attr_name == "__call__" {
+                // A function is callable; `f.__call__` is a bound wrapper that
+                // just re-invokes it. We model it as the function itself so
+                // `hasattr`/`callable(getattr(...))` stay consistent.
+                Ok(Value::Function(func_def.clone()))
             } else {
                 Err(attribute_error("function", attr_name))
             }
@@ -559,6 +564,8 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                     lambda_def.qualname.as_str()
                 };
                 Ok(Value::String(reported.into()))
+            } else if attr_name == "__call__" {
+                Ok(Value::Lambda(lambda_def.clone()))
             } else if attr_name == "__doc__" {
                 // Lambdas never have a docstring.
                 Ok(Value::None)

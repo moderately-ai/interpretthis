@@ -88,6 +88,36 @@ pub fn is_exception_type_name(name: &str) -> bool {
     )
 }
 
+/// Whether `value` is callable — every shape `call_value_as_function` accepts.
+/// Drives both `callable(x)` and `hasattr(x, '__call__')` (CPython keeps them in
+/// lockstep). An instance is callable iff its class MRO defines `__call__`; the
+/// bare-name/method sentinels and class objects are always callable.
+pub(super) fn value_is_callable(state: &InterpreterState, value: &Value) -> bool {
+    match value {
+        Value::Instance(inst) => state.classes.get(&inst.class_name).is_some_and(|class| {
+            class.mro.iter().any(|anc| {
+                state.classes.get(anc).is_some_and(|c| c.methods.contains_key("__call__"))
+            })
+        }),
+        other => matches!(
+            other,
+            Value::Function(_)
+                | Value::Lambda(_)
+                | Value::Class(_)
+                | Value::BoundMethod { .. }
+                | Value::BuiltinTypeMethod { .. }
+                | Value::ModuleFunction { .. }
+                | Value::BuiltinName(_)
+                | Value::ToolName(_)
+                | Value::ExceptionType(_)
+                | Value::ExceptionMethod { .. }
+                | Value::UnboundClassMethod { .. }
+                | Value::Partial(_)
+                | Value::LruCache(_)
+        ),
+    }
+}
+
 /// Wrap eagerly-computed `items` in a one-shot `Lazy` iterator with a fresh
 /// cursor. CPython's `zip`/`map`/`filter`/`enumerate`/`reversed` return
 /// single-use *iterators*, not lists: `next()` advances them, a second pass
@@ -893,6 +923,11 @@ pub(super) async fn try_builtin(
             if crate::security::validator::validate_attribute(attr_name).is_err() {
                 return Ok(Some(Value::Bool(false)));
             }
+            // `hasattr(x, '__call__')` mirrors `callable(x)` — every callable
+            // exposes a `__call__`, and no non-callable does.
+            if attr_name == "__call__" {
+                return Ok(Some(Value::Bool(value_is_callable(state, &args[0]))));
+            }
             // CPython hasattr(obj, name): True iff getattr(obj, name)
             // doesn't raise. Route through dispatch_getattr_opt first
             // (covers every builtin-with-attributes type); if the slot
@@ -955,38 +990,7 @@ pub(super) async fn try_builtin(
         }
         "callable" => {
             check_arg_count(name, args, 1, 1)?;
-            // Every value shape that `call_value_as_function` accepts.
-            // Class objects are callable (instantiation). The typed
-            // bare-name sentinels (BuiltinName, ToolName, ExceptionType,
-            // UnboundClassMethod) are all callable. Method markers
-            // (BoundMethod / BuiltinTypeMethod) and ModuleFunction are
-            // callable. Anything else is NOT callable (CPython parity).
-            let is_callable = match &args[0] {
-                // An instance is callable iff its class (or an MRO ancestor)
-                // defines `__call__`.
-                Value::Instance(inst) => state.classes.get(&inst.class_name).is_some_and(|class| {
-                    class.mro.iter().any(|anc| {
-                        state.classes.get(anc).is_some_and(|c| c.methods.contains_key("__call__"))
-                    })
-                }),
-                other => matches!(
-                    other,
-                    Value::Function(_)
-                        | Value::Lambda(_)
-                        | Value::Class(_)
-                        | Value::BoundMethod { .. }
-                        | Value::BuiltinTypeMethod { .. }
-                        | Value::ModuleFunction { .. }
-                        | Value::BuiltinName(_)
-                        | Value::ToolName(_)
-                        | Value::ExceptionType(_)
-                        | Value::ExceptionMethod { .. }
-                        | Value::UnboundClassMethod { .. }
-                        | Value::Partial(_)
-                        | Value::LruCache(_)
-                ),
-            };
-            Ok(Some(Value::Bool(is_callable)))
+            Ok(Some(Value::Bool(value_is_callable(state, &args[0]))))
         }
         "abs" => {
             check_arg_count(name, args, 1, 1)?;
