@@ -82,12 +82,23 @@ pub(crate) fn dispatch_decimal_method(
         // Rounded to the default context precision (28 significant digits),
         // matching CPython — bigdecimal's raw sqrt keeps ~100 digits.
         "sqrt" => {
-            d.sqrt().map(|r| Value::Decimal(Box::new(r.with_prec(28)), false)).ok_or_else(|| {
+            let r = d.sqrt().ok_or_else(|| {
                 EvalError::Exception(crate::value::ExceptionValue::new(
                     "InvalidOperation",
                     "sqrt of negative Decimal",
                 ))
-            })
+            })?;
+            // A perfect square takes the ideal exponent (operand exponent // 2)
+            // rather than padding to the context's 28 significant digits, so
+            // `Decimal('9').sqrt()` is `3` and `Decimal('9.00').sqrt()` is `3.0`
+            // (scale = ceil(operand_scale / 2)). Inexact roots keep 28 digits.
+            let exact = ((&r * &r) - d).is_zero();
+            let result = if exact {
+                r.with_scale((d.fractional_digit_count() + 1) / 2)
+            } else {
+                r.with_prec(28)
+            };
+            Ok(Value::Decimal(Box::new(result), false))
         }
         // Transcendentals at the default context precision (28 significant
         // digits). `exp` is bigdecimal's; `ln`/`log10` use Newton's method on
@@ -177,6 +188,29 @@ pub(crate) fn dispatch_decimal_method(
                 crate::value::int_from_bigint(ratio.numer().clone()),
                 crate::value::int_from_bigint(ratio.denom().clone()),
             ]))
+        }
+        // `as_tuple()` -> DecimalTuple(sign, digits, exponent): value ==
+        // (-1)^sign * digits * 10^exponent, with trailing zeros preserved
+        // (`Decimal('1.00')` -> digits (1, 0, 0), exponent -2). Signless zero
+        // reports sign 0 — the `-0.0` case cannot be recovered from the bare
+        // BigDecimal here, matching `is_signed`/`copy_sign`.
+        "as_tuple" => {
+            let (mantissa, scale) = d.as_bigint_and_exponent();
+            let sign = i64::from(mantissa.is_negative());
+            let digits: Vec<Value> = mantissa
+                .abs()
+                .to_string()
+                .bytes()
+                .map(|b| Value::Int(i64::from(b - b'0')))
+                .collect();
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("sign".to_string(), Value::Int(sign));
+            fields.insert("digits".to_string(), Value::Tuple(digits));
+            fields.insert("exponent".to_string(), Value::Int(-scale));
+            Ok(Value::Instance(crate::value::InstanceValue {
+                class_name: "DecimalTuple".to_string(),
+                fields: crate::value::shared_fields(fields),
+            }))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "'Decimal' object has no attribute '{method}'"

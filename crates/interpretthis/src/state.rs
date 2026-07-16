@@ -418,6 +418,18 @@ impl InterpreterState {
             ),
         );
         classes.insert("CacheInfo".to_string(), cache_info);
+        // `decimal.DecimalTuple` for `Decimal.as_tuple()` (sign, digits, exponent).
+        let mut dec_tuple = crate::value::ClassValue::new("DecimalTuple");
+        dec_tuple.class_attrs.insert(
+            "_fields".to_string(),
+            Value::Tuple(
+                ["sign", "digits", "exponent"]
+                    .into_iter()
+                    .map(|f| Value::String(f.into()))
+                    .collect(),
+            ),
+        );
+        classes.insert("DecimalTuple".to_string(), dec_tuple);
         Self {
             variables,
             classes,

@@ -60,6 +60,7 @@ pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
         ("datetime", "fromisoformat") => Some("datetime.fromisoformat"),
         ("date", "fromordinal") => Some("date.fromordinal"),
         ("datetime", "fromordinal") => Some("datetime.fromordinal"),
+        ("time", "fromisoformat") => Some("time.fromisoformat"),
         _ => None,
     }
 }
@@ -263,6 +264,25 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
                     "Invalid isoformat string: '{s}'"
                 )))
             })
+        }
+        "time.fromisoformat" => {
+            let s = arg_str("fromisoformat", args, 0)?;
+            let invalid = || {
+                EvalError::from(InterpreterError::ValueError(format!(
+                    "Invalid isoformat string: '{s}'"
+                )))
+            };
+            // Accept the ISO forms `HH:MM:SS.ffffff`, `HH:MM:SS`, and `HH:MM`;
+            // the bare-hour `HH` form has no separator for chrono to anchor on,
+            // so parse it directly. Naive only — a trailing timezone offset is
+            // not modelled.
+            let t = NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+                .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
+                .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
+                .ok()
+                .or_else(|| s.parse::<u32>().ok().and_then(|h| NaiveTime::from_hms_opt(h, 0, 0)))
+                .ok_or_else(invalid)?;
+            Ok(Value::Time(t))
         }
         // `date.fromordinal(n)` / `datetime.fromordinal(n)`: proleptic Gregorian
         // ordinal where day 1 is 0001-01-01 — exactly chrono's
