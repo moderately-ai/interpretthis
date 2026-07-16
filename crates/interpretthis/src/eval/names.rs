@@ -721,10 +721,13 @@ fn exception_attribute(exc: &ExceptionValue, attr_name: &str) -> EvalResult {
                 .unwrap_or_default();
             Ok(Value::Tuple(items))
         }
-        "subgroup" | "split" => Ok(Value::ExceptionMethod {
+        "subgroup" | "split" | "with_traceback" => Ok(Value::ExceptionMethod {
             method: attr_name.to_string(),
             exception: Box::new(exc.clone()),
         }),
+        // We do not model tracebacks; `__traceback__` is always `None`
+        // (CPython's default for an exception that hasn't propagated).
+        "__traceback__" => Ok(Value::None),
         // `args` is the truth — ExceptionValue::new defaults it from
         // the message (empty message → empty tuple, non-empty →
         // (message,)) so this never needs a synthesis fallback. Multi-

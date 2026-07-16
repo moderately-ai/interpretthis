@@ -750,6 +750,20 @@ pub(crate) fn call_exception_method(
         return Ok(Value::None);
     }
 
+    // `with_traceback(tb)` sets `__traceback__` and returns the exception. We do
+    // not model tracebacks, so the argument is accepted (any tb / None) and the
+    // exception itself is handed back, preserving the `raise e.with_traceback(tb)`
+    // and fluent-chaining idioms.
+    if method == "with_traceback" {
+        if args.is_empty() {
+            return Err(InterpreterError::TypeError(
+                "with_traceback() takes exactly one argument (0 given)".to_string(),
+            )
+            .into());
+        }
+        return Ok(Value::Exception(Box::new(exception.clone())));
+    }
+
     let matcher = args.first().ok_or_else(|| {
         InterpreterError::TypeError(format!("{method}() takes exactly 1 argument (0 given)"))
     })?;
