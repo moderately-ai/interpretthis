@@ -199,6 +199,22 @@ pub async fn eval_generator_exp(
     tools: &Tools,
 ) -> EvalResult {
     check_walrus_rebind(&node.generators, &[&node.elt])?;
+
+    // A single-generator genexp whose element builds a closure must be
+    // evaluated *lazily* — a closure yielded mid-iteration has to be callable
+    // while the loop variable still holds its yield-time value (CPython's
+    // `[f() for f in (lambda: k for k in range(n))]` → `[0, 1, 2]`). Eager
+    // materialisation runs the loop to the end first, so every closure would
+    // see the final value. Route these through the real suspend engine; every
+    // other genexp keeps the proven eager path (observably identical for
+    // non-closure elements, which the surrounding sandbox bounds anyway).
+    if node.generators.len() == 1 && !node.generators[0].is_async && expr_builds_closure(&node.elt)
+    {
+        if let Some(generator) = try_lazy_genexp(state, node, tools).await? {
+            return Ok(generator);
+        }
+    }
+
     let checkpoint =
         VariableCheckpoint::capture(state, collect_generator_target_names(&node.generators));
     let mut results = Vec::new();
@@ -225,6 +241,142 @@ pub async fn eval_generator_exp(
     state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
     state.lazy_cursors.insert(cursor_id, 0);
     Ok(Value::Lazy { items: results, cursor_id })
+}
+
+/// Whether an expression constructs a closure (contains a `lambda`), so a
+/// generator expression yielding it needs lazy evaluation. Walks the common
+/// expression forms; a missed exotic form just keeps the eager path (safe).
+fn expr_builds_closure(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lambda(_) => true,
+        Expr::BoolOp(n) => n.values.iter().any(expr_builds_closure),
+        Expr::BinOp(n) => expr_builds_closure(&n.left) || expr_builds_closure(&n.right),
+        Expr::UnaryOp(n) => expr_builds_closure(&n.operand),
+        Expr::IfExp(n) => {
+            expr_builds_closure(&n.test)
+                || expr_builds_closure(&n.body)
+                || expr_builds_closure(&n.orelse)
+        }
+        Expr::Tuple(n) => n.elts.iter().any(expr_builds_closure),
+        Expr::List(n) => n.elts.iter().any(expr_builds_closure),
+        Expr::Set(n) => n.elts.iter().any(expr_builds_closure),
+        Expr::Call(n) => {
+            expr_builds_closure(&n.func)
+                || n.args.iter().any(expr_builds_closure)
+                || n.keywords.iter().any(|k| expr_builds_closure(&k.value))
+        }
+        Expr::Dict(n) => {
+            n.keys.iter().flatten().any(expr_builds_closure)
+                || n.values.iter().any(expr_builds_closure)
+        }
+        _ => false,
+    }
+}
+
+/// Lazily evaluate a single-generator `genexp` by synthesising a real
+/// generator function (`for <target> in .0: [if cond:]* yield <elt>`) and
+/// routing it through the suspend engine. The first iterable is evaluated
+/// eagerly (CPython) and bound to the hidden local `.0`; the element's free
+/// names are captured into the generator frame. Returns `None` (fall back to
+/// the eager path) when the body would not be suspendable.
+async fn try_lazy_genexp(
+    state: &mut InterpreterState,
+    node: &ast::ExprGeneratorExp,
+    tools: &Tools,
+) -> Result<Option<Value>, EvalError> {
+    use rustpython_parser::ast::{
+        Expr as E, ExprContext, ExprName, ExprYield, Identifier, Stmt, StmtExpr, StmtFor, StmtIf,
+    };
+    use rustpython_parser::text_size::TextRange;
+    let comp = &node.generators[0];
+
+    // Evaluate the outermost iterable eagerly (CPython) and stash it under the
+    // hidden `.0` local — an invalid identifier, so no user name collides.
+    let iter_value = resolve_proxy(&eval_expr(state, &comp.iter, tools).await?).await?;
+
+    // Build `for <target> in .0: [if cond:]* yield <elt>`.
+    let iter_ref = E::Name(ExprName {
+        id: Identifier::new(".0"),
+        ctx: ExprContext::Load,
+        range: TextRange::default(),
+    });
+    let mut inner: Stmt = Stmt::Expr(StmtExpr {
+        value: Box::new(E::Yield(ExprYield {
+            value: Some(Box::new(node.elt.as_ref().clone())),
+            range: TextRange::default(),
+        })),
+        range: TextRange::default(),
+    });
+    for cond in comp.ifs.iter().rev() {
+        inner = Stmt::If(StmtIf {
+            test: Box::new(cond.clone()),
+            body: vec![inner],
+            orelse: vec![],
+            range: TextRange::default(),
+        });
+    }
+    let for_stmt = Stmt::For(StmtFor {
+        target: Box::new(comp.target.clone()),
+        iter: Box::new(iter_ref),
+        body: vec![inner],
+        orelse: vec![],
+        type_comment: None,
+        range: TextRange::default(),
+    });
+    let body = std::sync::Arc::new(vec![for_stmt]);
+
+    // The body must be re-enterable by the suspend engine; otherwise fall back.
+    if !crate::eval::functions::generator_suspendable(&body) {
+        return Ok(None);
+    }
+
+    // Capture the element's free names (everything read minus the loop targets
+    // and the synthetic `.0`) from the enclosing scope into the frame locals.
+    let target_names = collect_generator_target_names(&node.generators);
+    let free = crate::eval::functions::collect_free_names(&target_names, body.as_slice());
+    let mut locals: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+    let mut touched: Vec<String> = Vec::new();
+    for name in &free {
+        if name == ".0" {
+            continue;
+        }
+        if let Some(v) = state.variables.get(name) {
+            locals.insert(name.clone(), v.clone());
+        }
+        touched.push(name.clone());
+    }
+    locals.insert(".0".to_string(), iter_value);
+    touched.push(".0".to_string());
+    touched.extend(target_names);
+
+    let func_def = crate::value::FunctionDef {
+        name: "<genexpr>".to_string(),
+        body_key: format!("<genexpr>#{}", state.next_cursor_id),
+        wraps_name: None,
+        params: crate::value::FunctionParams {
+            args: Vec::new(),
+            defaults: Vec::new(),
+            default_values: Vec::new(),
+            vararg: None,
+            kwonlyargs: Vec::new(),
+            kw_defaults: Vec::new(),
+            kw_default_values: Vec::new(),
+            kwarg: None,
+        },
+        closure: std::collections::BTreeMap::new(),
+        source: String::new(),
+        nonlocal_names: Vec::new(),
+        is_generator: true,
+        nonlocal_cell_id: None,
+        assigned_names: Vec::new(),
+        global_names: Vec::new(),
+        is_module_level: state.call_depth == 0,
+        docstring: None,
+        cell_refreshes: Vec::new(),
+    };
+    let generator =
+        crate::eval::functions::create_generator(state, &func_def, body, locals, touched);
+    Ok(Some(generator))
 }
 
 /// Evaluate a dict comprehension {key: val for x in iterable if cond}.
@@ -350,6 +502,52 @@ fn eval_list_generators<'a>(
 
                 let Some(next) = i.checked_add(step) else { break };
                 i = next;
+            }
+            return Ok(());
+        }
+
+        // Lazy generator / iterator source: step it one item at a time so a
+        // closure yielded mid-iteration (`[f() for f in (lambda: k for k in
+        // range(n))]`) is processed while the loop variable still holds its
+        // yield-time value — matching CPython, and mirroring the `for` loop's
+        // lazy stepping. Other iterables materialise as before.
+        if matches!(iterable, Value::Generator { .. } | Value::BuiltinIter { .. }) {
+            let empty = indexmap::IndexMap::new();
+            loop {
+                let item = match crate::eval::functions::dispatch_generator_method(
+                    state,
+                    &iterable,
+                    "__next__",
+                    &[],
+                    &empty,
+                    tools,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
+                    Err(e) => return Err(e),
+                };
+                set_comprehension_target(state, &generator.target, &item).await?;
+                let mut include = true;
+                for if_clause in &generator.ifs {
+                    let cond = resolve_proxy(&eval_expr(state, if_clause, tools).await?).await?;
+                    if !crate::eval::op::truthy(state, &cond, tools).await? {
+                        include = false;
+                        break;
+                    }
+                }
+                if include {
+                    eval_list_generators(ListGenContext {
+                        state,
+                        generators,
+                        index: index + 1,
+                        elt_expr,
+                        results,
+                        tools,
+                    })
+                    .await?;
+                }
             }
             return Ok(());
         }
