@@ -2,7 +2,12 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use compact_str::CompactString;
@@ -20,7 +25,109 @@ use parking_lot::Mutex;
 /// inside `Interpreter::execute`. Hot loops pay lock overhead; a
 /// single-thread `RefCell` model is not used because tool futures and
 /// async eval interleave on the runtime.
-pub type SharedList = Arc<Mutex<Vec<Value>>>;
+pub type SharedList = Arc<Mutex<ListBody>>;
+
+/// The elements of a list, plus a lazily-computed byte-size cache.
+///
+/// The cache is what makes `estimate_value_size` O(1) for the "size the whole
+/// value" callers (`set_variable`, the per-mutation delta): without it, sizing
+/// re-walked the entire structure every time, so loop-built deep nesting
+/// (`a = [a]` in a loop) or appending a large nested container was O(n).
+///
+/// `Deref`/`DerefMut` to the inner `Vec<Value>` keep every existing
+/// `guard.push(...)` / `guard.iter()` call site working unchanged, and the
+/// `DerefMut` impl **clears the cache** — so any mutation through the guard
+/// auto-invalidates it and the next size query refills it. Deliberately NOT
+/// `Clone`: `guard.clone()` then resolves (via `Deref`) to `Vec::clone`,
+/// yielding a plain `Vec<Value>` (the elements, no cache) exactly as before.
+///
+/// The cache is a snapshot: mutating a *nested* child does not invalidate its
+/// parents' caches (there are no parent pointers), so a parent's cached size
+/// can lag a nested mutation. That is the same approximation the accounting
+/// already tolerates (it over-counts aliases); actual allocation is still
+/// charged through the mutation deltas, so the memory limit stays sound.
+/// Stack head-room kept in reserve before `stacker` allocates a fresh segment,
+/// and the size of that segment — used by the container `Drop`s so tearing down
+/// a deeply-nested value grows the stack instead of overflowing it.
+const DROP_STACK_RED_ZONE: usize = 1024 * 1024;
+const DROP_STACK_GROW: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+pub struct ListBody {
+    items: Vec<Value>,
+    size_cache: Option<usize>,
+}
+
+impl ListBody {
+    #[inline]
+    #[must_use]
+    pub fn new(items: Vec<Value>) -> Self {
+        Self { items, size_cache: None }
+    }
+
+    /// Replace all elements, invalidating the size cache. Used by the
+    /// whole-list rewrites (`sort`, `deepcopy`) that assigned `*guard = vec`.
+    #[inline]
+    pub fn set_items(&mut self, items: Vec<Value>) {
+        self.items = items;
+        self.size_cache = None;
+    }
+
+    /// Consume the body, yielding the elements (drops the cache). Takes the
+    /// items out rather than moving a field, because `ListBody` has a `Drop`.
+    #[inline]
+    #[must_use]
+    pub fn into_items(mut self) -> Vec<Value> {
+        std::mem::take(&mut self.items)
+    }
+
+    /// Return the cached size, computing and storing it on a miss. `compute`
+    /// receives the elements and returns the full `estimate_value_size` payload.
+    /// Does not go through `DerefMut`, so storing the result does not re-clear it.
+    #[inline]
+    pub fn cached_size(&mut self, compute: impl FnOnce(&[Value]) -> usize) -> usize {
+        match self.size_cache {
+            Some(size) => size,
+            None => {
+                let size = compute(&self.items);
+                self.size_cache = Some(size);
+                size
+            }
+        }
+    }
+}
+
+impl Deref for ListBody {
+    type Target = Vec<Value>;
+    #[inline]
+    fn deref(&self) -> &Vec<Value> {
+        &self.items
+    }
+}
+
+impl DerefMut for ListBody {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        // Any mutable access may change the size; drop the stale cache.
+        self.size_cache = None;
+        &mut self.items
+    }
+}
+
+impl Drop for ListBody {
+    fn drop(&mut self) {
+        // A loop-built deeply-nested list (`a = [a]` repeated) drops recursively
+        // — each element is a list whose own drop drops its element — so a deep
+        // enough structure would overflow the stack and abort the process at
+        // teardown. Grow the stack on demand, as elsewhere in the crate. Cheap
+        // no-op for the common shallow case.
+        if self.items.is_empty() {
+            return;
+        }
+        let items = std::mem::take(&mut self.items);
+        stacker::maybe_grow(DROP_STACK_RED_ZONE, DROP_STACK_GROW, move || drop(items));
+    }
+}
 
 /// Shared instance-field map backing [`InstanceValue::fields`].
 ///
@@ -34,7 +141,7 @@ pub type SharedFields = Arc<Mutex<BTreeMap<String, Value>>>;
 #[inline]
 #[must_use]
 pub fn shared_list(items: Vec<Value>) -> SharedList {
-    Arc::new(Mutex::new(items))
+    Arc::new(Mutex::new(ListBody::new(items)))
 }
 
 /// Mutable, shared backing store for [`Value::Set`]. Same identity model as
@@ -60,13 +167,89 @@ pub fn shared_set(body: crate::pyset::SetBody) -> SharedSet {
 /// writes / `del` / `.update` through any alias are visible on every
 /// other alias and through a dict passed to a function — matching
 /// CPython's dict reference semantics.
-pub type SharedDict = Arc<Mutex<IndexMap<ValueKey, Value>>>;
+pub type SharedDict = Arc<Mutex<DictBody>>;
+
+/// The entries of a dict, plus a lazily-computed byte-size cache. Same design
+/// and rationale as [`ListBody`] — see its docs for the cache/invalidation
+/// contract and why it is not `Clone`.
+#[derive(Debug, Default)]
+pub struct DictBody {
+    map: IndexMap<ValueKey, Value>,
+    size_cache: Option<usize>,
+}
+
+impl DictBody {
+    #[inline]
+    #[must_use]
+    pub fn new(map: IndexMap<ValueKey, Value>) -> Self {
+        Self { map, size_cache: None }
+    }
+
+    /// Replace all entries, invalidating the size cache.
+    #[inline]
+    pub fn set_map(&mut self, map: IndexMap<ValueKey, Value>) {
+        self.map = map;
+        self.size_cache = None;
+    }
+
+    /// Cached size, computing and storing on a miss (see [`ListBody::cached_size`]).
+    #[inline]
+    pub fn cached_size(
+        &mut self,
+        compute: impl FnOnce(&IndexMap<ValueKey, Value>) -> usize,
+    ) -> usize {
+        match self.size_cache {
+            Some(size) => size,
+            None => {
+                let size = compute(&self.map);
+                self.size_cache = Some(size);
+                size
+            }
+        }
+    }
+}
+
+impl Deref for DictBody {
+    type Target = IndexMap<ValueKey, Value>;
+    #[inline]
+    fn deref(&self) -> &IndexMap<ValueKey, Value> {
+        &self.map
+    }
+}
+
+impl DerefMut for DictBody {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut IndexMap<ValueKey, Value> {
+        self.size_cache = None;
+        &mut self.map
+    }
+}
+
+/// Dict equality compares entries only (the size cache is not observable). Used
+/// by the `Value::Dict` arm that does `*a.lock() == *b.lock()`.
+impl PartialEq for DictBody {
+    fn eq(&self, other: &Self) -> bool {
+        self.map == other.map
+    }
+}
+
+impl Drop for DictBody {
+    fn drop(&mut self) {
+        // Deeply-nested dicts (`d = {0: d}` repeated) drop recursively; grow the
+        // stack so teardown cannot overflow. See [`ListBody`]'s `Drop`.
+        if self.map.is_empty() {
+            return;
+        }
+        let map = std::mem::take(&mut self.map);
+        stacker::maybe_grow(DROP_STACK_RED_ZONE, DROP_STACK_GROW, move || drop(map));
+    }
+}
 
 /// Construct a fresh [`SharedDict`] from an `IndexMap`.
 #[inline]
 #[must_use]
 pub fn shared_dict(map: IndexMap<ValueKey, Value>) -> SharedDict {
-    Arc::new(Mutex::new(map))
+    Arc::new(Mutex::new(DictBody::new(map)))
 }
 
 /// Mutable, shared backing store for [`Value::ByteArray`]. Same identity model
@@ -3317,7 +3500,7 @@ impl Value {
     /// is held for the guard's lifetime, so don't keep it across other
     /// container operations.
     #[must_use]
-    pub fn as_list(&self) -> Option<parking_lot::MutexGuard<'_, Vec<Self>>> {
+    pub fn as_list(&self) -> Option<parking_lot::MutexGuard<'_, ListBody>> {
         match self {
             Self::List(items) => Some(items.lock()),
             _ => None,
@@ -3374,7 +3557,7 @@ impl Value {
     pub fn try_into_list(self) -> Result<Vec<Self>, Self> {
         match self {
             Self::List(items) => Ok(match Arc::try_unwrap(items) {
-                Ok(mutex) => mutex.into_inner(),
+                Ok(mutex) => mutex.into_inner().into_items(),
                 Err(shared) => shared.lock().clone(),
             }),
             other => Err(other),

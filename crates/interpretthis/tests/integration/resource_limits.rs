@@ -835,12 +835,13 @@ async fn resource_limits_deeply_nested_value_build_does_not_overflow_stack() {
     // grow the stack rather than overflow it and abort the process.
     let interp =
         Interpreter::new(InterpreterDeps { tools: Tools::new() }, InterpreterConfig::default());
-    // Depth 2000 keeps the pre-incremental-accounting O(n^2) sizing fast; it is
-    // still far past the ~1000-frame native-stack overflow the stacker guard
-    // prevents. (Raised once memory sizing is O(1) per assignment.)
+    // Depth 50_000: far past the ~1000-frame native-stack overflow the stacker
+    // guard prevents, and — now that per-assignment memory sizing reads the
+    // container's O(1) cached size instead of re-walking — this completes in
+    // O(n), not the O(n^2) that made even 5_000 time out.
     let resp = interp
         .execute(
-            "a = []\nfor _ in range(2000):\n    a = [a]\nprint('built')",
+            "a = []\nfor _ in range(50000):\n    a = [a]\nprint('built')",
             &no_tools(),
             HashMap::new(),
         )

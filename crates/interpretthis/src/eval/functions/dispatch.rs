@@ -681,11 +681,11 @@ pub(crate) async fn call_value_as_function(
                     if method == "sort" {
                         if let Value::List(list) = &**value {
                             let list = list.clone();
-                            let items = std::mem::take(&mut *list.lock());
+                            let items = std::mem::take(&mut **list.lock());
                             let sorted =
                                 Box::pin(bound_list_sort(state, items, args, kwargs, tools))
                                     .await?;
-                            *list.lock() = sorted;
+                            list.lock().set_items(sorted);
                             return Ok(Value::None);
                         }
                     }
@@ -760,7 +760,7 @@ pub(crate) async fn call_value_as_function(
                                 EvalError::from(InterpreterError::name_not_defined(root))
                             })?;
                             with_navigate_mut(root_slot, &pl_steps, |target| match target {
-                                Value::List(items) => Some(std::mem::take(&mut *items.lock())),
+                                Value::List(items) => Some(std::mem::take(&mut **items.lock())),
                                 _ => None,
                             })?
                         };
@@ -773,7 +773,7 @@ pub(crate) async fn call_value_as_function(
                             })?;
                             with_navigate_mut(root_slot, &pl_steps, |target| {
                                 if let Value::List(items) = target {
-                                    *items.lock() = sorted;
+                                    items.lock().set_items(sorted);
                                 }
                             })?;
                             return Ok(Value::None);

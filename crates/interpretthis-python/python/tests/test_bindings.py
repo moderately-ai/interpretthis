@@ -124,11 +124,13 @@ def test_dangerous_builtins_do_not_exist(source: str) -> None:
     assert isinstance(result.error, SandboxNameError)
 
 
-@pytest.mark.parametrize("source", ["x = ().__class__", "x = [].__class__.__bases__"])
+@pytest.mark.parametrize("source", ["x = ().__class__.__mro__", "x = [].__class__.__bases__"])
 def test_introspection_escape_attempts_are_a_security_error(source: str) -> None:
-    # A blocked *attribute* is different: the object exists and the attribute is
-    # refused. These are the class-walk chains an escape starts with, so they get
-    # their own error class rather than being dressed up as an AttributeError.
+    # Reading `__class__` is allowed — it just returns the type, the same object
+    # `type(x)` gives, which reaches nothing new inside the sandbox. The escape
+    # is the *next* hop: `__mro__` / `__bases__` / `__subclasses__` off that type
+    # walk toward `object` and its subclasses, so those attributes stay blocked
+    # and get their own error class rather than a plain AttributeError.
     result = Interpreter().execute(source)
     assert isinstance(result.error, SecurityError)
 

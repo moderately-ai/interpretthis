@@ -761,7 +761,7 @@ pub fn assign_target<'a>(
                                 tools,
                             )
                             .await?;
-                            *map.lock() = snapshot;
+                            map.lock().set_map(snapshot);
                             return Ok(());
                         }
                     }

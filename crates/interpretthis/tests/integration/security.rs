@@ -406,6 +406,28 @@ for i in range(10000):
 }
 
 #[tokio::test]
+async fn security_memory_limit_list_append_loop() {
+    // Growing a list in place must still be accounted after the size-cache
+    // change: the append delta feeds the budget, and the cache is invalidated
+    // so a later re-estimate does not under-report. The limit must still trip.
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_memory_bytes = 4096;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r#"
+xs = []
+for i in range(10000):
+    xs.append("aaaaaaaa")
+"#,
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_some(), "growing a list past the budget should hit the memory limit");
+}
+
+#[tokio::test]
 async fn security_memory_limit_string_concat_loop() {
     let mut cfg = InterpreterConfig::default();
     cfg.max_memory_bytes = 2048;

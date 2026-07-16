@@ -826,12 +826,14 @@ fn estimate_value_size_inner(value: &crate::value::Value) -> usize {
         // `lock` would deadlock; skip it — its slot is already counted by the
         // parent.
         Value::List(items) | Value::Array { items, .. } => {
-            let Some(guard) = items.try_lock() else {
+            let Some(mut guard) = items.try_lock() else {
                 return 0;
             };
-            STRING_HEADER_BYTES
-                + guard.len() * VALUE_SLOT_BYTES
-                + guard.iter().map(estimate_value_size).sum::<usize>()
+            guard.cached_size(|items| {
+                STRING_HEADER_BYTES
+                    + items.len() * VALUE_SLOT_BYTES
+                    + items.iter().map(estimate_value_size).sum::<usize>()
+            })
         }
         Value::Tuple(items) => {
             STRING_HEADER_BYTES
@@ -848,14 +850,16 @@ fn estimate_value_size_inner(value: &crate::value::Value) -> usize {
                 + items.iter().map(estimate_value_size).sum::<usize>()
         }
         Value::Dict(map) | Value::OrderedDict(map) => {
-            let Some(map) = map.try_lock() else {
+            let Some(mut guard) = map.try_lock() else {
                 return 0;
             };
-            48 + map.len() * (INDEXMAP_PER_ENTRY_BYTES + VALUE_SLOT_BYTES)
-                + map
-                    .iter()
-                    .map(|(k, v)| estimate_key_size(k) + estimate_value_size(v))
-                    .sum::<usize>()
+            guard.cached_size(|map| {
+                48 + map.len() * (INDEXMAP_PER_ENTRY_BYTES + VALUE_SLOT_BYTES)
+                    + map
+                        .iter()
+                        .map(|(k, v)| estimate_key_size(k) + estimate_value_size(v))
+                        .sum::<usize>()
+            })
         }
         // `Function` and `Lambda` are `Arc<…>`-wrapped (see F2.5). Count each
         // Value::Function reference as a fixed pointer-plus-header weight,

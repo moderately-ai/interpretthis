@@ -186,7 +186,7 @@ async fn eval_call_inner(
                         // SharedList stays valid and any aliases see an
                         // empty list while the sort is in flight, then
                         // the sorted contents get written back below.
-                        Ok(std::mem::take(&mut *items.lock()))
+                        Ok(std::mem::take(&mut **items.lock()))
                     })??
                 } else {
                     let obj = eval_expr(state, obj_expr, tools).await?;
@@ -196,7 +196,7 @@ async fn eval_call_inner(
                     // Temporary receiver — extract the Vec; uniquely
                     // owned avoids a clone, aliased clones the contents.
                     match std::sync::Arc::try_unwrap(items) {
-                        Ok(mutex) => mutex.into_inner(),
+                        Ok(mutex) => mutex.into_inner().into_items(),
                         Err(shared) => shared.lock().clone(),
                     }
                 };
@@ -211,7 +211,7 @@ async fn eval_call_inner(
                     })?;
                     place::with_navigate_mut(root, &place.steps, |target| {
                         if let Value::List(items) = target {
-                            *items.lock() = sorted;
+                            items.lock().set_items(sorted);
                         }
                     })?;
                 }
@@ -975,7 +975,7 @@ async fn list_eq_method(
             return Ok(None);
         };
         match std::sync::Arc::try_unwrap(items) {
-            Ok(mutex) => mutex.into_inner(),
+            Ok(mutex) => mutex.into_inner().into_items(),
             Err(shared) => shared.lock().clone(),
         }
     };

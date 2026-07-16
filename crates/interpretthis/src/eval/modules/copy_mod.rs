@@ -132,7 +132,7 @@ fn deep_clone_memo<'a>(
                 for v in &snapshot {
                     cloned.push(deep_clone_memo(state, v, memo, tools).await?);
                 }
-                *out.lock() = cloned;
+                out.lock().set_items(cloned);
                 Ok(Value::List(out))
             }
             Value::Instance(inst) => {
@@ -193,7 +193,7 @@ fn deep_clone_memo<'a>(
                 for (k, v) in &snapshot {
                     cloned.insert(k.clone(), deep_clone_memo(state, v, memo, tools).await?);
                 }
-                *out.lock() = cloned;
+                out.lock().set_map(cloned);
                 Ok(wrap(out))
             }
             Value::Tuple(items) => {
