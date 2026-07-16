@@ -614,6 +614,8 @@ pub fn eval_expr<'a>(
                             pos: 0,
                             body_index: 0,
                             target: String::new(), // empty => pure yield-from drain
+                            lazy_source: None,
+                            current_item: None,
                         });
                     }
                     return Err(EvalError::Signal(ControlFlow::Yield(Box::new(first))));

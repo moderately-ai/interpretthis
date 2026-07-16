@@ -483,6 +483,22 @@ async fn islice_impl(
         }
     };
     let input = input.clone();
+
+    // Synthesize a lazy generator equivalent to
+    //   .idx = 0
+    //   for .item in .0:
+    //       if .idx >= stop: break                # when stop is bounded
+    //       if .idx >= start and (.idx-start) % step == 0: yield .item
+    //       .idx = .idx + 1
+    // so the slice is produced ONE item at a time, interleaved with the
+    // consumer. This preserves CPython's laziness — an early stop doesn't over-
+    // run the source, and loop-variable closures captured in the source see
+    // their interleaved value rather than the final one.
+    if let Some(generator) = synthesize_islice(state, &input, start, stop, step) {
+        return Ok(generator);
+    }
+
+    // Fallback (body not suspendable — should not happen): eager pull.
     let empty = indexmap::IndexMap::new();
     let mut out = Vec::new();
     let mut idx = 0usize;
@@ -510,6 +526,126 @@ async fn islice_impl(
         idx += 1;
     }
     Ok(Value::List(shared_list(out)))
+}
+
+/// Build the lazy-`islice` generator (see `islice_impl`). Returns `None` if the
+/// synthesized body is not suspend-drivable.
+#[expect(clippy::cast_possible_wrap, reason = "islice bounds are small, non-negative usizes")]
+fn synthesize_islice(
+    state: &mut crate::state::InterpreterState,
+    input: &Value,
+    start: usize,
+    stop: Option<usize>,
+    step: usize,
+) -> Option<Value> {
+    use rustpython_parser::ast::{
+        self as ast, Constant, Expr as E, ExprBinOp, ExprBoolOp, ExprCompare, ExprConstant,
+        ExprContext, ExprName, ExprYield, Identifier, Stmt, StmtAssign, StmtBreak, StmtExpr,
+        StmtFor, StmtIf,
+    };
+    use rustpython_parser::text_size::TextRange;
+
+    let r = TextRange::default();
+    let name =
+        |id: &str, ctx: ExprContext| E::Name(ExprName { id: Identifier::new(id), ctx, range: r });
+    let int_c =
+        |n: i64| E::Constant(ExprConstant { value: Constant::Int(n.into()), kind: None, range: r });
+    let idx_load = || name(".idx", ExprContext::Load);
+    let cmp = |left: E, op: ast::CmpOp, right: E| {
+        E::Compare(ExprCompare {
+            left: Box::new(left),
+            ops: vec![op],
+            comparators: vec![right],
+            range: r,
+        })
+    };
+
+    let mut for_body: Vec<Stmt> = Vec::new();
+    // yield .item, guarded by the start/step selection unless it is trivially
+    // true. The `stop` break comes AFTER the increment (below) so exactly `stop`
+    // items are consumed — checking before the yield would over-pull the source
+    // by one (observable via a source's side effects), unlike CPython.
+    let yield_stmt = Stmt::Expr(StmtExpr {
+        value: Box::new(E::Yield(ExprYield {
+            value: Some(Box::new(name(".item", ExprContext::Load))),
+            range: r,
+        })),
+        range: r,
+    });
+    if start == 0 && step == 1 {
+        for_body.push(yield_stmt);
+    } else {
+        // (.idx - start) % step == 0
+        let step_ok = cmp(
+            E::BinOp(ExprBinOp {
+                left: Box::new(E::BinOp(ExprBinOp {
+                    left: Box::new(idx_load()),
+                    op: ast::Operator::Sub,
+                    right: Box::new(int_c(start as i64)),
+                    range: r,
+                })),
+                op: ast::Operator::Mod,
+                right: Box::new(int_c(step as i64)),
+                range: r,
+            }),
+            ast::CmpOp::Eq,
+            int_c(0),
+        );
+        let cond = E::BoolOp(ExprBoolOp {
+            op: ast::BoolOp::And,
+            values: vec![cmp(idx_load(), ast::CmpOp::GtE, int_c(start as i64)), step_ok],
+            range: r,
+        });
+        for_body.push(Stmt::If(StmtIf {
+            test: Box::new(cond),
+            body: vec![yield_stmt],
+            orelse: vec![],
+            range: r,
+        }));
+    }
+    // .idx = .idx + 1
+    for_body.push(Stmt::Assign(StmtAssign {
+        targets: vec![name(".idx", ExprContext::Store)],
+        value: Box::new(E::BinOp(ExprBinOp {
+            left: Box::new(idx_load()),
+            op: ast::Operator::Add,
+            right: Box::new(int_c(1)),
+            range: r,
+        })),
+        type_comment: None,
+        range: r,
+    }));
+    // if .idx >= stop: break  (after the increment — consume exactly `stop`).
+    if let Some(stop_v) = stop {
+        for_body.push(Stmt::If(StmtIf {
+            test: Box::new(cmp(idx_load(), ast::CmpOp::GtE, int_c(stop_v as i64))),
+            body: vec![Stmt::Break(StmtBreak { range: r })],
+            orelse: vec![],
+            range: r,
+        }));
+    }
+
+    let body = std::sync::Arc::new(vec![
+        Stmt::Assign(StmtAssign {
+            targets: vec![name(".idx", ExprContext::Store)],
+            value: Box::new(int_c(0)),
+            type_comment: None,
+            range: r,
+        }),
+        Stmt::For(StmtFor {
+            target: Box::new(name(".item", ExprContext::Store)),
+            iter: Box::new(name(".0", ExprContext::Load)),
+            body: for_body,
+            orelse: vec![],
+            type_comment: None,
+            range: r,
+        }),
+    ]);
+
+    let mut locals: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+    locals.insert(".0".to_string(), input.clone());
+    let touched = vec![".0".to_string(), ".idx".to_string(), ".item".to_string()];
+    crate::eval::functions::create_synthetic_generator(state, "<islice>", body, locals, touched)
 }
 
 /// `groupby(iterable, key=None)`: group consecutive elements sharing a key.

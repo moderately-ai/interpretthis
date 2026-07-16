@@ -174,6 +174,15 @@ pub struct GeneratorForState {
     pub body_index: usize,
     /// Simple name target only (`for x in ...`). Empty => yield-from drain.
     pub target: String,
+    /// When the loop iterates a *lazy* source (a generator / lazy iterator),
+    /// this holds the source so the loop pulls one item at a time instead of
+    /// materialising it (which would drain — and hang on — an infinite source).
+    /// `None` for materialised sources, which use `items`/`pos`.
+    pub lazy_source: Option<crate::value::Value>,
+    /// The item currently being processed on the lazy path — remembered across
+    /// a `yield` so the resume continues the same item rather than pulling a new
+    /// one (the source's own cursor already tracks position).
+    pub current_item: Option<crate::value::Value>,
 }
 
 /// Internal state of the interpreter — variables, print buffer, limits.

@@ -146,6 +146,49 @@ fn if_branch_suspendable(stmts: &[Stmt]) -> bool {
 }
 
 /// Create a suspended generator from a just-bound function frame.
+/// Build a lazy generator from a synthesized `body` plus the frame `locals` it
+/// reads (`touched` names are written back on suspend). Returns `None` when the
+/// body cannot be driven by the suspend engine (caller falls back to eager
+/// materialisation). Shared by lazy generator expressions and lazy
+/// `itertools.islice`.
+pub(crate) fn create_synthetic_generator(
+    state: &mut InterpreterState,
+    name: &str,
+    body: Arc<Vec<Stmt>>,
+    locals: rustc_hash::FxHashMap<String, Value>,
+    touched: Vec<String>,
+) -> Option<Value> {
+    if !generator_suspendable(&body) {
+        return None;
+    }
+    let func_def = FunctionDef {
+        name: name.to_string(),
+        body_key: format!("{name}#{}", state.next_cursor_id),
+        wraps_name: None,
+        params: crate::value::FunctionParams {
+            args: Vec::new(),
+            defaults: Vec::new(),
+            default_values: Vec::new(),
+            vararg: None,
+            kwonlyargs: Vec::new(),
+            kw_defaults: Vec::new(),
+            kw_default_values: Vec::new(),
+            kwarg: None,
+        },
+        closure: std::collections::BTreeMap::new(),
+        source: String::new(),
+        nonlocal_names: Vec::new(),
+        is_generator: true,
+        nonlocal_cell_id: None,
+        assigned_names: Vec::new(),
+        global_names: Vec::new(),
+        is_module_level: state.call_depth == 0,
+        docstring: None,
+        cell_refreshes: Vec::new(),
+    };
+    Some(create_generator(state, &func_def, body, locals, touched))
+}
+
 pub(crate) fn create_generator(
     state: &mut InterpreterState,
     func_def: &FunctionDef,
@@ -702,32 +745,41 @@ async fn run_for_suspendable(
     use crate::eval::eval_expr;
     use crate::eval::functions::resolve_proxy;
 
-    let (items, mut pos, mut body_index) = {
+    // Resume state saved on the for_stack for THIS target, if any. Cloned out so
+    // the immutable borrow ends before the `eval_expr` below (which needs `&mut`).
+    let resume = {
         let id = state.active_generator_stack.last().copied();
-        if let Some(id) = id {
-            if let Some(frame) = state.generators.get(&id) {
-                if let Some(fs) = frame.for_stack.last() {
-                    if fs.target == target {
-                        (fs.items.clone(), fs.pos, fs.body_index)
-                    } else {
-                        let iterable = eval_expr(state, &node.iter, tools).await?;
-                        let iterable = resolve_proxy(&iterable).await?;
-                        let items = crate::eval::op::iter(state, &iterable, tools).await?;
-                        (Arc::new(items), 0, 0)
-                    }
-                } else {
-                    let iterable = eval_expr(state, &node.iter, tools).await?;
-                    let iterable = resolve_proxy(&iterable).await?;
-                    (Arc::new(crate::eval::op::iter(state, &iterable, tools).await?), 0, 0)
-                }
-            } else {
-                let iterable = eval_expr(state, &node.iter, tools).await?;
-                let iterable = resolve_proxy(&iterable).await?;
-                (Arc::new(crate::eval::op::iter(state, &iterable, tools).await?), 0, 0)
+        id.and_then(|id| state.generators.get(&id))
+            .and_then(|frame| frame.for_stack.last())
+            .filter(|fs| fs.target == target)
+            .map(|fs| {
+                (
+                    fs.lazy_source.clone(),
+                    fs.current_item.clone(),
+                    fs.items.clone(),
+                    fs.pos,
+                    fs.body_index,
+                )
+            })
+    };
+    let (items, mut pos, mut body_index) = match resume {
+        // Resuming a lazy-source loop — continue pulling from the source.
+        Some((Some(source), current_item, _, _, bi)) => {
+            return run_for_lazy(state, node, target, source, current_item, bi, tools).await;
+        }
+        // Resuming a materialised loop.
+        Some((None, _, items, pos, bi)) => (items, pos, bi),
+        // Fresh entry: evaluate the source. A lazy source (generator / lazy
+        // iterator / count-cycle-repeat) is stepped one item at a time so an
+        // early `break` / `return` doesn't drain — or hang on — it.
+        None => {
+            let iterable = resolve_proxy(&eval_expr(state, &node.iter, tools).await?).await?;
+            if matches!(
+                iterable,
+                Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. }
+            ) {
+                return run_for_lazy(state, node, target, iterable, None, 0, tools).await;
             }
-        } else {
-            let iterable = eval_expr(state, &node.iter, tools).await?;
-            let iterable = resolve_proxy(&iterable).await?;
             (Arc::new(crate::eval::op::iter(state, &iterable, tools).await?), 0, 0)
         }
     };
@@ -784,6 +836,8 @@ async fn run_for_suspendable(
                                 pos,
                                 body_index, // re-enter this yield stmt
                                 target: target.to_string(),
+                                lazy_source: None,
+                                current_item: None,
                             };
                             // Preserve yield-from drain frames on top.
                             if frame.for_stack.last().is_some_and(|t| t.target.is_empty()) {
@@ -831,6 +885,132 @@ async fn run_for_suspendable(
         }
     }
 
+    if let Some(&id) = state.active_generator_stack.last() {
+        if let Some(frame) = state.generators.get_mut(&id) {
+            frame.for_stack.retain(|fs| fs.target != target);
+        }
+    }
+    Ok(())
+}
+
+/// The lazy variant of [`run_for_suspendable`] for a generator / lazy-iterator
+/// source: pull ONE item at a time via `__next__` rather than materialising the
+/// whole (possibly infinite) source. The source's own cursor tracks position, so
+/// only the item currently being processed is remembered across a `yield`. This
+/// is what makes `for x in some_generator: ...; break` stop early instead of
+/// draining — or hanging on — the source, and gives loop-variable closures their
+/// CPython interleaved-capture timing.
+async fn run_for_lazy(
+    state: &mut InterpreterState,
+    node: &rustpython_parser::ast::StmtFor,
+    target: &str,
+    source: Value,
+    mut current_item: Option<Value>,
+    mut body_index: usize,
+    tools: &crate::tools::Tools,
+) -> Result<(), EvalError> {
+    let empty = IndexMap::new();
+    // On resume (first turn only) we continue the item already in progress at the
+    // saved `body_index` — do NOT pull or re-bind, or a yield that was the FIRST
+    // body statement would skip the next item. Every later turn pulls a fresh one.
+    let mut resuming = current_item.is_some();
+    loop {
+        if resuming {
+            resuming = false;
+        } else {
+            let next =
+                Box::pin(dispatch_generator_method(state, &source, "__next__", &[], &empty, tools))
+                    .await;
+            let item = match next {
+                Ok(v) => v,
+                Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
+                Err(e) => return Err(e),
+            };
+            assign_target(state, &node.target, item.clone(), tools).await?;
+            current_item = Some(item);
+            body_index = 0;
+        }
+        while body_index < node.body.len() {
+            let stmt = &node.body[body_index];
+            let (result, is_if) = match stmt {
+                Stmt::If(if_node)
+                    if if_branch_suspendable(&if_node.body)
+                        && if_branch_suspendable(&if_node.orelse)
+                        && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)) =>
+                {
+                    (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+                }
+                _ => (eval_stmt(state, stmt, tools).await, false),
+            };
+            match result {
+                Ok(_) => {
+                    body_index += 1;
+                    if let Some(&id) = state.active_generator_stack.last() {
+                        if let Some(frame) = state.generators.get_mut(&id) {
+                            frame.resume_at_yield = false;
+                        }
+                    }
+                }
+                Err(EvalError::Signal(ControlFlow::Continue)) => {
+                    body_index = node.body.len();
+                }
+                Err(EvalError::Signal(ControlFlow::Break)) => {
+                    if let Some(&id) = state.active_generator_stack.last() {
+                        if let Some(frame) = state.generators.get_mut(&id) {
+                            frame.for_stack.retain(|fs| fs.target != target);
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(EvalError::Signal(ControlFlow::Yield(v))) => {
+                    if let Some(&id) = state.active_generator_stack.last() {
+                        if let Some(frame) = state.generators.get_mut(&id) {
+                            if !is_if {
+                                frame.resume_at_yield = true;
+                            }
+                            let entry = GeneratorForState {
+                                items: Arc::new(Vec::new()),
+                                pos: 0,
+                                body_index, // re-enter this yield stmt
+                                target: target.to_string(),
+                                lazy_source: Some(source.clone()),
+                                current_item: current_item.clone(),
+                            };
+                            // Same yield-from-drain-frame preservation as the
+                            // materialised path.
+                            if frame.for_stack.last().is_some_and(|t| t.target.is_empty()) {
+                                let yf = frame.for_stack.pop();
+                                if let Some(top) = frame.for_stack.last_mut() {
+                                    if top.target == target {
+                                        *top = entry;
+                                    } else {
+                                        frame.for_stack.push(entry);
+                                    }
+                                } else {
+                                    frame.for_stack.push(entry);
+                                }
+                                if let Some(yf) = yf {
+                                    frame.for_stack.push(yf);
+                                }
+                            } else if let Some(top) = frame.for_stack.last_mut() {
+                                if top.target == target {
+                                    *top = entry;
+                                } else {
+                                    frame.for_stack.push(entry);
+                                }
+                            } else {
+                                frame.for_stack.push(entry);
+                            }
+                        }
+                    }
+                    return Err(EvalError::Signal(ControlFlow::Yield(v)));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // Item finished; the next loop turn pulls a fresh one.
+        body_index = 0;
+    }
     if let Some(&id) = state.active_generator_stack.last() {
         if let Some(frame) = state.generators.get_mut(&id) {
             frame.for_stack.retain(|fs| fs.target != target);
