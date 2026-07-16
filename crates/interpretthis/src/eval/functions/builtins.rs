@@ -1230,10 +1230,17 @@ pub(super) async fn try_builtin(
                 return Ok(Some(into_iter_value(state, Vec::new())));
             }
             let strict = kwargs.get("strict").is_some_and(Value::is_truthy);
-            // If any argument is an infinite lazy producer, zip must pull
-            // lazily (bounded by the shortest finite argument) rather
-            // than materialise — otherwise `zip(count(), "abc")` hangs.
+            // If any argument is an infinite producer (count/cycle/repeat), zip
+            // must be lazy — otherwise `zip(count(), "abc")` or the all-infinite
+            // `zip(count(), count())` hangs. Return a real generator that pulls
+            // one row at a time (stopping when any argument is exhausted), so a
+            // downstream `islice`/`for`/`next` bounds it. `strict=` with an
+            // infinite argument is undefined (nothing exhausts), so it uses the
+            // same lazy path.
             if args.iter().any(|a| matches!(a, Value::BuiltinIter { .. })) {
+                if let Some(g) = zip_lazy_gen(state, args) {
+                    return Ok(Some(g));
+                }
                 return zip_lazy(state, args, tools).await.map(Some);
             }
             let mut iterables: Vec<Vec<Value>> = Vec::with_capacity(args.len());
@@ -1947,6 +1954,33 @@ fn sum_float_neumaier(start: &Value, items: &[Value]) -> Option<Value> {
 /// per round. Iteration stops as soon as any argument is exhausted —
 /// pulling left-to-right and discarding a partial round, matching
 /// CPython. `zip(count(), count())` (all-infinite) never terminates,
+/// Build a truly lazy `zip` as a synthesized generator that pulls one row at a
+/// time and stops when any argument is exhausted — so `zip(count(), count())`
+/// streams instead of hanging. Returns `None` if the body is not suspend-
+/// drivable (caller falls back to `zip_lazy`).
+fn zip_lazy_gen(state: &mut InterpreterState, args: &[Value]) -> Option<Value> {
+    // sources is the tuple of arguments; the body builds one iterator per source
+    // and yields a tuple per round until the first is exhausted.
+    let body_src = "its = [iter(a) for a in sources]\n_missing = object()\ndone = False\nwhile not done:\n    row = []\n    for it in its:\n        v = next(it, _missing)\n        if v is _missing:\n            done = True\n            break\n        row.append(v)\n    if not done:\n        yield tuple(row)\n";
+    let body = crate::parser::parse(body_src).ok()?;
+    let (assigned, _globals) = crate::eval::functions::collect_assigned_names(&body);
+    let mut locals: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+    locals.insert("sources".to_string(), Value::List(shared_list(args.to_vec())));
+    let mut touched = vec!["sources".to_string()];
+    for n in assigned {
+        if !touched.iter().any(|t| t == &n) {
+            touched.push(n);
+        }
+    }
+    crate::eval::functions::create_synthetic_generator(
+        state,
+        "<zip>",
+        std::sync::Arc::new(body),
+        locals,
+        touched,
+    )
+}
+
 /// same as CPython.
 async fn zip_lazy(
     state: &mut InterpreterState,
