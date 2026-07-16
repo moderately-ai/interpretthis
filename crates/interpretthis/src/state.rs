@@ -211,6 +211,10 @@ pub struct InterpreterState {
     /// function definition's source line, not at line 1 of the
     /// current `execute()` call's source.
     pub body_source_stack: Vec<String>,
+    /// `random` module RNG — CPython's Mersenne Twister, seeded on first use
+    /// (and re-seeded by `random.seed`) so seeded sequences match CPython
+    /// bit-for-bit.
+    pub random_state: crate::eval::modules::random_mod::MtState,
     pub operations_count: u64,
     /// Wall-clock start time for execution timeout tracking.
     pub execution_start: Instant,
@@ -393,6 +397,7 @@ impl InterpreterState {
             lambda_bodies: FxHashMap::default(),
             current_source: String::new(),
             body_source_stack: Vec::new(),
+            random_state: crate::eval::modules::random_mod::MtState::new(),
             operations_count: 0,
             execution_start: Instant::now(),
             decimal_prec: 28,

@@ -36,6 +36,7 @@ pub mod itertools;
 pub mod json;
 pub mod math;
 pub mod operator;
+pub mod random_mod;
 pub mod re;
 pub mod statistics;
 pub mod string;
@@ -105,7 +106,7 @@ pub trait Module: Sync + Send {
 /// plus one `pub struct XModule;` + `impl Module for XModule` in its
 /// own file. Lookup is O(1) hashed by module name.
 static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock::new(|| {
-    let modules: [&'static dyn Module; 28] = [
+    let modules: [&'static dyn Module; 29] = [
         &math::MathModule,
         &cmath::CmathModule,
         &bisect::BisectModule,
@@ -134,6 +135,7 @@ static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock:
         &abc_mod::AbcModule,
         &io_mod::IoModule,
         &sys_mod::SysModule,
+        &random_mod::RandomModule,
     ];
     modules.into_iter().map(|m| (m.name(), m)).collect()
 });
