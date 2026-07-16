@@ -829,18 +829,21 @@ fn is_identifier(s: &str) -> bool {
     chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 
-/// Whether `s` is title-cased: every run of cased characters starts with an
-/// uppercase letter and the rest are lowercase, and there is at least one
-/// cased character.
 /// Push the Unicode titlecase mapping of `c` onto `out` — used for the
 /// word-initial char of `str.title()`/`str.capitalize()`. Titlecase equals
-/// uppercase for almost every character; the exceptions are the Latin digraph
-/// letters (dž/lj/nj/dz), whose titlecase is the mixed-case form (`ǅ`, not `Ǆ`),
-/// and the Georgian Mkhedruli letters, which have no titlecase (they stay
-/// lowercase; only uppercase maps to Mtavruli). Residual: the Greek polytonic
-/// iota-subscript forms and the Latin/Armenian ligatures (ß→Ss, ﬁ→Fi, …) still
-/// use the uppercase mapping — their titlecase is a multi-char, context-
-/// sensitive expansion that needs the full Unicode SpecialCasing table.
+/// uppercase for almost every character; the exceptions are the ~135 chars whose
+/// `Titlecase_Mapping` differs from `Uppercase_Mapping`: the Latin digraph
+/// letters (dž/lj/nj/dz → the mixed-case `ǅ`, not `Ǆ`), the Georgian Mkhedruli
+/// letters (no titlecase — they stay lowercase; only uppercase maps to
+/// Mtavruli), the Greek polytonic iota forms (`ᾀ` → `ᾈ`, some with combining
+/// marks), and the Latin/Armenian ligatures (ß→Ss, ﬁ→Fi, …), which expand to
+/// multiple chars. The explicit arms are the Unicode SpecialCasing titlecase
+/// table for those code points.
+#[allow(
+    clippy::too_many_lines,
+    clippy::single_char_add_str,
+    reason = "the arms ARE the Unicode SpecialCasing titlecase table — kept uniform (all push_str) so it reads as one auditable data shape"
+)]
 fn push_titlecase(out: &mut String, c: char) {
     match c {
         '\u{01C4}' | '\u{01C5}' | '\u{01C6}' => out.push('\u{01C5}'),
@@ -849,10 +852,90 @@ fn push_titlecase(out: &mut String, c: char) {
         '\u{01F1}' | '\u{01F2}' | '\u{01F3}' => out.push('\u{01F2}'),
         // Georgian Mkhedruli has no titlecase — the letter is its own titlecase.
         '\u{10D0}'..='\u{10FF}' => out.push(c),
+        // Ligatures and the Greek polytonic iota forms (multi-char titlecase).
+        '\u{00DF}' => out.push_str("\u{0053}\u{0073}"),
+        '\u{0587}' => out.push_str("\u{0535}\u{0582}"),
+        '\u{1F80}' => out.push_str("\u{1F88}"),
+        '\u{1F81}' => out.push_str("\u{1F89}"),
+        '\u{1F82}' => out.push_str("\u{1F8A}"),
+        '\u{1F83}' => out.push_str("\u{1F8B}"),
+        '\u{1F84}' => out.push_str("\u{1F8C}"),
+        '\u{1F85}' => out.push_str("\u{1F8D}"),
+        '\u{1F86}' => out.push_str("\u{1F8E}"),
+        '\u{1F87}' => out.push_str("\u{1F8F}"),
+        '\u{1F88}' => out.push_str("\u{1F88}"),
+        '\u{1F89}' => out.push_str("\u{1F89}"),
+        '\u{1F8A}' => out.push_str("\u{1F8A}"),
+        '\u{1F8B}' => out.push_str("\u{1F8B}"),
+        '\u{1F8C}' => out.push_str("\u{1F8C}"),
+        '\u{1F8D}' => out.push_str("\u{1F8D}"),
+        '\u{1F8E}' => out.push_str("\u{1F8E}"),
+        '\u{1F8F}' => out.push_str("\u{1F8F}"),
+        '\u{1F90}' => out.push_str("\u{1F98}"),
+        '\u{1F91}' => out.push_str("\u{1F99}"),
+        '\u{1F92}' => out.push_str("\u{1F9A}"),
+        '\u{1F93}' => out.push_str("\u{1F9B}"),
+        '\u{1F94}' => out.push_str("\u{1F9C}"),
+        '\u{1F95}' => out.push_str("\u{1F9D}"),
+        '\u{1F96}' => out.push_str("\u{1F9E}"),
+        '\u{1F97}' => out.push_str("\u{1F9F}"),
+        '\u{1F98}' => out.push_str("\u{1F98}"),
+        '\u{1F99}' => out.push_str("\u{1F99}"),
+        '\u{1F9A}' => out.push_str("\u{1F9A}"),
+        '\u{1F9B}' => out.push_str("\u{1F9B}"),
+        '\u{1F9C}' => out.push_str("\u{1F9C}"),
+        '\u{1F9D}' => out.push_str("\u{1F9D}"),
+        '\u{1F9E}' => out.push_str("\u{1F9E}"),
+        '\u{1F9F}' => out.push_str("\u{1F9F}"),
+        '\u{1FA0}' => out.push_str("\u{1FA8}"),
+        '\u{1FA1}' => out.push_str("\u{1FA9}"),
+        '\u{1FA2}' => out.push_str("\u{1FAA}"),
+        '\u{1FA3}' => out.push_str("\u{1FAB}"),
+        '\u{1FA4}' => out.push_str("\u{1FAC}"),
+        '\u{1FA5}' => out.push_str("\u{1FAD}"),
+        '\u{1FA6}' => out.push_str("\u{1FAE}"),
+        '\u{1FA7}' => out.push_str("\u{1FAF}"),
+        '\u{1FA8}' => out.push_str("\u{1FA8}"),
+        '\u{1FA9}' => out.push_str("\u{1FA9}"),
+        '\u{1FAA}' => out.push_str("\u{1FAA}"),
+        '\u{1FAB}' => out.push_str("\u{1FAB}"),
+        '\u{1FAC}' => out.push_str("\u{1FAC}"),
+        '\u{1FAD}' => out.push_str("\u{1FAD}"),
+        '\u{1FAE}' => out.push_str("\u{1FAE}"),
+        '\u{1FAF}' => out.push_str("\u{1FAF}"),
+        '\u{1FB2}' => out.push_str("\u{1FBA}\u{0345}"),
+        '\u{1FB3}' => out.push_str("\u{1FBC}"),
+        '\u{1FB4}' => out.push_str("\u{0386}\u{0345}"),
+        '\u{1FB7}' => out.push_str("\u{0391}\u{0342}\u{0345}"),
+        '\u{1FBC}' => out.push_str("\u{1FBC}"),
+        '\u{1FC2}' => out.push_str("\u{1FCA}\u{0345}"),
+        '\u{1FC3}' => out.push_str("\u{1FCC}"),
+        '\u{1FC4}' => out.push_str("\u{0389}\u{0345}"),
+        '\u{1FC7}' => out.push_str("\u{0397}\u{0342}\u{0345}"),
+        '\u{1FCC}' => out.push_str("\u{1FCC}"),
+        '\u{1FF2}' => out.push_str("\u{1FFA}\u{0345}"),
+        '\u{1FF3}' => out.push_str("\u{1FFC}"),
+        '\u{1FF4}' => out.push_str("\u{038F}\u{0345}"),
+        '\u{1FF7}' => out.push_str("\u{03A9}\u{0342}\u{0345}"),
+        '\u{1FFC}' => out.push_str("\u{1FFC}"),
+        '\u{FB00}' => out.push_str("\u{0046}\u{0066}"),
+        '\u{FB01}' => out.push_str("\u{0046}\u{0069}"),
+        '\u{FB02}' => out.push_str("\u{0046}\u{006C}"),
+        '\u{FB03}' => out.push_str("\u{0046}\u{0066}\u{0069}"),
+        '\u{FB04}' => out.push_str("\u{0046}\u{0066}\u{006C}"),
+        '\u{FB05}' | '\u{FB06}' => out.push_str("\u{0053}\u{0074}"),
+        '\u{FB13}' => out.push_str("\u{0544}\u{0576}"),
+        '\u{FB14}' => out.push_str("\u{0544}\u{0565}"),
+        '\u{FB15}' => out.push_str("\u{0544}\u{056B}"),
+        '\u{FB16}' => out.push_str("\u{054E}\u{0576}"),
+        '\u{FB17}' => out.push_str("\u{0544}\u{056D}"),
         _ => out.extend(c.to_uppercase()),
     }
 }
 
+/// Whether `s` is title-cased: every run of cased characters starts with an
+/// uppercase letter and the rest are lowercase, and there is at least one
+/// cased character.
 fn is_title(s: &str) -> bool {
     let mut seen_cased = false;
     let mut prev_cased = false;
