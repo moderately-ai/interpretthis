@@ -29,7 +29,7 @@
 use bigdecimal::BigDecimal;
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta};
 use indexmap::IndexMap;
-use interpretthis::{Value, ValueKey, shared_bytes, shared_list};
+use interpretthis::{DecimalKind, Value, ValueKey, shared_bytes, shared_list};
 use num_bigint::BigInt;
 use num_rational::BigRational;
 use pyo3::{
@@ -145,14 +145,14 @@ pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, P
         Value::Complex(c) => pyo3::types::PyComplex::from_doubles(py, c.re, c.im).into_any(),
         Value::Ellipsis => py.import("builtins")?.getattr("Ellipsis")?,
 
-        Value::Decimal(d, neg_zero) => {
-            if *neg_zero {
-                // pyo3's BigDecimal conversion cannot emit a signed zero, so
-                // rebuild the negative zero through decimal.Decimal(str).
-                let s = format!("-{d}");
-                py.import("decimal")?.getattr("Decimal")?.call1((s,))?
-            } else {
+        Value::Decimal(d, kind) => {
+            if *kind == DecimalKind::Normal {
                 (**d).clone().into_pyobject(py)?.into_any()
+            } else {
+                // pyo3's BigDecimal cannot emit a signed zero or Infinity/NaN;
+                // rebuild from the exact `str()` form via decimal.Decimal(str).
+                let s = Value::Decimal(d.clone(), *kind).to_string();
+                py.import("decimal")?.getattr("Decimal")?.call1((s,))?
             }
         }
         Value::Fraction(f) => (**f).clone().into_pyobject(py)?.into_any(),
@@ -301,12 +301,26 @@ pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     // gate any object with a numeric `__str__` or `.numerator`/`.denominator`
     // (numpy.int64, a Money class) would be silently reinterpreted.
     if is_instance_of(ob, "decimal", "Decimal")? {
+        // Detect Infinity / NaN from the string form first — `bigdecimal` can't
+        // parse them (or emit a signed zero, recovered below).
+        let s = ob.str()?.to_str()?.to_string();
+        let trimmed = s.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let (neg, body) =
+            lower.strip_prefix('-').map_or((false, lower.as_str()), |rest| (true, rest));
+        if body == "inf" || body == "infinity" {
+            let kind = if neg { DecimalKind::NegInf } else { DecimalKind::PosInf };
+            return Ok(Value::Decimal(Box::new(BigDecimal::from(0)), kind));
+        }
+        if body == "nan" || body == "snan" {
+            return Ok(Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::Nan));
+        }
         let big = ob.extract::<BigDecimal>()?;
         // `bigdecimal` drops the sign of a zero; recover CPython's negative
         // zero (`Decimal('-0.0')`) from the repr so it round-trips.
-        let is_zero = bigdecimal::Zero::is_zero(&big);
-        let neg_zero = is_zero && ob.str()?.to_str()?.trim_start().starts_with('-');
-        return Ok(Value::Decimal(Box::new(big), neg_zero));
+        let neg_zero = bigdecimal::Zero::is_zero(&big) && trimmed.starts_with('-');
+        let kind = if neg_zero { DecimalKind::NegZero } else { DecimalKind::Normal };
+        return Ok(Value::Decimal(Box::new(big), kind));
     }
     if is_instance_of(ob, "fractions", "Fraction")? {
         return Ok(Value::Fraction(Box::new(ob.extract::<BigRational>()?)));

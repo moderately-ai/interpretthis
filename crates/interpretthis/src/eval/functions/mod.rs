@@ -290,7 +290,10 @@ pub(crate) fn round_decimal(d: &bigdecimal::BigDecimal, ndigits: Option<i64>) ->
             let rounded = d.with_scale_round(0, HalfEven);
             crate::value::int_from_bigint(rounded.as_bigint_and_exponent().0)
         }
-        Some(n) => Value::Decimal(Box::new(d.with_scale_round(n, HalfEven)), false),
+        Some(n) => Value::Decimal(
+            Box::new(d.with_scale_round(n, HalfEven)),
+            crate::value::DecimalKind::Normal,
+        ),
     }
 }
 

@@ -971,7 +971,7 @@ fn decimal_methods(
     args: &[Value],
     kwargs: &IndexMap<String, Value>,
 ) -> Result<MethodOutcome, EvalError> {
-    let Value::Decimal(d, _) = obj else {
+    let Value::Decimal(d, kind) = obj else {
         return Err(type_mismatch("Decimal"));
     };
     // `quantize(exp, rounding=…)` is the only Decimal method that takes a
@@ -979,7 +979,7 @@ fn decimal_methods(
     if method != "quantize" {
         crate::eval::functions::reject_kwargs(method, kwargs)?;
     }
-    crate::eval::modules::decimal::dispatch_decimal_method(d, method, args, kwargs)
+    crate::eval::modules::decimal::dispatch_decimal_method(d, *kind, method, args, kwargs)
         .map(MethodOutcome::pure)
 }
 

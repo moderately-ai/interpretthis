@@ -288,7 +288,7 @@ fn operator_abs(value: &Value) -> EvalResult {
         Value::Float(f) => Value::Float(f.abs()),
         Value::Complex(c) => Value::Float(c.norm()),
         Value::Bool(b) => Value::Int(i64::from(*b)),
-        Value::Decimal(d, _) => Value::Decimal(Box::new(d.abs()), false),
+        Value::Decimal(d, k) => crate::eval::modules::decimal::abs_decimal(d, *k),
         Value::Fraction(fr) => Value::Fraction(Box::new((**fr).abs())),
         _ => {
             return Err(InterpreterError::TypeError(format!(

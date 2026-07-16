@@ -4247,6 +4247,16 @@ fn decimal_to_bigdecimal(value: &Value) -> Option<bigdecimal::BigDecimal> {
 }
 
 fn decimal_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
+    use crate::value::DecimalKind as K;
+    // Infinity / NaN: NaN never equals anything (even itself); infinities are
+    // equal only to a same-signed infinity.
+    let (ka, kb) = (decimal_operand_kind(lhs), decimal_operand_kind(rhs));
+    if ka.is_special() || kb.is_special() {
+        if ka.is_nan() || kb.is_nan() {
+            return Some(false);
+        }
+        return Some(matches!((ka, kb), (K::PosInf, K::PosInf) | (K::NegInf, K::NegInf)));
+    }
     // `Decimal == float` / `Decimal == Fraction` is a legal comparison in
     // CPython (unlike `Decimal + float`, which raises) and is exact: both sides
     // reduce to a rational and compare mathematically. The int/Decimal path
@@ -4258,6 +4268,23 @@ fn decimal_eq(lhs: &Value, rhs: &Value) -> Option<bool> {
 }
 
 fn decimal_lt(lhs: &Value, rhs: &Value) -> Option<Result<bool, EvalError>> {
+    // Infinity / NaN ordering: a NaN comparison raises InvalidOperation
+    // (CPython), while `-Infinity < finite < +Infinity`.
+    let (ka, kb) = (decimal_operand_kind(lhs), decimal_operand_kind(rhs));
+    if ka.is_special() || kb.is_special() {
+        if ka.is_nan() || kb.is_nan() {
+            return Some(Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                "InvalidOperation",
+                "comparison involving NaN",
+            ))));
+        }
+        let rank = |k: crate::value::DecimalKind| match k {
+            crate::value::DecimalKind::NegInf => -2_i32,
+            crate::value::DecimalKind::PosInf => 2,
+            _ => 0,
+        };
+        return Some(Ok(rank(ka) < rank(kb)));
+    }
     // `Decimal` vs `float`/`Fraction` (either operand can be the Decimal, since
     // the dispatcher tries this slot for both positions) compares by exact
     // value, matching CPython (`Decimal(3) < 3.5` is legal, unlike arithmetic).
@@ -4283,6 +4310,11 @@ fn decimal_arith(
             "unsupported operand type(s) for arithmetic: 'Decimal' and 'float'".into(),
         )
         .into()));
+    }
+    // Infinity / NaN operands follow IEEE-style rules, not BigDecimal math (the
+    // BigDecimal is a placeholder for those).
+    if decimal_operand_kind(lhs).is_special() || decimal_operand_kind(rhs).is_special() {
+        return Some(decimal_special_arith(op, lhs, rhs));
     }
     let (a, b) = (decimal_to_bigdecimal(lhs)?, decimal_to_bigdecimal(rhs)?);
     let result: bigdecimal::BigDecimal = match op {
@@ -4346,7 +4378,103 @@ fn decimal_arith(
             }
         }
     };
-    Some(Ok(Value::Decimal(Box::new(result), false)))
+    Some(Ok(Value::Decimal(Box::new(result), crate::value::DecimalKind::Normal)))
+}
+
+/// The [`DecimalKind`] of an arithmetic operand: the tag for a `Decimal`, or
+/// `Normal` for an int/bool that lifts into the operation.
+fn decimal_operand_kind(v: &Value) -> crate::value::DecimalKind {
+    match v {
+        Value::Decimal(_, k) => *k,
+        _ => crate::value::DecimalKind::Normal,
+    }
+}
+
+/// Whether an operand's value is negative (for combining signs with an infinite
+/// operand). A finite operand reads its sign from the number; `NegZero` counts
+/// as negative for sign propagation.
+fn decimal_operand_negative(v: &Value) -> bool {
+    use num_traits::Signed as _;
+    match v {
+        Value::Decimal(d, k) => {
+            matches!(k, crate::value::DecimalKind::NegInf | crate::value::DecimalKind::NegZero)
+                || d.is_negative()
+        }
+        Value::Int(i) => *i < 0,
+        Value::BigInt(b) => b.is_negative(),
+        _ => false,
+    }
+}
+
+/// IEEE-754-style arithmetic when at least one operand is Infinity/NaN, matching
+/// CPython's `decimal`. Returns the special result, `Ok` with a placeholder
+/// `BigDecimal` and the right kind (or a `DivisionByZero`/`InvalidOperation`
+/// error where CPython raises).
+fn decimal_special_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value, EvalError> {
+    use crate::value::DecimalKind as K;
+    use num_traits::Zero as _;
+    let mk = |k: K| Ok(Value::Decimal(Box::new(bigdecimal::BigDecimal::from(0)), k));
+    // CPython's default context traps `InvalidOperation`: an op that would
+    // CREATE a NaN from non-NaN operands (inf-inf, inf*0, inf/inf) raises,
+    // whereas a NaN OPERAND merely propagates.
+    let invalid = || {
+        Err(EvalError::Exception(crate::value::ExceptionValue::new(
+            "InvalidOperation",
+            "[<class 'decimal.InvalidOperation'>]",
+        )))
+    };
+    let (ka, kb) = (decimal_operand_kind(lhs), decimal_operand_kind(rhs));
+    let (na, nb) = (decimal_operand_negative(lhs), decimal_operand_negative(rhs));
+    // A NaN operand propagates through every arithmetic op (no trap).
+    if ka.is_nan() || kb.is_nan() {
+        return mk(K::Nan);
+    }
+    let inf = |neg: bool| if neg { K::NegInf } else { K::PosInf };
+    let a_zero = matches!(lhs, Value::Decimal(d, k) if !k.is_special() && d.is_zero());
+    let b_zero = matches!(rhs, Value::Decimal(d, k) if !k.is_special() && d.is_zero());
+    match op {
+        BinOp::Add => match (ka.is_infinite(), kb.is_infinite()) {
+            (true, true) => {
+                if na == nb {
+                    mk(inf(na))
+                } else {
+                    invalid() // inf + -inf
+                }
+            }
+            (true, false) => mk(inf(na)),
+            (false, true) => mk(inf(nb)),
+            (false, false) => mk(K::Normal),
+        },
+        BinOp::Sub => match (ka.is_infinite(), kb.is_infinite()) {
+            (true, true) => {
+                if na != nb {
+                    mk(inf(na))
+                } else {
+                    invalid() // inf - inf
+                }
+            }
+            (true, false) => mk(inf(na)),
+            (false, true) => mk(inf(!nb)),
+            (false, false) => mk(K::Normal),
+        },
+        BinOp::Mul => {
+            if (ka.is_infinite() && b_zero) || (kb.is_infinite() && a_zero) {
+                return invalid(); // inf * 0
+            }
+            if ka.is_infinite() || kb.is_infinite() {
+                return mk(inf(na != nb));
+            }
+            mk(K::Normal)
+        }
+        BinOp::Div => match (ka.is_infinite(), kb.is_infinite()) {
+            (true, true) => invalid(),          // inf / inf
+            (true, false) => mk(inf(na != nb)), // inf / finite
+            (false, true) => mk(K::Normal),     // finite / inf -> 0
+            (false, false) => mk(K::Normal),
+        },
+        // FloorDiv/Mod/Pow with an infinity trap InvalidOperation in CPython too.
+        _ => invalid(),
+    }
 }
 
 // ---------------------------------------------------------------------------

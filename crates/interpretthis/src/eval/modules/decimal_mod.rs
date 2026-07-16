@@ -23,17 +23,109 @@ use bigdecimal::BigDecimal;
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
-    value::Value,
+    value::{DecimalKind, Value},
 };
+
+/// `abs(Decimal)` — infinity becomes `+Infinity`, NaN stays NaN, else `|d|`.
+#[must_use]
+pub fn abs_decimal(d: &BigDecimal, kind: DecimalKind) -> Value {
+    match kind {
+        DecimalKind::Nan => Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::Nan),
+        DecimalKind::PosInf | DecimalKind::NegInf => {
+            Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::PosInf)
+        }
+        _ => Value::Decimal(Box::new(d.abs()), DecimalKind::Normal),
+    }
+}
+
+/// `-Decimal` — flips an infinity's sign, keeps NaN, else negates `d`.
+#[must_use]
+pub fn neg_decimal(d: &BigDecimal, kind: DecimalKind) -> Value {
+    match kind {
+        DecimalKind::Nan => Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::Nan),
+        DecimalKind::PosInf => Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::NegInf),
+        DecimalKind::NegInf => Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::PosInf),
+        _ => Value::Decimal(Box::new(-(d.clone())), DecimalKind::Normal),
+    }
+}
+
+/// `copy_abs` sign for a special value: any infinity → `+Infinity`, NaN → NaN.
+const fn abs_kind(kind: DecimalKind) -> DecimalKind {
+    match kind {
+        DecimalKind::PosInf | DecimalKind::NegInf => DecimalKind::PosInf,
+        other => other,
+    }
+}
+
+/// `copy_negate` sign for a special value: flip an infinity, keep NaN.
+const fn neg_kind(kind: DecimalKind) -> DecimalKind {
+    match kind {
+        DecimalKind::PosInf => DecimalKind::NegInf,
+        DecimalKind::NegInf => DecimalKind::PosInf,
+        other => other,
+    }
+}
+
+/// `as_tuple()` for a special value: CPython uses a string exponent (`'F'` for
+/// infinity, `'n'` for NaN) with `digits=(0,)` for infinity and `()` for NaN.
+fn special_as_tuple(kind: DecimalKind) -> EvalResult {
+    let (sign, digits, exp): (i64, Vec<Value>, &str) = match kind {
+        DecimalKind::PosInf => (0, vec![Value::Int(0)], "F"),
+        DecimalKind::NegInf => (1, vec![Value::Int(0)], "F"),
+        _ => (0, Vec::new(), "n"),
+    };
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("sign".to_string(), Value::Int(sign));
+    fields.insert("digits".to_string(), Value::Tuple(digits));
+    fields.insert("exponent".to_string(), Value::String(exp.into()));
+    Ok(Value::Instance(crate::value::InstanceValue {
+        class_name: "DecimalTuple".to_string(),
+        fields: crate::value::shared_fields(fields),
+    }))
+}
 
 /// Dispatch a method call on a `Decimal` receiver.
 pub(crate) fn dispatch_decimal_method(
     d: &BigDecimal,
+    kind: DecimalKind,
     method: &str,
     args: &[Value],
     kwargs: &indexmap::IndexMap<String, Value>,
 ) -> EvalResult {
     use num_traits::{Signed as _, Zero as _};
+    // Special-value predicates and identities are answered from the kind, before
+    // touching the placeholder BigDecimal.
+    match method {
+        "is_nan" => return Ok(Value::Bool(kind.is_nan())),
+        "is_qnan" => return Ok(Value::Bool(kind == DecimalKind::Nan)),
+        "is_snan" => return Ok(Value::Bool(false)),
+        "is_infinite" => return Ok(Value::Bool(kind.is_infinite())),
+        "is_finite" => return Ok(Value::Bool(!kind.is_special())),
+        "is_signed" => {
+            return Ok(Value::Bool(
+                matches!(kind, DecimalKind::NegInf | DecimalKind::NegZero) || d.is_negative(),
+            ));
+        }
+        _ => {}
+    }
+    // For any other method on a special value, propagate NaN / raise like
+    // CPython rather than compute on the zero placeholder (a rare path).
+    if kind.is_special() {
+        return Ok(match method {
+            "copy_abs" => Value::Decimal(Box::new(BigDecimal::from(0)), abs_kind(kind)),
+            "copy_negate" => Value::Decimal(Box::new(BigDecimal::from(0)), neg_kind(kind)),
+            "as_tuple" => return special_as_tuple(kind),
+            _ if kind.is_nan() => Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::Nan),
+            // Infinity through most numeric methods is InvalidOperation in
+            // CPython; mirror that rather than a wrong finite value.
+            _ => {
+                return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                    "InvalidOperation",
+                    format!("{method}() of a non-finite Decimal"),
+                )));
+            }
+        });
+    }
     match method {
         // `quantize(exp, rounding=…)` rounds to the exponent (decimal scale)
         // of `exp`. The rounding mode defaults to the context's
@@ -58,10 +150,10 @@ pub(crate) fn dispatch_decimal_method(
                 }
             };
             let scale = exp.fractional_digit_count();
-            Ok(Value::Decimal(Box::new(d.with_scale_round(scale, rounding)), false))
+            Ok(Value::Decimal(Box::new(d.with_scale_round(scale, rounding)), DecimalKind::Normal))
         }
-        "copy_abs" => Ok(Value::Decimal(Box::new(d.abs()), false)),
-        "copy_negate" => Ok(Value::Decimal(Box::new(-d.clone()), false)),
+        "copy_abs" => Ok(Value::Decimal(Box::new(d.abs()), DecimalKind::Normal)),
+        "copy_negate" => Ok(Value::Decimal(Box::new(-d.clone()), DecimalKind::Normal)),
         "copy_sign" => {
             let Some(Value::Decimal(other, _)) = args.first() else {
                 return Err(InterpreterError::TypeError(
@@ -72,13 +164,13 @@ pub(crate) fn dispatch_decimal_method(
             let magnitude = d.abs();
             Ok(Value::Decimal(
                 Box::new(if other.is_negative() { -magnitude } else { magnitude }),
-                false,
+                DecimalKind::Normal,
             ))
         }
         "is_zero" => Ok(Value::Bool(d.is_zero())),
-        "is_signed" => Ok(Value::Bool(d.is_negative())),
-        "is_nan" | "is_infinite" | "is_qnan" | "is_snan" => Ok(Value::Bool(false)),
-        "normalize" => Ok(Value::Decimal(Box::new(d.normalized()), false)),
+        // is_nan/is_infinite/is_qnan/is_snan/is_finite/is_signed are answered
+        // from the kind at the top of this function.
+        "normalize" => Ok(Value::Decimal(Box::new(d.normalized()), DecimalKind::Normal)),
         // Rounded to the default context precision (28 significant digits),
         // matching CPython — bigdecimal's raw sqrt keeps ~100 digits.
         "sqrt" => {
@@ -98,23 +190,25 @@ pub(crate) fn dispatch_decimal_method(
             } else {
                 r.with_prec(28)
             };
-            Ok(Value::Decimal(Box::new(result), false))
+            Ok(Value::Decimal(Box::new(result), DecimalKind::Normal))
         }
         // Transcendentals at the default context precision (28 significant
         // digits). `exp` is bigdecimal's; `ln`/`log10` use Newton's method on
         // `exp`. Accurate to 28 digits but — like `math.erf` — not guaranteed
         // bit-identical to CPython's correctly-rounded result in the final ULP.
         // exp(0) is exactly 1 (CPython returns the bare `1`, not `1.000…`).
-        "exp" if d.is_zero() => Ok(Value::Decimal(Box::new(BigDecimal::from(1)), false)),
-        "exp" => Ok(Value::Decimal(Box::new(d.exp().with_prec(28)), false)),
+        "exp" if d.is_zero() => {
+            Ok(Value::Decimal(Box::new(BigDecimal::from(1)), DecimalKind::Normal))
+        }
+        "exp" => Ok(Value::Decimal(Box::new(d.exp().with_prec(28)), DecimalKind::Normal)),
         "ln" => {
             // ln(1) is exactly 0 (CPython returns the bare `0`, not a padded
             // 28-digit form). Every other value gives an irrational result.
             if power_of_ten_exponent(d) == Some(0) {
-                Ok(Value::Decimal(Box::new(BigDecimal::from(0)), false))
+                Ok(Value::Decimal(Box::new(BigDecimal::from(0)), DecimalKind::Normal))
             } else {
                 decimal_ln_prec(d, 45)
-                    .map(|r| Value::Decimal(Box::new(r.with_prec(28)), false))
+                    .map(|r| Value::Decimal(Box::new(r.with_prec(28)), DecimalKind::Normal))
                     .ok_or_else(|| non_positive_log_error("ln"))
             }
         }
@@ -122,13 +216,14 @@ pub(crate) fn dispatch_decimal_method(
             // log10 of an exact power of ten is the exact integer exponent
             // (CPython: `Decimal(1000).log10()` is `3`, not `3.000…`).
             if let Some(k) = power_of_ten_exponent(d) {
-                Ok(Value::Decimal(Box::new(BigDecimal::from(k)), false))
+                Ok(Value::Decimal(Box::new(BigDecimal::from(k)), DecimalKind::Normal))
             } else {
                 let ten = BigDecimal::from(10);
                 match (decimal_ln_prec(d, 48), decimal_ln_prec(&ten, 48)) {
-                    (Some(ln_d), Some(ln_ten)) => {
-                        Ok(Value::Decimal(Box::new((ln_d / ln_ten).with_prec(28)), false))
-                    }
+                    (Some(ln_d), Some(ln_ten)) => Ok(Value::Decimal(
+                        Box::new((ln_d / ln_ten).with_prec(28)),
+                        DecimalKind::Normal,
+                    )),
                     _ => Err(non_positive_log_error("log10")),
                 }
             }
@@ -146,7 +241,7 @@ pub(crate) fn dispatch_decimal_method(
                 std::cmp::Ordering::Equal => 0,
                 std::cmp::Ordering::Greater => 1,
             };
-            Ok(Value::Decimal(Box::new(BigDecimal::from(sign)), false))
+            Ok(Value::Decimal(Box::new(BigDecimal::from(sign)), DecimalKind::Normal))
         }
         // `scaleb(n)` shifts the decimal exponent by `n` (multiply by 10**n)
         // while preserving the coefficient, so the E-notation is retained.
@@ -165,11 +260,11 @@ pub(crate) fn dispatch_decimal_method(
                 }
             };
             let (mantissa, scale) = d.as_bigint_and_exponent();
-            Ok(Value::Decimal(Box::new(BigDecimal::new(mantissa, scale - n)), false))
+            Ok(Value::Decimal(Box::new(BigDecimal::new(mantissa, scale - n)), DecimalKind::Normal))
         }
         "to_integral_value" | "to_integral" => Ok(Value::Decimal(
             Box::new(d.with_scale_round(0, bigdecimal::RoundingMode::HalfEven)),
-            false,
+            DecimalKind::Normal,
         )),
         "as_integer_ratio" => {
             let (mantissa, scale) = d.as_bigint_and_exponent();
@@ -342,7 +437,7 @@ pub fn call(func: &str, args: &[Value], state: &mut crate::state::InterpreterSta
             let big = BigDecimal::try_from(*f).map_err(|_| {
                 InterpreterError::ValueError(format!("cannot convert float {f} to Decimal"))
             })?;
-            Ok(Value::Decimal(Box::new(big), false))
+            Ok(Value::Decimal(Box::new(big), DecimalKind::Normal))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'decimal' has no attribute '{func}'"
@@ -366,23 +461,41 @@ pub(crate) fn construct_decimal(arg: Option<&Value>) -> EvalResult {
         )
         .into());
     };
-    // CPython keeps the sign of a zero Decimal (`Decimal('-0.0')` prints
-    // `-0.0`), but `bigdecimal` normalises it away. Track it separately.
-    let (big, neg_zero) = match arg {
-        Value::Int(i) => (BigDecimal::from(*i), false),
-        Value::Bool(b) => (BigDecimal::from(i64::from(*b)), false),
+    // `DecimalKind` carries what `bigdecimal` can't: the sign of a zero
+    // (`Decimal('-0.0')` prints `-0.0`) and the special values inf/nan.
+    let (big, kind) = match arg {
+        Value::Int(i) => (BigDecimal::from(*i), DecimalKind::Normal),
+        Value::Bool(b) => (BigDecimal::from(i64::from(*b)), DecimalKind::Normal),
         Value::String(s) => {
             use num_traits::Zero as _;
             let trimmed = s.trim();
-            let bd = BigDecimal::from_str(trimmed).map_err(|e| {
-                EvalError::from(InterpreterError::ValueError(format!(
-                    "invalid Decimal literal: {s:?} ({e})"
-                )))
-            })?;
-            let neg_zero = bd.is_zero() && trimmed.starts_with('-');
-            (bd, neg_zero)
+            // Special values are case-insensitive with an optional sign:
+            // `inf`/`infinity`/`nan`/`snan` (CPython also accepts `Infinity`).
+            let lower = trimmed.to_ascii_lowercase();
+            let (neg, body) = lower.strip_prefix('-').map_or_else(
+                || (false, lower.strip_prefix('+').unwrap_or(lower.as_str())),
+                |rest| (true, rest),
+            );
+            if body == "inf" || body == "infinity" {
+                let kind = if neg { DecimalKind::NegInf } else { DecimalKind::PosInf };
+                (BigDecimal::from(0), kind)
+            } else if body == "nan" || body == "snan" {
+                (BigDecimal::from(0), DecimalKind::Nan)
+            } else {
+                let bd = BigDecimal::from_str(trimmed).map_err(|e| {
+                    EvalError::from(InterpreterError::ValueError(format!(
+                        "invalid Decimal literal: {s:?} ({e})"
+                    )))
+                })?;
+                let kind = if bd.is_zero() && trimmed.starts_with('-') {
+                    DecimalKind::NegZero
+                } else {
+                    DecimalKind::Normal
+                };
+                (bd, kind)
+            }
         }
-        Value::Decimal(d, nz) => ((**d).clone(), *nz),
+        Value::Decimal(d, k) => ((**d).clone(), *k),
         Value::Float(_) => {
             return Err(InterpreterError::TypeError(
                 "Decimal() does not accept float — use a string instead (see \
@@ -399,7 +512,7 @@ pub(crate) fn construct_decimal(arg: Option<&Value>) -> EvalResult {
             .into());
         }
     };
-    Ok(Value::Decimal(Box::new(big), neg_zero))
+    Ok(Value::Decimal(Box::new(big), kind))
 }
 
 fn make_context_instance(state: &mut crate::state::InterpreterState) -> Value {
@@ -480,6 +593,24 @@ impl crate::eval::modules::Module for DecimalModule {
         has_function(name)
     }
     fn constant(&self, name: &str) -> Option<Value> {
+        // The module's exception types, usable in `except decimal.InvalidOperation`
+        // and importable via `from decimal import ...`. Their raised type names
+        // match these, and every one is an `ArithmeticError` subclass.
+        if matches!(
+            name,
+            "InvalidOperation"
+                | "DivisionByZero"
+                | "Overflow"
+                | "Underflow"
+                | "Inexact"
+                | "Rounded"
+                | "Subnormal"
+                | "Clamped"
+                | "FloatOperation"
+                | "DecimalException"
+        ) {
+            return Some(Value::ExceptionType(name.to_string()));
+        }
         rounding_constant(name)
     }
     async fn call(

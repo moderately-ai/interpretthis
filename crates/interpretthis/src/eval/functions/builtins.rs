@@ -1081,7 +1081,7 @@ pub(super) async fn try_builtin(
                 Value::Bool(b) => Ok(Some(Value::Int(i64::from(*b)))),
                 // `abs(timedelta)` yields a non-negative duration.
                 Value::TimeDelta(us) => Ok(Some(Value::TimeDelta(us.abs()))),
-                Value::Decimal(d, _) => Ok(Some(Value::Decimal(Box::new(d.abs()), false))),
+                Value::Decimal(d, k) => Ok(Some(crate::eval::modules::decimal::abs_decimal(d, *k))),
                 Value::Fraction(fr) => {
                     use num_traits::Signed as _;
                     Ok(Some(Value::Fraction(Box::new((**fr).abs()))))

@@ -376,7 +376,7 @@ fn engine_value_to_json_collections() {
 #[test]
 fn engine_value_to_json_encodes_data_types() {
     // A data-bearing type is encoded, not silently nulled.
-    let d = Value::Decimal(Box::new("1.5".parse().unwrap()), false);
+    let d = Value::Decimal(Box::new("1.5".parse().unwrap()), interpretthis::DecimalKind::Normal);
     assert_eq!(d.to_json().unwrap(), serde_json::json!(1.5));
 
     let date = Value::Date(chrono::NaiveDate::from_ymd_opt(2020, 1, 2).unwrap());

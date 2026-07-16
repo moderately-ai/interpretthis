@@ -395,6 +395,48 @@ impl BuiltinIterName {
     }
 }
 
+/// The sign/special-value tag on a [`Value::Decimal`] — what `bigdecimal`
+/// cannot itself represent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DecimalKind {
+    /// A finite value; the `BigDecimal` is authoritative.
+    #[default]
+    Normal,
+    /// Finite negative zero (`Decimal('-0.0')`); the `BigDecimal` is zero.
+    NegZero,
+    /// `+Infinity`; the `BigDecimal` is an unused placeholder.
+    PosInf,
+    /// `-Infinity`.
+    NegInf,
+    /// `NaN` (quiet).
+    Nan,
+}
+
+impl DecimalKind {
+    #[must_use]
+    pub const fn is_nan(self) -> bool {
+        matches!(self, Self::Nan)
+    }
+    #[must_use]
+    pub const fn is_infinite(self) -> bool {
+        matches!(self, Self::PosInf | Self::NegInf)
+    }
+    #[must_use]
+    pub const fn is_special(self) -> bool {
+        matches!(self, Self::PosInf | Self::NegInf | Self::Nan)
+    }
+    /// The CPython `str`/`repr` spelling of a special value, or `None` when finite.
+    #[must_use]
+    pub const fn special_str(self) -> Option<&'static str> {
+        match self {
+            Self::PosInf => Some("Infinity"),
+            Self::NegInf => Some("-Infinity"),
+            Self::Nan => Some("NaN"),
+            _ => None,
+        }
+    }
+}
+
 /// What a [`Value::Lazy`] cursor was produced by, carried inline so
 /// `type(x).__name__`/`repr` reflect CPython's distinct iterator types
 /// (`map`, `filter`, `chain`, ...) without a state lookup. `Generator` is
@@ -833,12 +875,12 @@ pub enum Value {
     /// binary-float roundoff). Boxed because `BigDecimal` is large
     /// (~48 bytes) and would inflate every `Value` slot otherwise.
     ///
-    /// The `bool` is the negative-zero flag: `bigdecimal` cannot represent
-    /// `-0` (a zero mantissa is signless), yet CPython's `Decimal('-0.0')`
-    /// keeps its sign for `str`/`repr`. The flag is only ever `true` when
-    /// the value is zero, and it participates in neither equality nor
-    /// hashing (`-0 == 0` and they share a hash, as in CPython).
-    Decimal(Box<bigdecimal::BigDecimal>, bool),
+    /// The [`DecimalKind`] carries what `bigdecimal` cannot represent: the
+    /// negative-zero sign (`Decimal('-0.0')`) and the special values
+    /// `Infinity` / `-Infinity` / `NaN` (for those the `BigDecimal` is an
+    /// unused zero placeholder). `Normal`/`NegZero` share equality and hashing
+    /// for zero (`-0 == 0`), matching CPython.
+    Decimal(Box<bigdecimal::BigDecimal>, DecimalKind),
     /// `fractions.Fraction` — auto-simplifying rational (numerator /
     /// denominator). `BigRational` keeps arbitrary precision so
     /// LCM-driven addition does not overflow. Boxed for the same
@@ -2253,7 +2295,8 @@ impl Value {
             // Decimal / Fraction are falsy at zero, matching CPython
             // (`bool(Decimal("0")) is False`, `bool(Fraction(0)) is
             // False`).
-            Self::Decimal(d, _) => !d.is_zero(),
+            // Infinity / NaN are truthy; a finite Decimal is truthy iff nonzero.
+            Self::Decimal(d, kind) => kind.is_special() || !d.is_zero(),
             Self::Fraction(f) => !f.numer().is_zero(),
             // `bool(complex)` is False only when both parts are zero.
             Self::Complex(c) => c.re != 0.0 || c.im != 0.0,
@@ -2896,7 +2939,7 @@ impl fmt::Display for Value {
             // (no exponent unless the input used one). BigDecimal's
             // Display matches that for our use; we strip its scientific-
             // notation tail when the value is finite and small enough.
-            Self::Decimal(d, neg_zero) => format_decimal_str(f, d, *neg_zero),
+            Self::Decimal(d, kind) => format_decimal_str(f, d, *kind),
             // CPython `str(Fraction(n, d))` returns `n/d` (or just `n`
             // when d == 1). BigRational's Display already produces this
             // shape with a guaranteed positive denominator.
@@ -2984,15 +3027,20 @@ impl fmt::Display for Value {
 fn format_decimal_str(
     f: &mut fmt::Formatter<'_>,
     d: &bigdecimal::BigDecimal,
-    neg_zero: bool,
+    kind: DecimalKind,
 ) -> fmt::Result {
     use num_traits::Signed as _;
+    // Infinity / -Infinity / NaN spell out directly (the BigDecimal is a
+    // placeholder for those).
+    if let Some(special) = kind.special_str() {
+        return write!(f, "{special}");
+    }
     // value == mantissa * 10^(-scale); CPython's exponent is `-scale` and the
     // coefficient is the mantissa's absolute-value digit string.
     let (mantissa, scale) = d.as_bigint_and_exponent();
-    // `neg_zero` is only ever set on a zero value; it restores the leading
-    // sign that `bigdecimal` drops (`str(Decimal('-0.0'))` is `-0.0`).
-    let negative = mantissa.is_negative() || neg_zero;
+    // `NegZero` restores the leading sign that `bigdecimal` drops on a zero
+    // value (`str(Decimal('-0.0'))` is `-0.0`).
+    let negative = mantissa.is_negative() || kind == DecimalKind::NegZero;
     let digits = mantissa.abs().to_string();
     let exp: i64 = -scale;
     let sign = if negative { "-" } else { "" };
@@ -3564,7 +3612,7 @@ impl ValueKey {
             }
             // A non-integral decimal key is never a negative zero (zero is
             // integer-valued and folds to Int), so the neg-zero flag is false.
-            Self::Decimal(d) => Value::Decimal(d.clone(), false),
+            Self::Decimal(d) => Value::Decimal(d.clone(), DecimalKind::Normal),
             Self::Fraction(fr) => Value::Fraction(fr.clone()),
         }
     }

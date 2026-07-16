@@ -1144,7 +1144,7 @@ pub async fn apply_unaryop(
             // context and yields *positive* zero for any zero operand
             // (`-Decimal('0')` and `-Decimal('-0.0')` both print `0`) — unlike
             // `copy_negate`. So the result is never neg-zero.
-            Value::Decimal(d, _) => Ok(Value::Decimal(Box::new(-(*d.clone())), false)),
+            Value::Decimal(d, k) => Ok(crate::eval::modules::decimal::neg_decimal(d, *k)),
             Value::Fraction(fr) => Ok(Value::Fraction(Box::new(-(*fr.clone())))),
             // `-Counter` negates every count and keeps the now-positive ones
             // (CPython's `Counter.__neg__`).
