@@ -574,7 +574,14 @@ fn div_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
     let l = to_float(left)?;
     let r = to_float(right)?;
     if r == 0.0 {
-        return Err(crate::value::ExceptionValue::zero_division_error("division by zero").into());
+        // CPython names the operand kind: `10/0` is "division by zero" but a
+        // float operand makes it "float division by zero".
+        let msg = if either_is_float(left, right) {
+            "float division by zero"
+        } else {
+            "division by zero"
+        };
+        return Err(crate::value::ExceptionValue::zero_division_error(msg).into());
     }
     Ok(Value::Float(l / r))
 }
@@ -584,9 +591,10 @@ fn floordiv_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         let l = to_float(left)?;
         let r = to_float(right)?;
         if r == 0.0 {
-            return Err(
-                crate::value::ExceptionValue::zero_division_error("division by zero").into()
-            );
+            return Err(crate::value::ExceptionValue::zero_division_error(
+                "float floor division by zero",
+            )
+            .into());
         }
         Ok(Value::Float((l / r).floor()))
     } else {
@@ -652,7 +660,9 @@ fn mod_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         let l = to_float(left)?;
         let r = to_float(right)?;
         if r == 0.0 {
-            return Err(crate::value::ExceptionValue::zero_division_error("modulo by zero").into());
+            // CPython's `%`-by-zero message is operator-specific ("float modulo"
+            // / "integer modulo by zero"), distinct from `//`'s.
+            return Err(crate::value::ExceptionValue::zero_division_error("float modulo").into());
         }
         // Python modulo: result has same sign as divisor
         Ok(Value::Float(r.mul_add(-(l / r).floor(), l)))
@@ -661,7 +671,7 @@ fn mod_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         if let (Value::Int(a), Value::Int(b)) = (left, right) {
             if *b == 0 {
                 return Err(crate::value::ExceptionValue::zero_division_error(
-                    "integer division or modulo by zero",
+                    "integer modulo by zero",
                 )
                 .into());
             }
@@ -676,7 +686,7 @@ fn mod_values(left: &Value, right: &Value) -> Result<Value, EvalError> {
         let r = to_bigint(right)?;
         if r.is_zero() {
             return Err(crate::value::ExceptionValue::zero_division_error(
-                "integer division or modulo by zero",
+                "integer modulo by zero",
             )
             .into());
         }
@@ -817,7 +827,16 @@ fn pow_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, E
             let c = num_complex::Complex64::new(len * phase.cos(), len * phase.sin());
             return Ok(Value::Complex(Box::new(c)));
         }
-        Ok(Value::Float(l.powf(r)))
+        // Unlike `*` (which yields `inf`), CPython's float `**` raises
+        // OverflowError when a finite base/exponent overflows the result.
+        let result = l.powf(r);
+        if result.is_infinite() && l.is_finite() && r.is_finite() {
+            return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                "OverflowError",
+                "(34, 'Result too large')",
+            )));
+        }
+        Ok(Value::Float(result))
     } else {
         let l = crate::value::value_as_bigint(left).ok_or_else(|| {
             InterpreterError::TypeError(format!(
