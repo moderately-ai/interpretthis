@@ -16,12 +16,55 @@
 //! semantics.
 
 use crate::{
-    error::{EvalResult, InterpreterError},
-    value::Value,
+    error::{EvalError, EvalResult, InterpreterError},
+    value::{ExceptionValue, Value},
 };
 
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "auto")
+    matches!(name, "auto" | "unique")
+}
+
+/// `@unique` — a class decorator that raises `ValueError` if two members share a
+/// value (aliases), matching CPython. Returns the class unchanged otherwise.
+fn enum_unique(state: &crate::state::InterpreterState, args: &[Value]) -> EvalResult {
+    let Some(cls) = args.first() else {
+        return Err(InterpreterError::TypeError(
+            "unique() missing 1 required positional argument".into(),
+        )
+        .into());
+    };
+    let Value::Class(name) = cls else {
+        return Err(InterpreterError::TypeError(format!(
+            "{} is not an enum class",
+            cls.type_name()
+        ))
+        .into());
+    };
+    if let Some(class) = state.classes.get(name) {
+        let mut seen: rustc_hash::FxHashMap<crate::value::ValueKey, String> =
+            rustc_hash::FxHashMap::default();
+        let mut dups: Vec<String> = Vec::new();
+        for member in &class.enum_members {
+            let value = match class.class_attrs.get(member) {
+                Some(Value::EnumMember { value, .. }) => (**value).clone(),
+                Some(v) => v.clone(),
+                None => continue,
+            };
+            let Ok(key) = crate::eval::literals::value_to_key(&value) else { continue };
+            if let Some(canonical) = seen.get(&key) {
+                dups.push(format!("{member} -> {canonical}"));
+            } else {
+                seen.insert(key, member.clone());
+            }
+        }
+        if !dups.is_empty() {
+            return Err(EvalError::Exception(ExceptionValue::new(
+                "ValueError",
+                format!("duplicate values found in <enum '{name}'>: {}", dups.join(", ")),
+            )));
+        }
+    }
+    Ok(cls.clone())
 }
 
 /// The sentinel value `auto()` returns, replaced during enum class
@@ -86,12 +129,15 @@ impl crate::eval::modules::Module for EnumModule {
     }
     async fn call(
         &self,
-        _state: &mut crate::state::InterpreterState,
+        state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
         _kwargs: &indexmap::IndexMap<String, Value>,
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
+        if func == "unique" {
+            return enum_unique(state, args);
+        }
         call(func, args)
     }
 }
