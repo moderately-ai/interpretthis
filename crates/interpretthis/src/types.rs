@@ -2682,6 +2682,15 @@ fn frexp(v: f64) -> (f64, i32) {
 )]
 fn fallback_hash_slot(value: &Value) -> Result<i64, EvalError> {
     use std::hash::{Hash as _, Hasher as _};
+    // str/bytes/tuple/frozenset/temporals hash bit-for-bit like CPython (under
+    // PYTHONHASHSEED=0) via `python_hash`, so `hash("x")`, `hash((1, 2))`, etc.
+    // match the reference interpreter. It already applies CPython's `-1 → -2`
+    // finalization, so return its result directly (no `finalize_hash`).
+    if let Some(h) = crate::pyhash::python_hash(value) {
+        return Ok(h);
+    }
+    // `python_hash` returns None only for a container holding an element it does
+    // not cover (e.g. `(SomeInstance,)`); fall back to the structural key hash.
     // A container whose TypeObject says it is hashable (a tuple) may still hold
     // an unhashable element — `hash((1, [2]))`. `value_to_key` recurses and
     // raises `TypeError: unhashable type` on that inner element; propagate it
