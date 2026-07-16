@@ -519,9 +519,14 @@ fn domain_pos(func: &str, args: &[Value]) -> Result<f64, EvalError> {
 }
 
 fn factorial(arg: &Value) -> EvalResult {
+    use num_bigint::BigInt;
+    // CPython returns an arbitrary-precision integer (`factorial(30)` is a
+    // 33-digit number), so accumulate in BigInt and normalize back to a
+    // machine int when it fits — consistent with `math.perm`/`math.comb`.
     let n = match arg {
-        Value::Int(i) => *i,
-        Value::Bool(b) => i64::from(*b),
+        Value::Int(i) => BigInt::from(*i),
+        Value::Bool(b) => BigInt::from(i64::from(*b)),
+        Value::BigInt(b) => (**b).clone(),
         // CPython 3.12: `factorial(2.5)` raises TypeError, not
         // ValueError. The float is wrong-type, not out-of-range.
         Value::Float(_) => {
@@ -534,15 +539,16 @@ fn factorial(arg: &Value) -> EvalResult {
             )));
         }
     };
-    if n < 0 {
+    if n.sign() == num_bigint::Sign::Minus {
         return Err(value_error("factorial() not defined for negative values"));
     }
-    let mut result: i64 = 1;
-    for k in 2..=n {
-        result =
-            result.checked_mul(k).ok_or_else(|| value_error("factorial() result overflows"))?;
+    let mut result = BigInt::from(1u32);
+    let mut k = BigInt::from(2u32);
+    while k <= n {
+        result *= &k;
+        k += 1u32;
     }
-    Ok(Value::Int(result))
+    Ok(crate::value::int_from_bigint(result))
 }
 
 /// `math` module registration.
