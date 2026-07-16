@@ -54,16 +54,12 @@ pub(crate) fn generator_suspendable(stmts: &[Stmt]) -> bool {
 /// nested loop/`with`/`match`, a tuple-target `for`, a `for`/`while` with an
 /// `else` — falls back to the eager buffer, correct for finite generators.
 fn top_level_suspendable(stmt: &Stmt) -> bool {
-    use rustpython_parser::ast::{ExceptHandler, Expr};
+    use rustpython_parser::ast::ExceptHandler;
     if !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)) {
         return true;
     }
     match stmt {
-        Stmt::For(f) => {
-            matches!(f.target.as_ref(), Expr::Name(_))
-                && f.orelse.is_empty()
-                && loop_body_suspendable(&f.body)
-        }
+        Stmt::For(f) => for_loop_suspendable(f),
         Stmt::While(w) => w.orelse.is_empty() && loop_body_suspendable(&w.body),
         Stmt::If(n) => if_branch_suspendable(&n.body) && if_branch_suspendable(&n.orelse),
         Stmt::Try(t) => {
@@ -100,7 +96,15 @@ fn top_level_suspendable(stmt: &Stmt) -> bool {
 /// `if` stepper handles it — hence the `if` branches use `if_branch_suspendable`.)
 fn loop_body_suspendable(stmts: &[Stmt]) -> bool {
     stmts.iter().all(|stmt| match stmt {
-        Stmt::If(node) => if_branch_suspendable(&node.body) && if_branch_suspendable(&node.orelse),
+        // A nested `if` recurses *strictly* into `loop_body_suspendable` (not
+        // `if_branch_suspendable`), because the generator frame can suspend at
+        // most one loop at a time: `for_stack`'s resume slot is single-loop and
+        // `while_resume` is one field. If a nested `if`/`try` inside this loop
+        // body were allowed to carry a yielding `for`/`while`, stepping it would
+        // suspend a second loop while this one is live and corrupt the resume
+        // state (observed as an infinite re-yield). So no yielding loop may
+        // appear anywhere transitively inside a loop body.
+        Stmt::If(node) => loop_body_suspendable(&node.body) && loop_body_suspendable(&node.orelse),
         Stmt::For(_)
         | Stmt::While(_)
         | Stmt::With(_)
@@ -109,6 +113,25 @@ fn loop_body_suspendable(stmts: &[Stmt]) -> bool {
         | Stmt::Match(_) => !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)),
         _ => true,
     })
+}
+
+/// The bare-name loop target of a `for`, or `None` for a tuple/attribute
+/// target. `run_for_suspendable` tracks resume state per target name, so only a
+/// bare-name `for` can be suspended; other shapes fall back to the eager buffer.
+fn for_name_target(f: &rustpython_parser::ast::StmtFor) -> Option<&str> {
+    match f.target.as_ref() {
+        rustpython_parser::ast::Expr::Name(t) => Some(t.id.as_str()),
+        _ => None,
+    }
+}
+
+/// A yield-bearing `for` that `run_for_suspendable` can suspend and resume: a
+/// bare-name target, no `else` clause, and a loop-suspendable body (yields only
+/// in direct statements or a nested `if`). Any other shape forces the eager
+/// buffer. Shared by every stepper that steps a `for` (`run_generator_body`,
+/// `step_try_phase`, `step_with_body`, `run_if_suspendable`).
+fn for_loop_suspendable(f: &rustpython_parser::ast::StmtFor) -> bool {
+    for_name_target(f).is_some() && f.orelse.is_empty() && loop_body_suspendable(&f.body)
 }
 
 /// Yields inside an `if` branch or `try` phase can be suspended by the `if`
@@ -129,16 +152,21 @@ fn if_branch_suspendable(stmts: &[Stmt]) -> bool {
                     if_branch_suspendable(&eh.body)
                 })
         }
-        // `step_try_phase` steps a yield-bearing `while` through its loop
-        // stepper (see the arm there), so a `while` may carry a yield as long as
-        // its own body is loop-suspendable and it has no `else` clause. (`for`
-        // is not yet delegated — its position-based resume doesn't survive the
-        // try re-entry — so it stays on the eager fallback.)
+        // `step_try_phase`/`step_with_body`/`run_if_suspendable` step a
+        // yield-bearing `while` or `for` through its own loop stepper (see the
+        // arms there), so either may carry a yield as long as it has a
+        // suspendable shape. The `for`'s position-based resume survives the
+        // parent re-entry because the parent's resume record routes back into
+        // `run_for_suspendable`, which restores its slot from `for_stack`.
         Stmt::While(w) => {
             !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
                 || (w.orelse.is_empty() && loop_body_suspendable(&w.body))
         }
-        Stmt::For(_) | Stmt::With(_) | Stmt::TryStar(_) | Stmt::Match(_) => {
+        Stmt::For(f) => {
+            !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
+                || for_loop_suspendable(f)
+        }
+        Stmt::With(_) | Stmt::TryStar(_) | Stmt::Match(_) => {
             !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt))
         }
         _ => true,
@@ -605,17 +633,12 @@ async fn run_generator_body(
     stmt_index: &mut usize,
     tools: &crate::tools::Tools,
 ) -> Result<(), EvalError> {
-    // Resume an open for-loop before advancing top-level statements.
-    if let Some(&id) = state.active_generator_stack.last() {
-        if let Some(frame) = state.generators.get(&id) {
-            if let Some(fs) = frame.for_stack.last() {
-                if !fs.target.is_empty() {
-                    return resume_for(state, tools).await;
-                }
-            }
-        }
-    }
-
+    // A suspended top-level `for` leaves `stmt_index` pointing at the `for`
+    // statement itself, so the `Stmt::For` arm below re-enters and resumes it
+    // via `for_stack` — then advances to the statements after the loop. A `for`
+    // suspended inside a `try`/`if`/`with` is resumed through that parent
+    // stepper (its resume record routes back into `run_for_suspendable`), not
+    // here.
     while *stmt_index < body.len() {
         let stmt = &body[*stmt_index];
         // Special-case top-level for with simple name target for suspend.
@@ -1282,6 +1305,10 @@ async fn step_with_body(
             {
                 (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
             }
+            Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+                let target = for_name_target(f).unwrap_or_default().to_string();
+                (run_for_suspendable(state, f, &target, tools).await.map(|()| Value::None), true)
+            }
             Stmt::With(w) if stmt_yields && if_branch_suspendable(&w.body) => {
                 (run_with_suspendable(state, w, tools).await.map(|()| Value::None), true)
             }
@@ -1368,11 +1395,22 @@ async fn run_if_suspendable_inner(
 
     let mut i = start;
     while i < branch.len() {
+        let stmt_yields =
+            super::definitions::contains_yield_stmts(std::slice::from_ref(&branch[i]));
         let (result, nested) = match &branch[i] {
             Stmt::Try(t) => {
                 (run_try_suspendable(state, t, tools).await.map(|()| Value::None), true)
             }
             Stmt::If(n) => (run_if_suspendable(state, n, tools).await.map(|()| Value::None), true),
+            Stmt::While(w)
+                if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
+            {
+                (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
+            }
+            Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+                let target = for_name_target(f).unwrap_or_default().to_string();
+                (run_for_suspendable(state, f, &target, tools).await.map(|()| Value::None), true)
+            }
             _ => (eval_stmt(state, &branch[i], tools).await, false),
         };
         match result {
@@ -1429,14 +1467,19 @@ async fn step_try_phase(
                 (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
             }
             // A yield-bearing loop inside the `try` steps through its own loop
-            // stepper so `try: while True: yield` (cleanup generators) suspends
-            // at the yield. Safe because its loop body cannot nest another
-            // same-shape loop with a yield (`loop_body_suspendable`), so the
-            // single `while_resume`/for-resume field never conflicts.
+            // stepper so `try: while True: yield` / `try: for x in it: yield x`
+            // (cleanup generators) suspends at the yield rather than eagerly
+            // draining the loop and running `finally` too early. On resume the
+            // `try`'s own resume record re-enters this arm, which restores the
+            // loop from `while_resume`/`for_stack`.
             Stmt::While(w)
                 if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
             {
                 (run_while_suspendable(state, w, tools).await.map(|()| Value::None), true)
+            }
+            Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+                let target = for_name_target(f).unwrap_or_default().to_string();
+                (run_for_suspendable(state, f, &target, tools).await.map(|()| Value::None), true)
             }
             _ => (eval_stmt(state, &stmts[i], tools).await, false),
         };
@@ -1563,35 +1606,6 @@ async fn finish_try(
         TryStep::Completed => pending.map_or(Ok(()), Err),
         TryStep::Errored(e) => Err(e),
     }
-}
-
-async fn resume_for(
-    state: &mut InterpreterState,
-    tools: &crate::tools::Tools,
-) -> Result<(), EvalError> {
-    // Re-enter the current top-level for statement via stmt_index.
-    let (body, stmt_index) = {
-        let id = state
-            .active_generator_stack
-            .last()
-            .copied()
-            .ok_or_else(|| InterpreterError::Runtime("no active generator".into()))?;
-        let frame = state
-            .generators
-            .get(&id)
-            .ok_or_else(|| InterpreterError::Runtime("generator frame missing".into()))?;
-        (frame.body.clone(), frame.stmt_index)
-    };
-    if stmt_index >= body.len() {
-        return Ok(());
-    }
-    if let Stmt::For(for_node) = &body[stmt_index] {
-        if let rustpython_parser::ast::Expr::Name(t) = for_node.target.as_ref() {
-            let target = t.id.as_str().to_string();
-            return run_for_suspendable(state, for_node, &target, tools).await;
-        }
-    }
-    Ok(())
 }
 
 /// Single-step a `Value::BuiltinIter` (the infinite `itertools`

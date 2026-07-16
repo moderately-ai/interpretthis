@@ -54,7 +54,7 @@ print(a.send(10))
 print(a.send(20))
 a.close()
 
-# A bounded for inside try still works (eager path) with finally.
+# A bounded for inside try suspends at each yield and runs finally on exit.
 def bounded():
     try:
         for i in range(3):
