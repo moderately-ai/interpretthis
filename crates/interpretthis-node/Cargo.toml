@@ -39,10 +39,6 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true }
 num-bigint = { workspace = true }
-# Grows the native stack on demand so deep value conversion hits the depth
-# limit (a clean error) rather than overflowing the stack and aborting the
-# host process — the same crate and reason as the core evaluator.
-stacker = { workspace = true }
 tokio = { workspace = true }
 
 [build-dependencies]

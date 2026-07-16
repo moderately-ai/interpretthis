@@ -579,7 +579,6 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "num-bigint",
- "stacker",
  "tokio",
 ]
 
@@ -598,7 +597,6 @@ dependencies = [
  "num-rational",
  "pyo3",
  "pyo3-async-runtimes",
- "stacker",
  "tokio",
 ]
 

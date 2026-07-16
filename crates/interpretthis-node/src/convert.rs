@@ -71,19 +71,14 @@ fn type_error(message: String) -> Error {
     Error::new(Status::InvalidArg, message)
 }
 
-/// Maximum nesting depth when converting a value across the FFI boundary.
-/// Matches the interpreter's `max_recursion_depth` default. A cyclic value
-/// (`a = []; a.push(a)`, constructible inside the sandbox) or a pathologically
-/// deep one would otherwise recurse until the native stack overflows and
-/// *aborts the host process*; this bound turns that into a clean error.
-const MAX_CONVERT_DEPTH: usize = 1000;
-
-/// The depth guard bounds *how many* frames recurse; `stacker` ensures those
-/// frames have stack to run in. Without it, the legal (bounded) recursion
-/// overflows the thread's base stack long before reaching `MAX_CONVERT_DEPTH`
-/// — the same crate and constants the core evaluator uses.
-const CONVERT_STACK_RED_ZONE: usize = 1024 * 1024;
-const CONVERT_STACK_GROW: usize = 32 * 1024 * 1024;
+/// Maximum nesting depth when converting a value across the FFI boundary. A
+/// cyclic value (`a = []; a.push(a)`, constructible inside the sandbox) or a
+/// pathologically deep one would otherwise recurse until the native stack
+/// overflows and *aborts the host process*; this bound turns that into a clean
+/// error. Kept well below what a normal thread stack holds so the guard needs
+/// no stack-growth machinery — `stacker` is unreliable on musl (it probes the
+/// stack via glibc's `pthread_getattr_np`) and crashed the addon on Alpine.
+const MAX_CONVERT_DEPTH: usize = 256;
 
 thread_local! {
     static CONVERT_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -173,9 +168,7 @@ impl ToNapiValue for SandboxValue {
 /// error into a wrong answer somewhere downstream.
 pub fn value_to_js<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>> {
     let _depth = DepthGuard::enter()?;
-    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || {
-        value_to_js_inner(env, value)
-    })
+    value_to_js_inner(env, value)
 }
 
 fn value_to_js_inner<'env>(env: &'env Env, value: &Value) -> Result<Unknown<'env>> {
@@ -422,9 +415,7 @@ impl FromNapiValue for SandboxValue {
 /// symbols, class instances), and for unhashable dict keys.
 pub fn js_to_value(env: &Env, value: Unknown<'_>) -> Result<Value> {
     let _depth = DepthGuard::enter()?;
-    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || {
-        js_to_value_inner(env, value)
-    })
+    js_to_value_inner(env, value)
 }
 
 fn js_to_value_inner(env: &Env, value: Unknown<'_>) -> Result<Value> {

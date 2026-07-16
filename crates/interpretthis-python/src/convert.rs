@@ -41,20 +41,15 @@ use pyo3::{
     },
 };
 
-/// Maximum nesting depth when converting a value across the FFI boundary.
-/// Matches the interpreter's `max_recursion_depth` default. A cyclic value
-/// (`a = []; a.append(a)`, constructible inside the sandbox) or a
+/// Maximum nesting depth when converting a value across the FFI boundary. A
+/// cyclic value (`a = []; a.append(a)`, constructible inside the sandbox) or a
 /// pathologically deep one would otherwise recurse until the native stack
 /// overflows and *aborts the host process*; this bound turns that into a clean
-/// `TypeError` at the boundary.
-const MAX_CONVERT_DEPTH: usize = 1000;
-
-/// The depth guard bounds *how many* frames recurse; `stacker` ensures those
-/// frames have stack to run in. Without it, the legal (bounded) recursion
-/// overflows the thread's base stack long before reaching `MAX_CONVERT_DEPTH`
-/// — the same crate and constants the core evaluator uses.
-const CONVERT_STACK_RED_ZONE: usize = 1024 * 1024;
-const CONVERT_STACK_GROW: usize = 32 * 1024 * 1024;
+/// `TypeError`. Kept well below what a normal thread stack holds so the guard
+/// itself needs no stack-growth machinery — `stacker` is unreliable on musl
+/// (it probes the stack via glibc's `pthread_getattr_np`), and a host↔sandbox
+/// value nested past this is already pathological.
+const MAX_CONVERT_DEPTH: usize = 256;
 
 thread_local! {
     static CONVERT_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -121,7 +116,7 @@ fn unsupported_inbound(ob: &Bound<'_, PyAny>) -> PyErr {
 /// classes, instances, generators, pending tool proxies, ...).
 pub fn value_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
     let _depth = DepthGuard::enter()?;
-    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || value_to_py_inner(py, value))
+    value_to_py_inner(py, value)
 }
 
 fn value_to_py_inner<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
@@ -249,7 +244,7 @@ fn value_to_py_inner<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py,
 /// unhashable dict/set keys.
 pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     let _depth = DepthGuard::enter()?;
-    stacker::maybe_grow(CONVERT_STACK_RED_ZONE, CONVERT_STACK_GROW, || py_to_value_inner(ob))
+    py_to_value_inner(ob)
 }
 
 fn py_to_value_inner(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
