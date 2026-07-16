@@ -1793,6 +1793,8 @@ fn format_percent_conversion(value: &Value, spec: &PercentSpec) -> EvalResult {
         })?),
         's' => Value::String(format!("{value}").into()),
         'r' => Value::String(value.repr().into()),
+        // `%a` is `ascii(value)`: repr with every non-ASCII code point escaped.
+        'a' => Value::String(crate::eval::render::ascii_escape(&value.repr()).into()),
         _ => {
             return Err(InterpreterError::ValueError(format!(
                 "unsupported format character '{}'",
@@ -1804,6 +1806,8 @@ fn format_percent_conversion(value: &Value, spec: &PercentSpec) -> EvalResult {
 
     let type_char = match spec.conv {
         'i' | 'u' => 'd',
+        // `%a`'s ascii-escaped repr is already a string; format it as one.
+        'a' => 's',
         other => other,
     };
     apply_format_spec(&coerced, &build_brace_spec(spec, type_char))

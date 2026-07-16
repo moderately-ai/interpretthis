@@ -363,7 +363,7 @@ fn render_dataclass(
     out
 }
 
-fn ascii_escape(s: &str) -> String {
+pub(crate) fn ascii_escape(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
