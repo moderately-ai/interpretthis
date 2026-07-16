@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] — 2026-07-16
+## [0.4.1] — 2026-07-16
 
 The debut of the Python (PyPI) and Node (npm) bindings, wrapped in a hardening
 and parity pass for embedding: sandbox-constructible input can no longer abort or
@@ -13,6 +13,11 @@ OOM the host, list/dict memory sizing is O(1) per assignment, and a batch of
 CPython parity gaps (Decimal/Fraction/typing) is closed — with no new
 host-boundary surface. The repository also became a Cargo workspace to house the
 binding crates.
+
+(0.4.0 was published to crates.io and immediately yanked: a transitive build
+dependency raised the true MSRV above its declared 1.85, and its float `**`
+overflow message was macOS-specific. Both are fixed here; 0.4.1 is the first
+release across all three registries.)
 
 ### Security / robustness
 
@@ -109,6 +114,11 @@ binding crates.
 - ASCII decode errors now carry CPython's full detail
   (`'ascii' codec can't decode byte 0xNN in position P: ordinal not in range(128)`)
   instead of a truncated message.
+- Minimum supported Rust is now **1.88** (a transitive build dependency,
+  `ar_archive_writer` via `stacker`, requires `let`-chains).
+- The float `**` overflow `OverflowError` message is now derived from the OS
+  `strerror(ERANGE)` like CPython, so it matches on glibc (`Numerical result out
+  of range`) as well as macOS (`Result too large`).
 
 ## [0.3.0] — 2026-07-09
 
@@ -208,7 +218,7 @@ for untrusted and LLM-generated code.
 - Not an embedded CPython; language surface is intentional — see
   [`CONFORMANCE.md`](./CONFORMANCE.md) and [`THREAT_MODEL.md`](./THREAT_MODEL.md).
 
-[0.4.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.4.0
+[0.4.1]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.4.1
 [0.3.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.3.0
 [0.2.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.2.0
 [0.1.0]: https://github.com/moderately-ai/interpretthis/releases/tag/v0.1.0
