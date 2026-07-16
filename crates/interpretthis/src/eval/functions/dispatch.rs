@@ -52,6 +52,38 @@ pub(crate) fn grow_stack<'a, T: 'a>(
 }
 
 /// Call a user-defined function. The heavy recursion runs behind
+/// Invoke a captured `str.format` / `str.format_map` bound method against
+/// `template`. These run the async format mini-language, so they can't go
+/// through the sync `dispatch_method` table the other str methods use — this is
+/// the same resolution `"...".format(...)` takes in the method-call path.
+async fn bound_str_format(
+    state: &mut InterpreterState,
+    template: &str,
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> EvalResult {
+    if method == "format" {
+        return crate::eval::strings::str_format(state, template, args, kwargs, tools).await;
+    }
+    // format_map: the single mapping argument supplies the keyword fields.
+    let mapping = args.first().and_then(Value::as_dict).ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(
+            "format_map() requires a mapping argument".into(),
+        ))
+    })?;
+    let kw: IndexMap<String, Value> = mapping
+        .lock()
+        .iter()
+        .filter_map(|(k, v)| match k {
+            crate::value::ValueKey::String(s) => Some((s.as_str().to_string(), v.clone())),
+            _ => None,
+        })
+        .collect();
+    crate::eval::strings::str_format(state, template, &[], &kw, tools).await
+}
+
 /// [`grow_stack`] so deep Python recursion doesn't overflow the host
 /// stack (see its docs).
 pub(crate) async fn call_user_function(
@@ -605,6 +637,16 @@ pub(crate) async fn call_value_as_function(
                         ))
                         .await;
                     }
+                    // `str.format` / `format_map` are async (they run the format
+                    // mini-language), so the sync `dispatch_method` table omits
+                    // them — a captured bound method (`f = "{}".format; f(x)`,
+                    // `map("n={}".format, xs)`) must route to the async formatter.
+                    if let Value::String(template) = &**value {
+                        if matches!(method.as_str(), "format" | "format_map") {
+                            return bound_str_format(state, template, method, args, kwargs, tools)
+                                .await;
+                        }
+                    }
                     let mut recv = (**value).clone();
                     Ok(dispatch_method(&mut recv, method, args, kwargs)?.value)
                 }
@@ -647,6 +689,25 @@ pub(crate) async fn call_value_as_function(
                             state, &recv, method, args, kwargs, tools,
                         )
                         .await;
+                    }
+                    // Async `str.format`/`format_map` on a place-captured str.
+                    if matches!(method.as_str(), "format" | "format_map") {
+                        let template = {
+                            let root_slot = state.variables.get_mut(root).ok_or_else(|| {
+                                EvalError::from(InterpreterError::name_not_defined(root))
+                            })?;
+                            with_navigate_mut(root_slot, &pl_steps, |target| {
+                                if let Value::String(s) = target {
+                                    Some(s.to_string())
+                                } else {
+                                    None
+                                }
+                            })?
+                        };
+                        if let Some(template) = template {
+                            return bound_str_format(state, &template, method, args, kwargs, tools)
+                                .await;
+                        }
                     }
                     let outcome = {
                         let root_slot = state.variables.get_mut(root).ok_or_else(|| {
