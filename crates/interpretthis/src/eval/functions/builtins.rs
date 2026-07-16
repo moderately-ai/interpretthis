@@ -819,18 +819,17 @@ pub(super) async fn try_builtin(
             }
         }
         "vars" => {
-            // Bounded, instance-only. `vars(obj)` returns a *copy* of the
-            // instance's fields — every value is already reachable via
-            // getattr(obj, name), and field keys provably can never be a blocked
-            // dunder (the attribute-write paths validate names), so this exposes
-            // nothing new. Keys are re-filtered through validate_attribute as
-            // defence-in-depth against any future unguarded field-write path.
+            // `vars(obj)` returns a *copy* of the object's namespace as a dict.
+            // The sandbox boundary is about not leaking OUTSIDE to the host: an
+            // instance's fields and a class's own namespace are all in-sandbox
+            // values already reachable via `getattr(obj, name)` / `Cls.name`, and
+            // NONE of the escape primitives (`__subclasses__` / `__globals__` /
+            // `__code__` / host modules) are reachable through them, so exposing
+            // them grants no path out. Keys are re-filtered through
+            // validate_attribute as defence-in-depth.
             //
-            // Deliberately NARROWER than CPython: the no-arg form (== locals()),
-            // and the module / class / type forms are rejected. Those would
-            // re-expose scope bindings or the class-walk chain (bases / mro /
-            // methods) that BLOCKED_ATTRIBUTES exists to hide. locals/globals
-            // stay on the security denylist.
+            // Still NARROWER than CPython for the no-arg form (== locals()), which
+            // would re-expose the live scope bindings — kept on the denylist.
             check_arg_count(name, args, 0, 1)?;
             let Some(arg) = args.first() else {
                 return Err(InterpreterError::TypeError(
@@ -839,20 +838,64 @@ pub(super) async fn try_builtin(
                 .into());
             };
             let obj = resolve_proxy(arg).await?;
-            let Value::Instance(inst) = obj else {
-                return Err(InterpreterError::TypeError(
-                    "vars() argument must have __dict__ attribute".into(),
-                )
-                .into());
-            };
-            let snapshot = inst.fields.lock().clone();
-            let mut map = indexmap::IndexMap::new();
-            for (k, v) in snapshot {
-                if crate::security::validator::validate_attribute(&k).is_err() {
-                    continue;
+            let map = match obj {
+                Value::Instance(inst) => {
+                    let snapshot = inst.fields.lock().clone();
+                    let mut map = indexmap::IndexMap::new();
+                    for (k, v) in snapshot {
+                        if crate::security::validator::validate_attribute(&k).is_err() {
+                            continue;
+                        }
+                        map.insert(crate::value::ValueKey::String(k.as_str().into()), v);
+                    }
+                    map
                 }
-                map.insert(crate::value::ValueKey::String(k.as_str().into()), v);
-            }
+                // `vars(Cls)` — the class's own namespace (attrs + methods +
+                // static/class methods + properties). Order follows the stored
+                // BTreeMaps (sorted), so `.get(name)` / `name in vars(Cls)` /
+                // key-set ops match CPython; a full `print(vars(Cls))` differs in
+                // key order and function reprs (addresses), as it does for any
+                // instance repr.
+                Value::Class(class_name) => {
+                    let Some(class) = state.classes.get(&class_name) else {
+                        return Err(InterpreterError::name_not_defined(&class_name).into());
+                    };
+                    let mut map = indexmap::IndexMap::new();
+                    let ins = |map: &mut indexmap::IndexMap<crate::value::ValueKey, Value>,
+                               k: &str,
+                               v: Value| {
+                        if crate::security::validator::validate_attribute(k).is_ok() {
+                            map.insert(crate::value::ValueKey::String(k.into()), v);
+                        }
+                    };
+                    for (k, v) in &class.class_attrs {
+                        ins(&mut map, k, v.clone());
+                    }
+                    for (k, def) in &class.methods {
+                        ins(&mut map, k, Value::Function(std::sync::Arc::new(def.clone())));
+                    }
+                    for (k, def) in &class.static_methods {
+                        ins(&mut map, k, Value::Function(std::sync::Arc::new(def.clone())));
+                    }
+                    for (k, def) in &class.class_methods {
+                        ins(&mut map, k, Value::Function(std::sync::Arc::new(def.clone())));
+                    }
+                    for k in class.properties.keys() {
+                        ins(
+                            &mut map,
+                            k,
+                            Value::Property { class_name: class_name.clone(), name: k.clone() },
+                        );
+                    }
+                    map
+                }
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "vars() argument must have __dict__ attribute".into(),
+                    )
+                    .into());
+                }
+            };
             Ok(Some(Value::Dict(crate::value::shared_dict(map))))
         }
         "setattr" => {
