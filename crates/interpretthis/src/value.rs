@@ -148,7 +148,7 @@ pub fn shared_list(items: Vec<Value>) -> SharedList {
 /// [`SharedList`]: a `set` clone shares storage, so `.add`/`.discard` through
 /// any alias (or a function argument) are visible everywhere — matching
 /// CPython's set reference semantics. The body carries CPython's hash-table so
-/// iteration order matches CPython (see [`crate::pyset`]).
+/// iteration order matches CPython (see the `pyset` module).
 pub type SharedSet = Arc<Mutex<crate::pyset::SetBody>>;
 
 /// Shared backing store for [`Value::Frozenset`]. Immutable, so no `Mutex`;
@@ -853,12 +853,12 @@ pub enum Value {
         kind: DictViewKind,
     },
     /// Python `set` — a shared, mutable CPython-order hash table
-    /// ([`crate::pyset::SetBody`]). Reference-semantic like `list`. Serialized
+    /// (`pyset::SetBody`). Reference-semantic like `list`. Serialized
     /// as its elements (in iteration order); the table is rebuilt on load.
     #[serde(serialize_with = "serialize_shared_set", deserialize_with = "deserialize_shared_set")]
     Set(SharedSet),
     /// Python `frozenset` — an immutable, hashable set. Shares the
-    /// [`crate::pyset::SetBody`] table (for iteration order) behind an `Arc`
+    /// `pyset::SetBody` table (for iteration order) behind an `Arc`
     /// (no `Mutex`), with a `ValueKey::Frozenset` projection so it can serve as
     /// a dict key or set member.
     #[serde(
@@ -3801,7 +3801,7 @@ impl Value {
     ///
     /// # Errors
     ///
-    /// Returns [`InterpreterError::TypeError`] (`unhashable type: '...'`) for
+    /// Returns `InterpreterError::TypeError` (`unhashable type: '...'`) for
     /// values Python cannot use as a key — `list`, `dict`, `set`, and the
     /// interpreter's internal variants.
     pub fn to_key(&self) -> Result<ValueKey, crate::error::InterpreterError> {
