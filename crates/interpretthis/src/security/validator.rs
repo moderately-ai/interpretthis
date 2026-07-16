@@ -68,17 +68,24 @@ pub fn is_name_allowed(name: &str) -> bool {
 /// Fail with a security error if `attr_name` appears in
 /// [`BLOCKED_ATTRIBUTES`].
 ///
-/// Called from every `obj.attr` evaluation path so the policy is single-
-/// sourced. Previously this also blocked any attribute beginning with a
-/// single underscore (`_private`) as a defence-in-depth measure, but in
-/// Python `_attr` is a NAMING CONVENTION (a hint that the attribute is
-/// internal), not a security boundary — `obj._field` access is allowed
-/// freely in CPython and is idiomatic for any class with a property
-/// backed by `_field`. Forbidding it broke every customer class that
-/// followed the convention. The genuinely dangerous attributes
-/// (`__class__`, `__globals__`, `__code__`, `__bases__`, `__mro__`, …)
-/// that can be used to walk to interpreter internals are enumerated
-/// explicitly in `BLOCKED_ATTRIBUTES`.
+/// Called from every attribute path so the policy is single-sourced. It is the
+/// authoritative **write** gate — every `obj.attr = …` / `setattr` / `delattr` /
+/// `__setattr__` site calls it, so a name in `BLOCKED_ATTRIBUTES` can never be
+/// assigned. It also gates **reads** for all blocked names EXCEPT `__class__`,
+/// which the read paths resolve to `type(x)` via
+/// `crate::eval::names::resolve_object_attr` before reaching this check (see
+/// `BLOCKED_ATTRIBUTES`); `__class__` remains listed here so its *write* stays
+/// blocked.
+///
+/// Previously this also blocked any attribute beginning with a single
+/// underscore (`_private`) as a defence-in-depth measure, but in Python `_attr`
+/// is a NAMING CONVENTION (a hint that the attribute is internal), not a
+/// security boundary — `obj._field` access is allowed freely in CPython and is
+/// idiomatic for any class with a property backed by `_field`. Forbidding it
+/// broke every customer class that followed the convention. The genuinely
+/// dangerous attributes (`__globals__`, `__code__`, `__bases__`, `__mro__`, …)
+/// that can be used to walk to interpreter internals are enumerated explicitly
+/// in `BLOCKED_ATTRIBUTES`.
 pub fn validate_attribute(attr_name: &str) -> Result<(), EvalError> {
     if BLOCKED_ATTRIBUTES.contains(&attr_name) {
         return Err(InterpreterError::Security(format!(

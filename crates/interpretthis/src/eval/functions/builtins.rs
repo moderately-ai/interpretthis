@@ -92,6 +92,32 @@ pub fn is_exception_type_name(name: &str) -> bool {
 /// Drives both `callable(x)` and `hasattr(x, '__call__')` (CPython keeps them in
 /// lockstep). An instance is callable iff its class MRO defines `__call__`; the
 /// bare-name/method sentinels and class objects are always callable.
+/// The type object of `value` — the single source of truth for both the
+/// `type(x)` builtin and the `x.__class__` attribute (they are identical in
+/// CPython). An instance yields its class object (so `type(p) is P`), an
+/// exception its concrete type, an enum member its enum class, a type object
+/// yields `type`, and every other builtin yields its type-name object.
+pub(crate) fn type_object_of(value: &Value) -> Value {
+    match value {
+        Value::Instance(inst) => Value::Class(inst.class_name.clone()),
+        // The Exception variant carries its concrete type_name (ValueError,
+        // KeyError, …); without this arm every variant collapses to "Exception".
+        Value::Exception(exc) => Value::ExceptionType(exc.type_name.clone()),
+        // An enum member's type is its enum class (`type(Color.RED) is Color`).
+        Value::EnumMember { class_name, .. } => Value::Class(class_name.clone()),
+        Value::Type(_) | Value::Class(_) | Value::ExceptionType(_) => {
+            Value::Type("type".to_string())
+        }
+        // A bare builtin *type* name (`int`, `list`) is itself a type object, so
+        // its type is `type`; a builtin *function* (`len`) is not.
+        Value::BuiltinName(n) if crate::value::is_builtin_type_name(n) => {
+            Value::Type("type".to_string())
+        }
+        Value::Module(_) => Value::Type("module".to_string()),
+        other => Value::Type(other.type_name().to_string()),
+    }
+}
+
 pub(super) fn value_is_callable(state: &InterpreterState, value: &Value) -> bool {
     match value {
         Value::Instance(inst) => state.classes.get(&inst.class_name).is_some_and(|class| {
@@ -535,34 +561,7 @@ pub(super) async fn try_builtin(
                 )?));
             }
             check_arg_count(name, args, 1, 1)?;
-            // `type(x)` yields a type object: the class object for an instance
-            // (so `type(p) is P` and `type(p).__name__ == 'P'`), and a built-in
-            // type object otherwise (`type(1).__name__ == 'int'`). A type's own
-            // type is `type`.
-            let type_obj = match &args[0] {
-                Value::Instance(inst) => Value::Class(inst.class_name.clone()),
-                // Exception variant carries its concrete type_name on
-                // the value itself (ValueError, KeyError, …). Without
-                // this arm `type(e).__name__` collapses every variant
-                // to the static `"Exception"` label.
-                Value::Exception(exc) => Value::ExceptionType(exc.type_name.clone()),
-                // An enum member's type is its enum class, so
-                // `type(Color.RED).__name__ == 'Color'` and
-                // `type(Color.RED) is Color`.
-                Value::EnumMember { class_name, .. } => Value::Class(class_name.clone()),
-                Value::Type(_) | Value::Class(_) | Value::ExceptionType(_) => {
-                    Value::Type("type".to_string())
-                }
-                // A bare builtin *type* name (`int`, `str`, `list`) is itself a
-                // type object, so its type is `type`. A builtin *function*
-                // (`len`, `print`) falls through to `builtin_function_or_method`.
-                Value::BuiltinName(n) if crate::value::is_builtin_type_name(n) => {
-                    Value::Type("type".to_string())
-                }
-                Value::Module(_) => Value::Type("module".to_string()),
-                other => Value::Type(other.type_name().to_string()),
-            };
-            Ok(Some(type_obj))
+            Ok(Some(type_object_of(&args[0])))
         }
         // Internal helper produced by functools.wraps — stamps the captured
         // name onto the decorated function's `__name__`. Not user-callable
@@ -1000,6 +999,10 @@ pub(super) async fn try_builtin(
                     .into());
                 }
             };
+            // Universal object attributes (`__class__`) exist on every value.
+            if crate::eval::names::resolve_object_attr(&args[0], attr_name).is_some() {
+                return Ok(Some(Value::Bool(true)));
+            }
             // Reject blocked dunders as missing (hasattr returns False on
             // AttributeError; Security on blocked names → False for parity
             // with "cannot access" without leaking existence).

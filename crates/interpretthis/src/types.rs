@@ -549,10 +549,12 @@ pub(crate) fn builtin_dir(value: &Value) -> Option<Vec<String>> {
         Value::None => (NONE_DUNDERS, &[], &[]),
         _ => return None,
     };
-    // `__class__` is listed by CPython's `dir` on every object. Listing the name
-    // is not access — `obj.__class__` stays blocked by `validate_attribute` — and
-    // the name is universal, so it leaks nothing while matching CPython. Kept OUT
-    // of the presence tables that feed getattr/hasattr, so access stays denied.
+    // `__class__` is listed by CPython's `dir` on every object. It is a universal
+    // attribute: reading it aliases `type(x)` (resolved by
+    // `eval::names::resolve_object_attr`), so listing it here matches CPython and
+    // grants nothing the `type()` builtin didn't already. Its *write* stays
+    // blocked via `validate_attribute`. Kept OUT of the per-type presence tables
+    // because it's universal, not type-specific.
     let mut all: Vec<String> = COMMON_DUNDERS
         .iter()
         .chain(dunders)

@@ -11,8 +11,9 @@
 //! and call `super()` behave as they do in CPython.
 //!
 //! `__missing__` support (which CPython's `UserDict.__getitem__` reaches via
-//! `self.__class__`) is omitted — `__class__` is a blocked dunder in the
-//! sandbox — as are the few methods that rely on it.
+//! `self.__class__`) is omitted as a separate parity gap. The results are built
+//! with `type(self)(...)` — the idiomatic equivalent of `self.__class__(...)`
+//! (both now resolve, since `__class__` reads alias `type(x)`).
 
 use crate::{error::EvalError, state::InterpreterState, tools::Tools, value::Value};
 
@@ -46,8 +47,8 @@ pub async fn ensure_registered(
         return Ok(());
     };
     // The methods reference the base class name (`isinstance(x, UserList)`) and
-    // build results with `type(self)(...)` — `__class__` is a blocked dunder, so
-    // it can't be used; a module-level class binding plus the live-globals
+    // build results with `type(self)(...)` — the idiomatic form (equivalent to
+    // `self.__class__(...)`); a module-level class binding plus the live-globals
     // closure make both resolve while the methods run.
     let stmts = crate::parser::parse(src).map_err(EvalError::Interpreter)?;
     let saved = std::mem::replace(&mut state.current_source, src.to_string());

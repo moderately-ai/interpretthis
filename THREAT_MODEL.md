@@ -41,7 +41,7 @@ The construct is supported in principle, but execution checks against a vetted w
 
 - **Imports** — `crates/interpretthis/src/eval/modules/mod.rs::MODULES` is the registry of every shippable stdlib module (including `copy`). The registry IS the allowlist; `is_known_module` reads from it. Any other module raises `ModuleNotFoundError`.
 - **Bare-name resolution** — `DANGEROUS_NAMES` at `crates/interpretthis/src/security/names.rs` rejects `eval`, `exec`, `compile`, `__import__`, `globals`, `locals`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, `shutil` even though the parser accepts them as identifiers. Checked in `crates/interpretthis/src/security/validator.rs`. `getattr` / `setattr` / `delattr` / `vars` are **bounded builtins**, not blocked: they resolve, but validate the attribute name against `BLOCKED_ATTRIBUTES` (and `vars` is instance-only, returning a copy of fields already reachable via `getattr`).
-- **Attribute access** — `BLOCKED_ATTRIBUTES` at `crates/interpretthis/src/security/names.rs` rejects `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. Single-underscore names (`obj._field`) are allowed; only the explicit dunder list is gated.
+- **Attribute access** — `BLOCKED_ATTRIBUTES` at `crates/interpretthis/src/security/names.rs` gates `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. All are blocked on **write** (the authoritative funnel is `validate_attribute`, called by every mutation site). All are blocked on **read** too, EXCEPT `__class__`: it aliases `type(x)` (already reachable via the `type()` builtin, so it grants no new capability) and is resolved to the type object by `eval::names::resolve_object_attr` before the read-side validator. `__class__` stays in the list so *assigning* it (in-sandbox type confusion) is still rejected. Single-underscore names (`obj._field`) are allowed; only the explicit dunder list is gated.
 
 ### 4. Dynamically validated
 
@@ -83,11 +83,11 @@ This document is the security-side view of what is rejected at parse / eval time
 | Attack pattern                                              | Where it fails                                                  |
 |-------------------------------------------------------------|-----------------------------------------------------------------|
 | `__import__('os').system('rm -rf /')`                       | `__import__` in `DANGEROUS_NAMES` (`security/names.rs`)         |
-| `().__class__`                                              | `__class__` in `BLOCKED_ATTRIBUTES` (`security/names.rs`)       |
-| `().__class__.__bases__[0].__subclasses__()`                | `__class__` and `__bases__` both blocked                        |
+| `().__class__.__bases__[0].__subclasses__()`                | `().__class__` resolves (to `tuple`), but `__bases__` / `__mro__` / `__subclasses__` stay blocked, so the walk dead-ends (`security/names.rs`) |
+| `obj.__class__ = SomethingEvil` (type confusion)            | `__class__` write-blocked at `set_attr` / `setattr` / `__setattr__` (`validate_attribute`) |
 | `eval("...")` / `exec("...")` / `compile(...)`              | `eval` / `exec` / `compile` in `DANGEROUS_NAMES`                |
 | `getattr(obj, '__globals__')`                               | `getattr` validates the name against `BLOCKED_ATTRIBUTES`       |
-| `setattr(obj, '__class__', 1)` / `delattr(obj, '__mro__')`  | `setattr` / `delattr` validate the name against `BLOCKED_ATTRIBUTES` |
+| `setattr(obj, '__class__', 1)` / `delattr(obj, '__mro__')`  | `setattr` / `delattr` validate the name against `BLOCKED_ATTRIBUTES` (both are write ops; `__class__` is write-blocked even though its read is allowed) |
 | `vars(fn)` / `vars(cls)` / `vars()`                         | `vars` is instance-only; module/class/no-arg forms raise `TypeError` |
 | `import os` / `from os import path`                         | `os` not in the `MODULES` registry (`eval/modules/mod.rs`)      |
 | `from . import sibling`                                     | relative-import gate in `eval/modules/mod.rs::eval_import_from` |
@@ -102,7 +102,7 @@ This document is the security-side view of what is rejected at parse / eval time
 | State-blob from an earlier wire format                      | `STATE_FORMAT_VERSION` mismatch → `StateFormatSuperseded`       |
 | State-blob tampering across resume boundaries               | Host responsibility (this crate does not sign blobs)            |
 
-Rows that were previously in this table — `class Evil(SomethingTrusted)`, `@dataclass`, `case SomeClass(x, y)` — are no longer blocked, because the constructs themselves are supported as of Tracks B1/B2/B4. Their security comes from the orthogonal blocklists: any class body that tries to reach `__class__` / `__bases__` / `__subclasses__` is still rejected (`BLOCKED_ATTRIBUTES`); any decorator that tries to call `eval` is still rejected (`DANGEROUS_NAMES`); any `match` arm cannot dereference a blocked dunder. The user-facing construct is fine; the escape primitives are still gated.
+Rows that were previously in this table — `class Evil(SomethingTrusted)`, `@dataclass`, `case SomeClass(x, y)` — are no longer blocked, because the constructs themselves are supported as of Tracks B1/B2/B4. Their security comes from the orthogonal blocklists: any class body that tries to walk the class chain via `__bases__` / `__mro__` / `__subclasses__`, or reach interpreter internals via `__globals__` / `__code__` / `__dict__`, is still rejected (`BLOCKED_ATTRIBUTES`); any decorator that tries to call `eval` is still rejected (`DANGEROUS_NAMES`); any `match` arm cannot dereference a blocked dunder. `__class__` reads now resolve (they alias `type(x)`, which was always available), but that is a dead end without the `__bases__`/`__subclasses__` links, and `__class__` writes stay blocked. The user-facing construct is fine; the escape primitives are still gated.
 
 ## Out of scope
 

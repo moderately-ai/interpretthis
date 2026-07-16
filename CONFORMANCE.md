@@ -128,11 +128,11 @@ Cross-link: [`THREAT_MODEL.md`](./THREAT_MODEL.md) covers the attack framing (`_
 ## Blocked dunders and attributes
 <a id="blocked-dunders"></a>
 
-The following attribute names are rejected by `crates/interpretthis/src/security/validator.rs` regardless of the object they're accessed on: `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. Accessing any of them raises `InterpreterError::Security`.
+The following attribute names are gated by `crates/interpretthis/src/security/validator.rs` regardless of the object they're accessed on: `__class__`, `__bases__`, `__subclasses__`, `__mro__`, `__globals__`, `__code__`, `__closure__`, `__dict__`, `__builtins__`, `__spec__`, `__loader__`. All are rejected on **write** (`obj.attr = …`, `setattr`, `delattr`), raising `InterpreterError::Security`. On **read**, all are rejected too **except `__class__`**: reading it returns `type(x)` (it is exactly the `type()` builtin's result, so it exposes nothing new), while every other name still raises `InterpreterError::Security`. `__class__` remains gated for writes because assigning it would allow in-sandbox type confusion.
 
 Single-underscore names (`obj._field`) are **allowed** — in Python they are a naming convention, not a sandbox boundary. Only the explicit `BLOCKED_ATTRIBUTES` list is gated (see `crates/interpretthis/src/security/names.rs`).
 
-These dunders form the standard CPython sandbox-escape chain — `().__class__.__bases__[0].__subclasses__()` walks from any object to every loaded class.
+These dunders form the standard CPython sandbox-escape chain — `().__class__.__bases__[0].__subclasses__()` walks from any object to every loaded class. Allowing `().__class__` to resolve does not reopen it: the walk still dies at `__bases__` / `__mro__` / `__subclasses__`, which stay blocked, and `().__class__` is no more than `type(())` — always available.
 
 Cross-link: [`THREAT_MODEL.md`](./THREAT_MODEL.md) documents validator entry points and attack patterns.
 
@@ -147,7 +147,7 @@ Cross-link: [`THREAT_MODEL.md`](./THREAT_MODEL.md) documents validator entry poi
 
 `eval`, `exec`, and `compile` are in the `DANGEROUS_NAMES` set at `crates/interpretthis/src/security/names.rs` and cannot be referenced from user code. Calling them raises `InterpreterError::Security`. The same applies to `__import__`, `globals`, `locals`, `vars`, `dir`, `open`, `file`, `os`, `sys`, `subprocess`, and `shutil`. The const in `crates/interpretthis/src/security/names.rs` is the source of truth.
 
-`getattr` / `setattr` / `delattr` are **bounded builtins**: the attribute name must be a string and is checked against `BLOCKED_ATTRIBUTES` (class-walk dunders like `__class__` / `__bases__` stay forbidden). Three-arg `getattr(o, name, default)` returns the default only on `AttributeError`, never on a security rejection. Instance field storage is shared (`SharedFields`), so `setattr`/`delattr` mutate by identity like CPython.
+`getattr` / `setattr` / `delattr` are **bounded builtins**: the attribute name must be a string and is checked against `BLOCKED_ATTRIBUTES` (the class-walk chain `__bases__` / `__mro__` / `__subclasses__` and interpreter internals like `__globals__` stay forbidden in both directions; `__class__` is read-allowed via `getattr` but write-blocked via `setattr`/`delattr`). Three-arg `getattr(o, name, default)` returns the default only on `AttributeError`, never on a security rejection. Instance field storage is shared (`SharedFields`), so `setattr`/`delattr` mutate by identity like CPython.
 
 Cross-link: `THREAT_MODEL.md` enumerates the attack patterns these blocks defeat (`__import__('os').system(...)`, `().__class__.__bases__[0].__subclasses__()`, etc.).
 

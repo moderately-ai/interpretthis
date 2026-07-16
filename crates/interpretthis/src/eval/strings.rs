@@ -1134,7 +1134,12 @@ fn resolve_format_arg(
 /// `{name.attr}` — attribute access in a format field. Only dict-keyed access
 /// is meaningful for the interpreter's value model.
 fn format_get_attr(value: &Value, attr: &str) -> EvalResult {
-    // Gate blocked dunders here too: `{x.__class__}` in an f-string reaches
+    // Universal object attributes (`__class__`) resolve on every value — shared
+    // with every other read path via the one `resolve_object_attr` definition.
+    if let Some(resolved) = crate::eval::names::resolve_object_attr(value, attr) {
+        return Ok(resolved);
+    }
+    // Gate blocked dunders here too: `{x.__globals__}` in an f-string reaches
     // attribute access without passing through `eval_attribute`'s validator.
     // (Today `dispatch_getattr_opt` resolves only builtin type-slots so no
     // blocked name is reachable, but this keeps the format path consistent with

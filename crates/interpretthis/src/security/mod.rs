@@ -19,11 +19,14 @@
 //!   but instance-only (returns a copy of an instance's fields — all already
 //!   reachable via `getattr` — and rejects the no-arg / module / class forms
 //!   that would re-expose scope bindings or the class-walk chain).
-//! - **Class-walk dunders blocked** — `__class__` / `__bases__` /
-//!   `__subclasses__` / `__mro__` / `__globals__` / `__code__` / `__closure__` /
-//!   `__dict__` / `__builtins__` / `__spec__` / `__loader__`. See
-//!   [`names::BLOCKED_ATTRIBUTES`]. Single-underscore names (`obj._field`) are
-//!   allowed.
+//! - **Class-walk dunders blocked** — `__bases__` / `__subclasses__` / `__mro__`
+//!   / `__globals__` / `__code__` / `__closure__` / `__dict__` / `__builtins__` /
+//!   `__spec__` / `__loader__` are blocked for both read and write. `__class__`
+//!   is READ-allowed (it aliases `type(x)`, already reachable via the `type()`
+//!   builtin, so it grants no capability) but WRITE-blocked (type confusion);
+//!   with `__bases__`/`__mro__`/`__subclasses__` still gated, the class-walk
+//!   escape dead-ends. See [`names::BLOCKED_ATTRIBUTES`]. Single-underscore
+//!   names (`obj._field`) are allowed.
 //! - **DoS bounded** — memory, operation count, while iterations, recursion,
 //!   stdout, cooperative wall-clock; collection/string multiply caps; checked
 //!   integer arithmetic.

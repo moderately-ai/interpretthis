@@ -41,6 +41,10 @@ fn enum_unique(state: &crate::state::InterpreterState, args: &[Value]) -> EvalRe
         .into());
     };
     if let Some(class) = state.classes.get(name) {
+        // `ValueKey` carries `Box<Value>` (interior mutability via the shared
+        // container handles) but is only ever used as an immutable projection
+        // key here — same allowance the other value-dedup sites use.
+        #[allow(clippy::mutable_key_type)]
         let mut seen: rustc_hash::FxHashMap<crate::value::ValueKey, String> =
             rustc_hash::FxHashMap::default();
         let mut dups: Vec<String> = Vec::new();

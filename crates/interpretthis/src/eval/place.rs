@@ -124,7 +124,14 @@ pub(crate) fn eval_place<'a>(
                     Ok(Some(place))
                 }
                 Expr::Attribute(attr) => {
-                    crate::security::validator::validate_attribute(attr.attr.as_str())?;
+                    // Universal object attributes (`__class__`) may appear in a
+                    // read receiver chain (`x.__class__.__name__`), so don't block
+                    // them while *building* a place — peek-navigation fails
+                    // cleanly and the caller re-evaluates. A *write* through such a
+                    // place is still rejected at `set_attr` below.
+                    if !crate::eval::names::is_object_attr(attr.attr.as_str()) {
+                        crate::security::validator::validate_attribute(attr.attr.as_str())?;
+                    }
                     // A class attribute (`Base.registry`) is not a navigable variable
                     // slot — its storage lives in `state.classes` and is a shared
                     // handle. Return None so the caller takes the non-place path
@@ -387,6 +394,11 @@ fn set_index(container: &mut Value, key: &Value, value: Value) -> Result<isize, 
 /// `AttributeError("'<name>' object has no attribute '<name>'")` shape
 /// for read-only types like list/tuple/str.
 fn set_attr(container: &mut Value, name: &str, value: Value) -> Result<isize, EvalError> {
+    // Authoritative attribute-WRITE block: every blocked dunder — including
+    // `__class__`, which is READ-allowed (aliases `type(x)`) but must never be
+    // assigned (type confusion) — is rejected here, the single funnel every
+    // `obj.attr = …` place write passes through.
+    crate::security::validator::validate_attribute(name)?;
     if let Value::Instance(inst) = container {
         let new_size = estimate_value_size(&value);
         let delta = inst.fields.lock().insert(name.to_string(), value).map_or_else(

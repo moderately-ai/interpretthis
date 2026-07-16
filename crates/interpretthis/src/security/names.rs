@@ -26,15 +26,31 @@ pub const DANGEROUS_NAMES: &[&str] = &[
     "shutil",
 ];
 
-/// Attribute names that are blocked on all objects.
+/// Attribute names gated on all objects.
 ///
-/// `__class__` is blocked alongside the rest of the class-walk chain
-/// (`__bases__`, `__subclasses__`, `__mro__`, …). Classes *are* supported
-/// in this sandbox; legitimate code should use `type(obj)` rather than
-/// `obj.__class__`. Blocking the dunder removes the first step of
-/// `().__class__.__bases__[0].__subclasses__()`-style probes.
+/// Every name here is rejected on **write** (`obj.attr = …`, `setattr`,
+/// `delattr`, `__setattr__`) — the single funnel is
+/// [`validate_attribute`](crate::security::validator::validate_attribute), which
+/// every mutation site calls. On **read**, all of them are blocked too, EXCEPT
+/// `__class__`: it aliases `type(x)`, which is already reachable via the
+/// `type()` builtin, so reading it grants no capability the caller lacks. The
+/// read alias is resolved by `crate::eval::names::resolve_object_attr` (a
+/// universal object-level attribute) *before* the read-side validator runs;
+/// `__class__` stays in this list purely so *assigning* it — in-sandbox type
+/// confusion — remains blocked at every write site.
+///
+/// The remaining entries are the class-walk escape chain (`__bases__`,
+/// `__mro__`, `__subclasses__`) and interpreter internals (`__globals__`,
+/// `__code__`, `__closure__`, `__dict__`, …); reading any of them would hand
+/// sandboxed code the object graph or the interpreter's own state, so they are
+/// blocked in both directions. This is what severs
+/// `().__class__.__bases__[0].__subclasses__()`-style probes: even though
+/// `().__class__` now resolves (to `tuple`), `__bases__`/`__mro__`/
+/// `__subclasses__` stay blocked, so the walk dead-ends immediately.
 pub const BLOCKED_ATTRIBUTES: &[&str] = &[
+    // Read-allowed (aliases `type(x)`), write-blocked. See the note above.
     "__class__",
+    // Blocked in both directions — escape chain + interpreter internals.
     "__globals__",
     "__code__",
     "__closure__",

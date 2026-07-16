@@ -165,6 +165,31 @@ async fn eval_named_expr_inner(
     }
 }
 
+/// Universal, read-only object-level attributes — available on EVERY value
+/// regardless of its concrete type, because CPython models them as slots on
+/// `object`/`type` that everything inherits. Resolved in one place so every
+/// read surface (`obj.attr`, `getattr`, `hasattr`, f-string fields) shares a
+/// single definition instead of each re-checking the name.
+///
+/// `__class__` is the only member today: it aliases `type(x)`, already reachable
+/// via the `type()` builtin, so exposing it grants no capability. It stays in
+/// [`BLOCKED_ATTRIBUTES`](crate::security::names) so *writes* (`obj.__class__ = …`,
+/// type confusion) remain blocked at every mutation site — only reads reach this
+/// resolver, which runs before the read-side validator.
+pub(crate) fn resolve_object_attr(obj: &Value, name: &str) -> Option<Value> {
+    match name {
+        "__class__" => Some(crate::eval::functions::type_object_of(obj)),
+        _ => None,
+    }
+}
+
+/// Name-only predicate for [`resolve_object_attr`] — lets a read path skip the
+/// blocked-attribute validator for a universal attribute without first
+/// evaluating the receiver. Kept in lockstep with `resolve_object_attr`'s arms.
+pub(crate) fn is_object_attr(name: &str) -> bool {
+    matches!(name, "__class__")
+}
+
 /// Evaluate attribute access (obj.attr).
 ///
 /// Routes through `types::dispatch_getattr_opt` first — that covers
@@ -194,7 +219,12 @@ async fn eval_attribute_inner(
     tools: &Tools,
 ) -> EvalResult {
     let attr_name = node.attr.as_str();
-    validator::validate_attribute(attr_name)?;
+    // Universal object attributes (`__class__`) are resolved from the receiver's
+    // value by `getattr_on_value` below; skip the read-block for them here so
+    // they reach the resolver. Every other blocked dunder is rejected up front.
+    if !is_object_attr(attr_name) {
+        validator::validate_attribute(attr_name)?;
+    }
 
     // Compute a place reference for the receiver expression first.
     // `eval_place` runs any index sub-expressions exactly once and
@@ -257,6 +287,12 @@ pub(crate) async fn getattr_on_value(
     tools: &Tools,
     place_for_upgrade: Option<&crate::eval::place::Place>,
 ) -> EvalResult {
+    // Universal object attributes (`__class__`) resolve from the receiver's
+    // value here — the single point shared by `obj.attr`, `getattr()`, and a
+    // user `__getattribute__` override. Writes stay blocked (BLOCKED_ATTRIBUTES).
+    if let Some(resolved) = resolve_object_attr(&obj, attr_name) {
+        return Ok(resolved);
+    }
     if let Value::Instance(inst) = &obj {
         if let Some((_, method)) =
             crate::eval::classes::lookup_method_in_mro(state, &inst.class_name, "__getattribute__")

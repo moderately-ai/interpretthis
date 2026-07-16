@@ -20,6 +20,7 @@ mod method_dispatch;
 
 // Re-exports from builtins
 pub use builtins::is_exception_type_name;
+pub(crate) use builtins::type_object_of;
 // Re-exports from call
 pub use call::eval_call;
 pub(crate) use definitions::{

@@ -25,23 +25,49 @@ fn no_tools() -> Tools {
 
 #[tokio::test]
 async fn security_getattr_blocked_dunder() {
-    // Bounded getattr allows safe names but still rejects class-walk dunders.
+    // Bounded getattr still rejects the class-walk chain and interpreter
+    // internals (`__globals__`, `__bases__`, `__mro__`, `__subclasses__`, …).
     let interp = interpreter();
-    let resp = interp.execute("x = getattr([], '__class__')", &no_tools(), HashMap::new()).await;
+    let resp = interp.execute("x = getattr([], '__globals__')", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some());
     let msg = resp.error.unwrap().to_string();
     assert!(
-        msg.contains("__class__") || msg.contains("Security") || msg.contains("not permitted"),
+        msg.contains("__globals__") || msg.contains("Security") || msg.contains("not permitted"),
         "expected security block, got: {msg}"
     );
+    // `__class__` is READ-allowed — it aliases `type(x)` (already reachable via
+    // the `type()` builtin), so it grants no capability. `getattr` returns it.
+    let resp = interp
+        .execute("print(getattr([], '__class__').__name__)", &no_tools(), HashMap::new())
+        .await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "list");
 }
 
 #[tokio::test]
-async fn security_class_attribute_access_blocked() {
-    // Direct attribute access still blocks class-walk dunders.
+async fn security_class_attribute_read_allowed_write_blocked() {
     let interp = interpreter();
-    let resp = interp.execute("x = ().__class__", &no_tools(), HashMap::new()).await;
-    assert!(resp.error.is_some());
+    // Reading `__class__` returns the type object (aliases `type(x)`).
+    let resp = interp.execute("print(().__class__.__name__)", &no_tools(), HashMap::new()).await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "tuple");
+
+    // The rest of the class-walk chain / interpreter internals stay blocked.
+    for dunder in ["__bases__", "__mro__", "__subclasses__", "__globals__", "__dict__"] {
+        let resp = interp.execute(&format!("x = ().{dunder}"), &no_tools(), HashMap::new()).await;
+        assert!(resp.error.is_some(), "{dunder} should stay blocked");
+    }
+
+    // ASSIGNING `__class__` (type confusion) stays blocked at the write site.
+    let resp = interp
+        .execute("class C:\n    pass\no = C()\no.__class__ = int\n", &no_tools(), HashMap::new())
+        .await;
+    assert!(resp.error.is_some(), "assigning __class__ must stay blocked");
+    let msg = resp.error.unwrap().to_string();
+    assert!(
+        msg.contains("__class__") || msg.contains("Security") || msg.contains("not permitted"),
+        "expected a security block on __class__ assignment, got: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -120,8 +146,9 @@ async fn security_dir_scope_and_object_blocked() {
     let resp = interp.execute("import math\nx = dir(math)", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some());
 
-    // Listing `__class__` via dir does NOT grant access to it.
-    let resp = interp.execute("x = [].__class__", &no_tools(), HashMap::new()).await;
+    // Listing an attribute name via dir does NOT grant access to a blocked
+    // dunder — `__globals__` (and the rest of the class-walk chain) stay gated.
+    let resp = interp.execute("x = [].__globals__", &no_tools(), HashMap::new()).await;
     assert!(resp.error.is_some());
 }
 
@@ -512,7 +539,9 @@ o.__class__ = 1
 
 #[tokio::test]
 async fn security_fstring_attr_blocked_dunder() {
-    // Attribute access inside an f-string field must reject blocked dunders.
+    // Attribute access inside an f-string field must reject blocked dunders
+    // (the class-walk chain / interpreter internals) the same as every other
+    // attribute path.
     let interp = interpreter();
     let resp = interp
         .execute(
@@ -520,13 +549,20 @@ async fn security_fstring_attr_blocked_dunder() {
 class C:
     pass
 o = C()
-x = f'{o.__class__}'
+x = f'{o.__globals__}'
 ",
             &no_tools(),
             HashMap::new(),
         )
         .await;
     assert!(resp.error.is_some());
+
+    // The read-allowed `__class__` alias resolves in an f-string field too.
+    let resp = interp
+        .execute("x = f'{(5).__class__.__name__}'\nprint(x)", &no_tools(), HashMap::new())
+        .await;
+    assert!(resp.error.is_none(), "{:?}", resp.error);
+    assert_eq!(resp.stdout.trim(), "int");
 }
 
 #[tokio::test]
