@@ -1091,17 +1091,46 @@ impl crate::eval::modules::Module for ItertoolsModule {
 /// independent iterators, so each element is wrapped. Results that are already
 /// iterators (`count`/`cycle`/`repeat`'s `BuiltinIter`) pass through unchanged.
 fn lazy_wrap(state: &mut crate::state::InterpreterState, func: &str, value: Value) -> Value {
+    let kind = itertools_lazy_kind(func);
     match value {
-        Value::List(items) => state.alloc_lazy(items.lock().clone()),
+        Value::List(items) => state.alloc_lazy_kind(items.lock().clone(), kind),
         Value::Tuple(copies) if func == "tee" => Value::Tuple(
             copies
                 .into_iter()
                 .map(|c| match c {
-                    Value::List(items) => state.alloc_lazy(items.lock().clone()),
+                    Value::List(items) => state.alloc_lazy_kind(items.lock().clone(), kind),
                     other => other,
                 })
                 .collect(),
         ),
         other => other,
+    }
+}
+
+/// The [`LazyKind`] carrying CPython's `type(...).__name__` for each itertools
+/// producer, so a finite `chain`/`islice`/`groupby`/... result reports its own
+/// type rather than the generic `generator`. Unrecognised names (and the
+/// infinite-source cases that stay `Value::Generator`) keep the generator name.
+fn itertools_lazy_kind(func: &str) -> crate::value::LazyKind {
+    use crate::value::LazyKind as K;
+    match func {
+        "chain" | "chain.from_iterable" => K::Chain,
+        "islice" => K::Islice,
+        "groupby" => K::Groupby,
+        "accumulate" => K::Accumulate,
+        "combinations" => K::Combinations,
+        "combinations_with_replacement" => K::CombinationsWithReplacement,
+        "permutations" => K::Permutations,
+        "product" => K::Product,
+        "starmap" => K::Starmap,
+        "takewhile" => K::Takewhile,
+        "dropwhile" => K::Dropwhile,
+        "filterfalse" => K::Filterfalse,
+        "compress" => K::Compress,
+        "pairwise" => K::Pairwise,
+        "tee" => K::Tee,
+        "zip_longest" => K::ZipLongest,
+        "batched" => K::Batched,
+        _ => K::Generator,
     }
 }

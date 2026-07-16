@@ -1706,7 +1706,7 @@ fn dispatch_lazy(
     method: &str,
     args: &[Value],
 ) -> EvalResult {
-    let Value::Lazy { items, cursor_id } = receiver else {
+    let Value::Lazy { items, cursor_id, .. } = receiver else {
         return Err(InterpreterError::TypeError(format!(
             "'{}' object has no attribute '{method}'",
             receiver.type_name()

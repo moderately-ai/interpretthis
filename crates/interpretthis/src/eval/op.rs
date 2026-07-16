@@ -288,7 +288,7 @@ pub async fn iter(
     // Generator iterators: yield items[cursor..] and advance the
     // cursor to end. Subsequent iter() calls return empty (matching
     // CPython's "a generator can be iterated only once").
-    if let Value::Lazy { items, cursor_id } = value {
+    if let Value::Lazy { items, cursor_id, .. } = value {
         let cursor = state.lazy_cursors.get(cursor_id).copied().unwrap_or(0);
         let remaining: Vec<Value> = items.iter().skip(cursor).cloned().collect();
         state.lazy_cursors.insert(*cursor_id, items.len());

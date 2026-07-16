@@ -563,10 +563,17 @@ impl InterpreterState {
     /// exposes as single-use iterators (`next()` advances them, a second pass
     /// sees only the remainder, they are neither subscriptable nor sized).
     pub fn alloc_lazy(&mut self, items: Vec<Value>) -> Value {
+        self.alloc_lazy_kind(items, crate::value::LazyKind::Generator)
+    }
+
+    /// [`Self::alloc_lazy`] tagged with the producing iterator's kind so
+    /// `type(x).__name__` / `repr` surface CPython's distinct iterator type
+    /// (`map`, `filter`, `chain`, ...).
+    pub fn alloc_lazy_kind(&mut self, items: Vec<Value>, kind: crate::value::LazyKind) -> Value {
         let cursor_id = self.next_cursor_id;
         self.next_cursor_id = self.next_cursor_id.wrapping_add(1);
         self.lazy_cursors.insert(cursor_id, 0);
-        Value::Lazy { items, cursor_id }
+        Value::Lazy { items, cursor_id, kind }
     }
 
     /// Advance a builtin lazy iterator by one. Returns `None` only when

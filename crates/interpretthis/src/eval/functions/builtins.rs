@@ -23,7 +23,7 @@ use crate::{
     eval::literals::value_to_key,
     state::InterpreterState,
     tools::Tools,
-    value::{ExceptionValue, Value, ValueKey, shared_list},
+    value::{ExceptionValue, LazyKind, Value, ValueKey, shared_list},
 };
 
 /// Check if a name is a known Python exception type.
@@ -124,8 +124,8 @@ pub(super) fn value_is_callable(state: &InterpreterState, value: &Value) -> bool
 /// sees only the remainder, and they are neither subscriptable nor sized. We
 /// still compute the items up front (the sandbox caps iteration) but expose the
 /// iterator protocol so those observable behaviours match.
-fn into_iter_value(state: &mut InterpreterState, items: Vec<Value>) -> Value {
-    state.alloc_lazy(items)
+fn into_iter_value(state: &mut InterpreterState, items: Vec<Value>, kind: LazyKind) -> Value {
+    state.alloc_lazy_kind(items, kind)
 }
 
 /// `int(x=0, base=…)` — extracted from `try_builtin` so that hot funnel's
@@ -1346,11 +1346,11 @@ pub(super) async fn try_builtin(
             for (i, v) in items.into_iter().enumerate() {
                 result.push(Value::Tuple(vec![Value::Int(start + to_len_i64(i)?), v]));
             }
-            Ok(Some(into_iter_value(state, result)))
+            Ok(Some(into_iter_value(state, result, LazyKind::Enumerate)))
         }
         "zip" => {
             if args.is_empty() {
-                return Ok(Some(into_iter_value(state, Vec::new())));
+                return Ok(Some(into_iter_value(state, Vec::new(), LazyKind::Zip)));
             }
             let strict = kwargs.get("strict").is_some_and(Value::is_truthy);
             // If any argument is an infinite producer (count/cycle/repeat), zip
@@ -1393,7 +1393,7 @@ pub(super) async fn try_builtin(
                 let tuple: Vec<Value> = iterables.iter().map(|it| it[i].clone()).collect();
                 result.push(Value::Tuple(tuple));
             }
-            Ok(Some(into_iter_value(state, result)))
+            Ok(Some(into_iter_value(state, result, LazyKind::Zip)))
         }
         "reversed" => {
             check_arg_count(name, args, 1, 1)?;
@@ -1422,7 +1422,10 @@ pub(super) async fn try_builtin(
             }
             let mut items = crate::eval::op::iter(state, &args[0], tools).await?;
             items.reverse();
-            Ok(Some(into_iter_value(state, items)))
+            // CPython names the reverse-iterator by source type
+            // (`list_reverseiterator`, else generic `reversed`); we surface the
+            // generic generator name rather than model each per-type variant.
+            Ok(Some(into_iter_value(state, items, LazyKind::Generator)))
         }
         "chr" => {
             check_arg_count(name, args, 1, 1)?;
@@ -1684,7 +1687,7 @@ pub(super) async fn try_builtin(
             // the item at the old cursor; StopIteration when exhausted
             // (default arg returns it instead, matching CPython's
             // `next(g, sentinel)` shape).
-            if let Value::Lazy { items, cursor_id } = &args[0] {
+            if let Value::Lazy { items, cursor_id, .. } = &args[0] {
                 let cursor = state.lazy_cursors.get(cursor_id).copied().unwrap_or(0);
                 if cursor < items.len() {
                     state.lazy_cursors.insert(*cursor_id, cursor + 1);
@@ -1794,7 +1797,7 @@ pub(super) async fn try_builtin(
                     result.push(item);
                 }
             }
-            Ok(Some(into_iter_value(state, result)))
+            Ok(Some(into_iter_value(state, result, LazyKind::Filter)))
         }
         "map" => {
             if args.len() < 2 {
@@ -1826,7 +1829,7 @@ pub(super) async fn try_builtin(
                         .await?;
                     result.push(val);
                 }
-                Ok(Some(into_iter_value(state, result)))
+                Ok(Some(into_iter_value(state, result, LazyKind::Map)))
             } else {
                 // Multiple iterables — zip them
                 let mut iterables: Vec<Vec<Value>> = Vec::with_capacity(args.len() - 1);
@@ -1842,7 +1845,7 @@ pub(super) async fn try_builtin(
                             .await?;
                     result.push(val);
                 }
-                Ok(Some(into_iter_value(state, result)))
+                Ok(Some(into_iter_value(state, result, LazyKind::Map)))
             }
         }
         "repr" => {
@@ -2082,10 +2085,7 @@ pub(crate) async fn make_iterator(
         // `op::iter` raises TypeError for a non-iterable.
         other => {
             let items = crate::eval::op::iter(state, other, tools).await?;
-            let cursor_id = state.next_cursor_id;
-            state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
-            state.lazy_cursors.insert(cursor_id, 0);
-            Ok(Value::Lazy { items, cursor_id })
+            Ok(state.alloc_lazy(items))
         }
     }
 }
@@ -2231,5 +2231,5 @@ async fn zip_lazy(
         out.push(Value::Tuple(tuple));
         round += 1;
     }
-    Ok(into_iter_value(state, out))
+    Ok(into_iter_value(state, out, LazyKind::Zip))
 }

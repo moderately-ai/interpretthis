@@ -306,7 +306,11 @@ async fn call_user_function_inner(
                     let cursor_id = state.next_cursor_id;
                     state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
                     state.lazy_cursors.insert(cursor_id, 0);
-                    Ok(Value::Lazy { items: collected, cursor_id })
+                    Ok(Value::Lazy {
+                        items: collected,
+                        cursor_id,
+                        kind: crate::value::LazyKind::Generator,
+                    })
                 }
                 Err(EvalError::Signal(ControlFlow::Yield(_))) => {
                     // Should not happen with yield_stack path.

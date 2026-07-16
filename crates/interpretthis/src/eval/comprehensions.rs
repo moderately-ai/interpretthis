@@ -243,7 +243,7 @@ pub async fn eval_generator_exp(
     let cursor_id = state.next_cursor_id;
     state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
     state.lazy_cursors.insert(cursor_id, 0);
-    Ok(Value::Lazy { items: results, cursor_id })
+    Ok(Value::Lazy { items: results, cursor_id, kind: crate::value::LazyKind::Generator })
 }
 
 /// Whether an expression constructs a closure (contains a `lambda`), so a

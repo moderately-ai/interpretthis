@@ -1721,7 +1721,11 @@ async fn call_method_inner(
                     let cursor_id = state.next_cursor_id;
                     state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
                     state.lazy_cursors.insert(cursor_id, 0);
-                    Ok(Value::Lazy { items: collected, cursor_id })
+                    Ok(Value::Lazy {
+                        items: collected,
+                        cursor_id,
+                        kind: crate::value::LazyKind::Generator,
+                    })
                 }
                 Err(e) => Err(e),
             }

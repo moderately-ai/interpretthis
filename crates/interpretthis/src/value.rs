@@ -387,6 +387,69 @@ impl BuiltinIterName {
     }
 }
 
+/// What a [`Value::Lazy`] cursor was produced by, carried inline so
+/// `type(x).__name__`/`repr` reflect CPython's distinct iterator types
+/// (`map`, `filter`, `chain`, ...) without a state lookup. `Generator` is
+/// the default — a genuine generator expression or a `def`/method generator
+/// eagerly buffered into a cursor, both of which CPython names `generator`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LazyKind {
+    #[default]
+    Generator,
+    Map,
+    Filter,
+    Zip,
+    Enumerate,
+    Chain,
+    Islice,
+    Groupby,
+    Accumulate,
+    Combinations,
+    CombinationsWithReplacement,
+    Permutations,
+    Product,
+    Starmap,
+    Takewhile,
+    Dropwhile,
+    Filterfalse,
+    Compress,
+    Pairwise,
+    Tee,
+    ZipLongest,
+    Batched,
+}
+
+impl LazyKind {
+    /// The CPython type name (`type(map(...)).__name__ == "map"`).
+    #[must_use]
+    pub const fn type_name(self) -> &'static str {
+        match self {
+            Self::Generator => "generator",
+            Self::Map => "map",
+            Self::Filter => "filter",
+            Self::Zip => "zip",
+            Self::Enumerate => "enumerate",
+            Self::Chain => "chain",
+            Self::Islice => "islice",
+            Self::Groupby => "groupby",
+            Self::Accumulate => "accumulate",
+            Self::Combinations => "combinations",
+            Self::CombinationsWithReplacement => "combinations_with_replacement",
+            Self::Permutations => "permutations",
+            Self::Product => "product",
+            Self::Starmap => "starmap",
+            Self::Takewhile => "takewhile",
+            Self::Dropwhile => "dropwhile",
+            Self::Filterfalse => "filterfalse",
+            Self::Compress => "compress",
+            Self::Pairwise => "pairwise",
+            Self::Tee => "_tee",
+            Self::ZipLongest => "zip_longest",
+            Self::Batched => "batched",
+        }
+    }
+}
+
 /// Which live dict view a [`Value::DictView`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DictViewKind {
@@ -571,7 +634,7 @@ pub enum Value {
     /// so the variant stays cheaply cloneable (the same `Value::Lazy`
     /// stored in two variables shares one cursor — matching CPython's
     /// reference semantics for generators bound to multiple names).
-    Lazy { items: Vec<Self>, cursor_id: u64 },
+    Lazy { items: Vec<Self>, cursor_id: u64, kind: LazyKind },
     /// Suspended generator function (`def g(): yield ...`). Frame state
     /// lives in `InterpreterState::generators` keyed by `id`.
     Generator { id: u64 },
@@ -2213,7 +2276,8 @@ impl Value {
             Self::EnumMember { .. } => "enum",
             Self::Decimal(..) => "Decimal",
             Self::Fraction(_) => "Fraction",
-            Self::Lazy { .. } | Self::Generator { .. } => "generator",
+            Self::Lazy { kind, .. } => kind.type_name(),
+            Self::Generator { .. } => "generator",
             Self::BuiltinIter { kind, .. } => kind.type_name(),
             Self::Partial { .. } => "functools.partial",
             Self::LruCache(_) => "functools._lru_cache_wrapper",
@@ -2789,7 +2853,7 @@ impl fmt::Display for Value {
             // CPython renders as `<generator object <name> at 0x...>`
             // — we don't track the source name or address so a stable
             // placeholder suffices for printing.
-            Self::Lazy { .. } => write!(f, "<generator object>"),
+            Self::Lazy { kind, .. } => write!(f, "<{} object>", kind.type_name()),
             Self::Generator { .. } => write!(f, "<generator object>"),
             Self::BuiltinIter { kind, .. } => write!(f, "<{} object>", kind.type_name()),
             Self::Partial(data) => write!(f, "functools.partial({})", data.func),
