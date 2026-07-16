@@ -1272,9 +1272,13 @@ fn try_builtin_dunder(
             }
             match crate::eval::operations::apply_binop(lhs, rhs, op, 28, 1_048_576) {
                 Ok(v) => pure(v),
-                // A type mismatch means this dunder doesn't apply to the pair;
-                // fall through to AttributeError rather than surfacing it.
-                Err(_) => Ok(None),
+                // A type mismatch means this dunder doesn't apply to the operand
+                // pair (CPython returns NotImplemented) — fall through to
+                // AttributeError rather than surfacing it. But a real failure of
+                // an *applicable* operation (ZeroDivisionError, OverflowError,
+                // ValueError) must propagate, e.g. `(10).__floordiv__(0)`.
+                Err(EvalError::Interpreter(InterpreterError::TypeError(_))) => Ok(None),
+                Err(e) => Err(e),
             }
         }
         _ => Ok(None),
