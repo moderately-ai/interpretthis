@@ -538,6 +538,19 @@ pub(crate) async fn call_value_as_function(
                     {
                         return super::builtins::make_iterator(state, value, tools).await;
                     }
+                    // A captured classmethod (`f = {}.fromkeys; f(...)`) routes
+                    // through the type-form dispatch (ignoring the receiver).
+                    if let Some((type_name, m)) = crate::types::instance_classmethod(value, method)
+                    {
+                        let unbound = Value::BuiltinTypeMethod {
+                            type_name: type_name.to_string(),
+                            method: m.to_string(),
+                        };
+                        return Box::pin(call_value_as_function(
+                            state, &unbound, args, kwargs, tools,
+                        ))
+                        .await;
+                    }
                     let mut recv = (**value).clone();
                     Ok(dispatch_method(&mut recv, method, args, kwargs)?.value)
                 }

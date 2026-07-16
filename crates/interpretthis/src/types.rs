@@ -498,6 +498,24 @@ const NONE_DUNDERS: &[&str] = &["__bool__"];
 // this engine are `Value::Lazy` / `Value::Generator` / `Value::BuiltinIter`.
 const ITER_DUNDERS: &[&str] = &["__iter__", "__length_hint__", "__next__", "__setstate__"];
 
+/// A `@classmethod`/`@staticmethod` that CPython also exposes on *instances*
+/// (`{}.fromkeys(...)`, `b"".fromhex(...)`, `b"".maketrans(...)`). Returns the
+/// `(type_name, method)` to route through the existing `BuiltinTypeMethod`
+/// dispatch (which ignores the receiver). Keeps instance and type forms in sync.
+pub(crate) fn instance_classmethod(
+    value: &Value,
+    method: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (value, method) {
+        (Value::Dict(_), "fromkeys") => Some(("dict", "fromkeys")),
+        (Value::Bytes(_), "fromhex") => Some(("bytes", "fromhex")),
+        (Value::Bytes(_), "maketrans") => Some(("bytes", "maketrans")),
+        (Value::ByteArray(_), "fromhex") => Some(("bytearray", "fromhex")),
+        (Value::ByteArray(_), "maketrans") => Some(("bytearray", "maketrans")),
+        _ => None,
+    }
+}
+
 /// Whether CPython's `type(value)` defines dunder `name`, for `hasattr` /
 /// `getattr` on builtin values. Returns `false` for user `Instance` / `Class`
 /// values (their dunders resolve through the class registry) and any type not
@@ -3331,6 +3349,8 @@ const BYTES_METHODS: &[&str] = &[
     "zfill",
     "splitlines",
     "expandtabs",
+    "fromhex",
+    "maketrans",
 ];
 
 fn bytes_get_attr(value: &Value, name: &str) -> EvalResult {
@@ -3413,8 +3433,19 @@ pub(crate) fn range_length(start: i64, stop: i64, step: i64) -> usize {
 /// dispatch happens in `eval/functions.rs` — these tables exist so an
 /// attribute lookup returns a method-marker sentinel rather than an
 /// `AttributeError` for valid method names.
-const DICT_METHODS: &[&str] =
-    &["keys", "values", "items", "get", "pop", "popitem", "update", "setdefault", "copy", "clear"];
+const DICT_METHODS: &[&str] = &[
+    "keys",
+    "values",
+    "items",
+    "get",
+    "pop",
+    "popitem",
+    "update",
+    "setdefault",
+    "copy",
+    "clear",
+    "fromkeys",
+];
 
 const STR_METHODS: &[&str] = &[
     "upper",
@@ -3524,6 +3555,8 @@ const BYTEARRAY_METHODS: &[&str] = &[
     "rjust",
     "zfill",
     "splitlines",
+    "fromhex",
+    "maketrans",
 ];
 
 const SET_METHODS: &[&str] = &[

@@ -253,6 +253,12 @@ async fn eval_call_inner(
                         MakeIterator {
                             receiver: Value,
                         },
+                        /// A classmethod/staticmethod invoked through an instance
+                        /// (`{}.fromkeys(...)`) — deferred (async, ignores receiver).
+                        ClassMethod {
+                            type_name: String,
+                            method: String,
+                        },
                         /// ExceptionGroup.subgroup / .split, etc.
                         Exception {
                             receiver: Value,
@@ -267,74 +273,93 @@ async fn eval_call_inner(
                         let root = state.variables.get_mut(&place.root).ok_or_else(|| {
                             EvalError::from(InterpreterError::name_not_defined(&place.root))
                         })?;
-                        match place::with_navigate_mut(root, &place.steps, |target| match target {
-                            Value::Instance(_) => {
-                                Ok::<Dispatch, EvalError>(Dispatch::Instance(target.clone()))
-                            }
-                            Value::Module(module) => Ok(Dispatch::Module(module.clone())),
-                            Value::ModuleFunction { module, name } => Ok(Dispatch::ModuleType {
-                                module: module.clone(),
-                                type_name: name.clone(),
-                            }),
-                            Value::Class(class_name) => Ok(Dispatch::Class(class_name.clone())),
-                            Value::Lazy { .. }
-                            | Value::Generator { .. }
-                            | Value::BuiltinIter { .. }
-                                if super::generators::is_generator_method(method_name) =>
+                        match place::with_navigate_mut(root, &place.steps, |target| {
+                            // A classmethod through an instance (`d.fromkeys(...)`)
+                            // — checked first so the binding is available without
+                            // a match guard.
+                            if let Some((type_name, m)) =
+                                crate::types::instance_classmethod(target, method_name)
                             {
-                                Ok(Dispatch::Generator {
-                                    receiver: target.clone(),
-                                    method: method_name.to_string(),
-                                })
+                                return Ok::<Dispatch, EvalError>(Dispatch::ClassMethod {
+                                    type_name: type_name.to_string(),
+                                    method: m.to_string(),
+                                });
                             }
-                            // `add_note` (PEP 678) mutates the exception in
-                            // place — it appends to `__notes__` — so it must run
-                            // here against the actual slot (`target`) rather than
-                            // on the cloned receiver the deferred `Dispatch::Exception`
-                            // path carries, which would drop the write-back.
-                            Value::Exception(exc) if method_name == "add_note" => {
-                                let note = resolved_args.first().ok_or_else(|| {
-                                    EvalError::from(InterpreterError::TypeError(
+                            match target {
+                                Value::Instance(_) => {
+                                    Ok::<Dispatch, EvalError>(Dispatch::Instance(target.clone()))
+                                }
+                                Value::Module(module) => Ok(Dispatch::Module(module.clone())),
+                                Value::ModuleFunction { module, name } => {
+                                    Ok(Dispatch::ModuleType {
+                                        module: module.clone(),
+                                        type_name: name.clone(),
+                                    })
+                                }
+                                Value::Class(class_name) => Ok(Dispatch::Class(class_name.clone())),
+                                Value::Lazy { .. }
+                                | Value::Generator { .. }
+                                | Value::BuiltinIter { .. }
+                                    if super::generators::is_generator_method(method_name) =>
+                                {
+                                    Ok(Dispatch::Generator {
+                                        receiver: target.clone(),
+                                        method: method_name.to_string(),
+                                    })
+                                }
+                                // `add_note` (PEP 678) mutates the exception in
+                                // place — it appends to `__notes__` — so it must run
+                                // here against the actual slot (`target`) rather than
+                                // on the cloned receiver the deferred `Dispatch::Exception`
+                                // path carries, which would drop the write-back.
+                                Value::Exception(exc) if method_name == "add_note" => {
+                                    let note = resolved_args.first().ok_or_else(|| {
+                                        EvalError::from(InterpreterError::TypeError(
                                         "add_note() takes exactly one positional argument (0 given)"
                                             .into(),
                                     ))
-                                })?;
-                                if !matches!(note, Value::String(_)) {
-                                    return Err(InterpreterError::TypeError(format!(
-                                        "note must be a str, not {}",
-                                        note.type_name()
-                                    ))
-                                    .into());
-                                }
-                                match exc.fields.get_mut("__notes__") {
-                                    Some(Value::List(list)) => list.lock().push(note.clone()),
-                                    _ => {
-                                        exc.fields.insert(
-                                            "__notes__".to_string(),
-                                            Value::List(crate::value::shared_list(vec![
-                                                note.clone(),
-                                            ])),
-                                        );
+                                    })?;
+                                    if !matches!(note, Value::String(_)) {
+                                        return Err(InterpreterError::TypeError(format!(
+                                            "note must be a str, not {}",
+                                            note.type_name()
+                                        ))
+                                        .into());
                                     }
+                                    match exc.fields.get_mut("__notes__") {
+                                        Some(Value::List(list)) => list.lock().push(note.clone()),
+                                        _ => {
+                                            exc.fields.insert(
+                                                "__notes__".to_string(),
+                                                Value::List(crate::value::shared_list(vec![
+                                                    note.clone(),
+                                                ])),
+                                            );
+                                        }
+                                    }
+                                    Ok(Dispatch::Done(Value::None, 0))
                                 }
-                                Ok(Dispatch::Done(Value::None, 0))
-                            }
-                            Value::Exception(_) => Ok(Dispatch::Exception {
-                                receiver: target.clone(),
-                                method: method_name.to_string(),
-                            }),
-                            // `xs.__iter__()` on a builtin iterable — build a
-                            // fresh iterator (deferred; needs async state).
-                            _ if method_name == "__iter__"
-                                && resolved_args.is_empty()
-                                && crate::types::builtin_dunder_present(target, "__iter__") =>
-                            {
-                                Ok(Dispatch::MakeIterator { receiver: target.clone() })
-                            }
-                            _ => {
-                                let outcome =
-                                    dispatch_method(target, method_name, &resolved_args, &kwargs)?;
-                                Ok(Dispatch::Done(outcome.value, outcome.mem_delta))
+                                Value::Exception(_) => Ok(Dispatch::Exception {
+                                    receiver: target.clone(),
+                                    method: method_name.to_string(),
+                                }),
+                                // `xs.__iter__()` on a builtin iterable — build a
+                                // fresh iterator (deferred; needs async state).
+                                _ if method_name == "__iter__"
+                                    && resolved_args.is_empty()
+                                    && crate::types::builtin_dunder_present(target, "__iter__") =>
+                                {
+                                    Ok(Dispatch::MakeIterator { receiver: target.clone() })
+                                }
+                                _ => {
+                                    let outcome = dispatch_method(
+                                        target,
+                                        method_name,
+                                        &resolved_args,
+                                        &kwargs,
+                                    )?;
+                                    Ok(Dispatch::Done(outcome.value, outcome.mem_delta))
+                                }
                             }
                         }) {
                             Ok(inner) => Some(inner?),
@@ -361,6 +386,17 @@ async fn eval_call_inner(
                             Dispatch::MakeIterator { receiver } => {
                                 return super::builtins::make_iterator(state, &receiver, tools)
                                     .await;
+                            }
+                            Dispatch::ClassMethod { type_name, method } => {
+                                let unbound = Value::BuiltinTypeMethod { type_name, method };
+                                return call_value_as_function(
+                                    state,
+                                    &unbound,
+                                    &resolved_args,
+                                    &kwargs,
+                                    tools,
+                                )
+                                .await;
                             }
                             Dispatch::Exception { receiver, method } => {
                                 let Value::Exception(exc) = receiver else {
@@ -560,6 +596,17 @@ async fn eval_call_inner(
                 && crate::types::builtin_dunder_present(&temp, "__iter__")
             {
                 return super::builtins::make_iterator(state, &temp, tools).await;
+            }
+            // A classmethod/staticmethod called through an instance
+            // (`{}.fromkeys(...)`, `b"".fromhex(...)`) — route through the
+            // type-form dispatch, which ignores the receiver.
+            if let Some((type_name, m)) = crate::types::instance_classmethod(&temp, method_name) {
+                let unbound = Value::BuiltinTypeMethod {
+                    type_name: type_name.to_string(),
+                    method: m.to_string(),
+                };
+                return call_value_as_function(state, &unbound, &resolved_args, &kwargs, tools)
+                    .await;
             }
             if matches!(temp, Value::Instance(_)) {
                 let call = CallArgs { positional: &resolved_args, keyword: &kwargs };
