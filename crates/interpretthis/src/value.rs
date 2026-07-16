@@ -1095,6 +1095,12 @@ pub struct ClassValue {
     /// their metaclass from their bases (CPython's implicit metaclass rule).
     #[serde(default)]
     pub metaclass: Option<String>,
+    /// Dotted qualified name (`__qualname__`): `Outer.Inner` for a nested
+    /// class, the bare name for a top-level one. Drives the `<class
+    /// '__main__.Outer.Inner'>` repr and `cls.__qualname__`. Empty when
+    /// deserialized from an older snapshot — callers fall back to `name`.
+    #[serde(default)]
+    pub qualname: String,
 }
 
 impl ClassValue {
@@ -1107,7 +1113,7 @@ impl ClassValue {
             methods: BTreeMap::new(),
             class_attrs: BTreeMap::new(),
             bases: Vec::new(),
-            mro: vec![name],
+            mro: vec![name.clone()],
             properties: BTreeMap::new(),
             static_methods: BTreeMap::new(),
             class_methods: BTreeMap::new(),
@@ -1122,6 +1128,7 @@ impl ClassValue {
             slot_names: Vec::new(),
             abstract_methods: Vec::new(),
             metaclass: None,
+            qualname: name,
         }
     }
 }
@@ -2537,7 +2544,13 @@ impl fmt::Display for Value {
                 write!(f, "<bound method {method} of {}>", exception.type_name)
             }
             Self::LazyProxy(p) => write!(f, "<LazyProxy tool={}>", p.tool_name),
-            Self::Type(n) | Self::Class(n) => write!(f, "<class '{n}'>"),
+            // A builtin type (`int`, `list`) reprs without a module prefix; a
+            // user-defined class lives in the script's `__main__` module, so
+            // CPython prefixes it (`<class '__main__.Foo'>`). This stateless
+            // path uses the bare name for nested classes — the state-aware
+            // `render` path supplies the full `Outer.Inner` qualname.
+            Self::Type(n) => write!(f, "<class '{n}'>"),
+            Self::Class(n) => write!(f, "<class '__main__.{n}'>"),
             Self::Module(n) => write!(f, "<module '{n}'>"),
             Self::Instance(inst) => write!(f, "<{} object>", inst.class_name),
             // A bare builtin *type* name (`int`, `list`, `zip`, …) reprs as

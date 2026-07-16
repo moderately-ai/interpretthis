@@ -253,6 +253,18 @@ pub fn render<'a>(
                 [single] => render(state, single, RenderMode::Display, tools).await,
                 many => Ok(render_sequence(state, many, "(", "", tools).await? + ")"),
             },
+            // A user class reprs as `<class '__main__.Qualname'>`. The
+            // state-aware path supplies the dotted qualname for nested classes
+            // (`Outer.Inner`); the stateless `Display` fallback only has the
+            // bare name.
+            Value::Class(name) => {
+                let qualname = state
+                    .classes
+                    .get(name)
+                    .map(|c| if c.qualname.is_empty() { &c.name } else { &c.qualname })
+                    .unwrap_or(name);
+                Ok(format!("<class '__main__.{qualname}'>"))
+            }
             _ => Ok(match mode {
                 RenderMode::Repr => value.repr(),
                 RenderMode::Display => format!("{value}"),

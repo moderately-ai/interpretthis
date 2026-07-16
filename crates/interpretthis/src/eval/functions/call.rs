@@ -455,6 +455,25 @@ async fn eval_call_inner(
                                     )
                                     .await;
                                 }
+                                // A callable stored as a class attribute — a
+                                // nested class (`Outer.Inner()`) or a plain
+                                // function/lambda assigned in the body
+                                // (`C.handler()`). Resolve and dispatch it
+                                // uniformly (constructor / function call).
+                                if let Some(value) = crate::eval::classes::lookup_class_attr(
+                                    state,
+                                    &class_name,
+                                    method_name,
+                                ) {
+                                    return call_value_as_function(
+                                        state,
+                                        &value,
+                                        &resolved_args,
+                                        &kwargs,
+                                        tools,
+                                    )
+                                    .await;
+                                }
                                 return Err(InterpreterError::AttributeError(format!(
                                     "type object '{class_name}' has no attribute '{method_name}'"
                                 ))

@@ -220,6 +220,14 @@ pub async fn eval_class_def(
     // seeding the class dict built so far before each statement and
     // harvesting freshly-bound names afterwards, then restore the enclosing
     // scope so nothing leaks out — even if the body raises.
+    // `__qualname__`: nested classes are dotted with their enclosing class
+    // (`Outer.Inner`). Push this class's qualname so any nested `class` in the
+    // body sees it, and pop once the body is done.
+    let qualname = match state.class_def_stack.last() {
+        Some(parent) => format!("{parent}.{class_name}"),
+        None => class_name.to_string(),
+    };
+    state.class_def_stack.push(qualname.clone());
     let class_scope_saved = state.variables.clone();
     let body_result: Result<(), EvalError> = async {
         for stmt in &node.body {
@@ -356,6 +364,7 @@ pub async fn eval_class_def(
     // Restore the enclosing scope: class-body names live in the class dict,
     // not the surrounding namespace.
     state.variables = class_scope_saved;
+    state.class_def_stack.pop();
     body_result?;
 
     // C3 linearization gives the method resolution order for this
@@ -422,6 +431,7 @@ pub async fn eval_class_def(
         cv.slot_names = slot_names;
         cv.abstract_methods = abstract_methods;
         cv.metaclass = metaclass_name.clone();
+        cv.qualname = qualname;
         cv
     });
     state
@@ -1856,8 +1866,18 @@ pub async fn invoke_property_deleter(
 /// `Counter.factory(...)` both work without going through the
 /// instance-method path.
 pub fn class_attribute(state: &InterpreterState, class_name: &str, attr: &str) -> EvalResult {
-    if attr == "__name__" || attr == "__qualname__" {
+    if attr == "__name__" {
         return Ok(Value::String(class_name.into()));
+    }
+    if attr == "__qualname__" {
+        // Nested classes carry a dotted qualname (`Outer.Inner`); top-level
+        // classes and pre-qualname snapshots fall back to the bare name.
+        let qualname = state
+            .classes
+            .get(class_name)
+            .map(|c| if c.qualname.is_empty() { class_name } else { c.qualname.as_str() })
+            .unwrap_or(class_name);
+        return Ok(Value::String(qualname.into()));
     }
     if let Some(def) = lookup_static_method(state, class_name, attr) {
         return Ok(Value::Function(std::sync::Arc::new(def)));
@@ -1897,7 +1917,11 @@ pub fn class_attribute(state: &InterpreterState, class_name: &str, attr: &str) -
 /// Walk `class_name`'s MRO looking for `attr` in each ancestor's
 /// `class_attrs`. Returns the first match per CPython's MRO rule (most
 /// derived wins). Returns `None` if no class in the MRO defines `attr`.
-fn lookup_class_attr(state: &InterpreterState, class_name: &str, attr: &str) -> Option<Value> {
+pub(crate) fn lookup_class_attr(
+    state: &InterpreterState,
+    class_name: &str,
+    attr: &str,
+) -> Option<Value> {
     let class = state.classes.get(class_name)?;
     for ancestor_name in &class.mro {
         if let Some(ancestor) = state.classes.get(ancestor_name) {
