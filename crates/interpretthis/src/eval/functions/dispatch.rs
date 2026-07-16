@@ -51,7 +51,6 @@ pub(crate) fn grow_stack<'a, T: 'a>(
     })
 }
 
-/// Call a user-defined function. The heavy recursion runs behind
 /// Invoke a captured `str.format` / `str.format_map` bound method against
 /// `template`. These run the async format mini-language, so they can't go
 /// through the sync `dispatch_method` table the other str methods use — this is
@@ -111,6 +110,7 @@ async fn bound_list_sort(
     .await
 }
 
+/// Call a user-defined function. The heavy recursion runs behind
 /// [`grow_stack`] so deep Python recursion doesn't overflow the host
 /// stack (see its docs).
 pub(crate) async fn call_user_function(
