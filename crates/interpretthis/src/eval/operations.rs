@@ -1532,8 +1532,37 @@ pub(crate) fn values_is(left: &Value, right: &Value) -> bool {
             | Value::ByteArray(_)
             | Value::Array { .. },
         ) => false,
-        // Immutable value types: equality fallback (see doc).
-        _ => values_equal(left, right),
+        // Immutable value types: `is` is identity, which we approximate by
+        // equality for same-typed immutables (`3 is 3`, interned-string-style
+        // `"a" is "a"`). The only values `values_equal` unifies across
+        // *different* Python types are the numeric tower (`1 == 1.0 == True`),
+        // but those are distinct objects — `3.0 is 3`, `1 is True`, `1 is 1.0`
+        // are all False in CPython — so a numeric-kind mismatch short-circuits
+        // to False. (Type objects have several representations — `int` as a
+        // BuiltinName vs `type(42)` — that legitimately `is`-match, so the
+        // guard is scoped to numbers, not a blanket discriminant check.)
+        _ => {
+            if let (Some(a), Some(b)) = (numeric_is_kind(left), numeric_is_kind(right)) {
+                if a != b {
+                    return false;
+                }
+            }
+            values_equal(left, right)
+        }
+    }
+}
+
+/// A tag identifying the Python numeric *type* of a value for `is`
+/// identity, or `None` for non-numbers. `int`/`float`/`bool`/`complex` are
+/// distinct object types even though they compare equal across the tower,
+/// so `is` must not unify them.
+fn numeric_is_kind(v: &Value) -> Option<u8> {
+    match v {
+        Value::Bool(_) => Some(0),
+        Value::Int(_) | Value::BigInt(_) => Some(1),
+        Value::Float(_) => Some(2),
+        Value::Complex(_) => Some(3),
+        _ => None,
     }
 }
 
