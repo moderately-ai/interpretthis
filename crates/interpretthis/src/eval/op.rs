@@ -315,10 +315,17 @@ pub async fn iter(
         // Boxed to satisfy async recursion rules (iter → next → body → iter).
         return Box::pin(drain_generator(state, *id, tools)).await;
     }
-    // A live `iter(list)` cursor drains from its current position to the end of
-    // the shared list — finite, so no iteration cap is needed. The infinite
-    // BuiltinIters (count/cycle/repeat) are not materialised here.
-    if let Value::BuiltinIter { id, kind: crate::value::BuiltinIterName::ListIterator } = value {
+    // A live `iter(list)`/`iter(bytearray)` cursor drains from its current
+    // position to the end of the shared buffer — finite, so no iteration cap is
+    // needed. The infinite BuiltinIters (count/cycle/repeat) are not
+    // materialised here.
+    if let Value::BuiltinIter {
+        id,
+        kind:
+            crate::value::BuiltinIterName::ListIterator
+            | crate::value::BuiltinIterName::BytearrayIterator,
+    } = value
+    {
         let mut out = Vec::new();
         while let Some(v) = state.step_builtin_iter(*id) {
             out.push(v);

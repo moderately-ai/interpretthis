@@ -2104,6 +2104,10 @@ pub(crate) async fn make_iterator(
             crate::value::BuiltinIterName::ListIterator,
             crate::state::BuiltinIterState::ListIter { list: items.clone(), index: 0 },
         )),
+        Value::ByteArray(data) => Ok(state.alloc_builtin_iter(
+            crate::value::BuiltinIterName::BytearrayIterator,
+            crate::state::BuiltinIterState::BytearrayIter { data: data.clone(), index: 0 },
+        )),
         // Any other iterable: materialise into a fresh cursor-backed iterator (a
         // tuple/str/range/dict/set is iterable but not itself an iterator, and
         // being immutable a snapshot is indistinguishable from a live cursor).

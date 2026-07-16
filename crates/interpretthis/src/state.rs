@@ -29,6 +29,9 @@ pub enum BuiltinIterState {
     /// reflects mutations made before the cursor reaches them (CPython's
     /// `list_iterator` semantics), unlike an eager snapshot.
     ListIter { list: crate::value::SharedList, index: usize },
+    /// `iter(bytearray)` — the shared-buffer counterpart of `ListIter`, yielding
+    /// each byte as an int.
+    BytearrayIter { data: crate::value::SharedByteArray, index: usize },
 }
 
 /// `itertools.count` step: `next + step` over the numeric types count
@@ -614,6 +617,16 @@ impl InterpreterState {
                 let guard = list.lock();
                 if *index < guard.len() {
                     let v = guard[*index].clone();
+                    *index += 1;
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            BuiltinIterState::BytearrayIter { data, index } => {
+                let guard = data.lock();
+                if *index < guard.len() {
+                    let v = Value::Int(i64::from(guard[*index]));
                     *index += 1;
                     Some(v)
                 } else {

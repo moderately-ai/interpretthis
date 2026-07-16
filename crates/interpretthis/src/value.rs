@@ -376,6 +376,9 @@ pub enum BuiltinIterName {
     /// `iter(list)` — a live iterator sharing the list, so items appended (or
     /// removed) before the cursor reaches them are observed, as in CPython.
     ListIterator,
+    /// `iter(bytearray)` — the mutable-bytes counterpart of `ListIterator`,
+    /// yielding each byte as an int from the shared buffer.
+    BytearrayIterator,
 }
 
 impl BuiltinIterName {
@@ -387,6 +390,7 @@ impl BuiltinIterName {
             Self::Cycle => "cycle",
             Self::Repeat => "repeat",
             Self::ListIterator => "list_iterator",
+            Self::BytearrayIterator => "bytearray_iterator",
         }
     }
 }
