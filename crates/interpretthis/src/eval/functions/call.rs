@@ -558,6 +558,19 @@ async fn eval_call_inner(
                                     )
                                     .await;
                                 }
+                                // `type.mro()` — the metaclass method, reached
+                                // only after user-defined names (which shadow
+                                // it) are exhausted above.
+                                if method_name == "mro"
+                                    && resolved_args.is_empty()
+                                    && kwargs.is_empty()
+                                {
+                                    if let Some(items) =
+                                        crate::eval::classes::class_mro_values(state, &class_name)
+                                    {
+                                        return Ok(Value::List(crate::value::shared_list(items)));
+                                    }
+                                }
                                 return Err(InterpreterError::AttributeError(format!(
                                     "type object '{class_name}' has no attribute '{method_name}'"
                                 ))
@@ -627,6 +640,26 @@ async fn eval_call_inner(
                 && crate::types::builtin_dunder_present(&temp, "__iter__")
             {
                 return super::builtins::make_iterator(state, &temp, tools).await;
+            }
+            // `type.mro()` on a type-object reached as a temporary
+            // (`type(x).mro()`) or a builtin type name (`int.mro()`). A
+            // user-defined `mro` method on the class shadows the metaclass one.
+            if method_name == "mro" && resolved_args.is_empty() && kwargs.is_empty() {
+                match &temp {
+                    Value::Class(name)
+                        if crate::eval::classes::lookup_method_in_mro(state, name, "mro")
+                            .is_none() =>
+                    {
+                        if let Some(items) = crate::eval::classes::class_mro_values(state, name) {
+                            return Ok(Value::List(crate::value::shared_list(items)));
+                        }
+                    }
+                    Value::Type(name) | Value::BuiltinName(name) | Value::ExceptionType(name) => {
+                        let items = crate::eval::classes::builtin_type_mro_values(name);
+                        return Ok(Value::List(crate::value::shared_list(items)));
+                    }
+                    _ => {}
+                }
             }
             // A classmethod/staticmethod called through an instance
             // (`{}.fromkeys(...)`, `b"".fromhex(...)`) — route through the

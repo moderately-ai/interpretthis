@@ -408,6 +408,46 @@ fn matches_exception_type(
     matches_user_exception(state, exc, type_name)
 }
 
+/// The immediate builtin base of `name` in the hard-coded exception tree, or
+/// `None` at a root (`BaseException`) or for a name not in the tree. Single
+/// source of truth for both subclass tests and MRO expansion.
+pub(crate) fn builtin_exception_parent(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "ZeroDivisionError" | "OverflowError" | "FloatingPointError" => "ArithmeticError",
+        "KeyError" | "IndexError" => "LookupError",
+        // The OSError family: the direct subclasses collapse to OSError, and
+        // the connection errors go through the intermediate ConnectionError.
+        "FileNotFoundError" | "PermissionError" | "TimeoutError" | "IOError"
+        | "BlockingIOError" | "ChildProcessError" | "FileExistsError" | "InterruptedError"
+        | "IsADirectoryError" | "NotADirectoryError" | "ProcessLookupError" | "ConnectionError" => {
+            "OSError"
+        }
+        "BrokenPipeError"
+        | "ConnectionAbortedError"
+        | "ConnectionRefusedError"
+        | "ConnectionResetError" => "ConnectionError",
+        "ModuleNotFoundError" => "ImportError",
+        "ImportError" => "Exception",
+        "IndentationError" | "TabError" => "SyntaxError",
+        "SyntaxError" => "Exception",
+        "UnicodeDecodeError" | "UnicodeEncodeError" | "UnicodeTranslateError" => "UnicodeError",
+        "UnicodeError" => "ValueError",
+        // Stdlib module exception types. Stored module-qualified (the
+        // traceback wording) but placed in the hierarchy so `except
+        // ValueError` / `isinstance(e, ValueError)` honour the real
+        // CPython base. `re.error` subclasses Exception directly.
+        "statistics.StatisticsError" | "json.decoder.JSONDecodeError" => "ValueError",
+        "re.error" => "Exception",
+        "NotImplementedError" | "RecursionError" => "RuntimeError",
+        "AssertionError" | "AttributeError" | "NameError" | "TypeError" | "ValueError"
+        | "RuntimeError" | "OSError" | "LookupError" | "ArithmeticError" | "StopIteration"
+        | "ExceptionGroup" => "Exception",
+        "BaseExceptionGroup" => "BaseException",
+        "Exception" => "BaseException",
+        _ => return None,
+    })
+}
+
 /// Whether `exc_name` is a subclass of `parent` in the hard-coded
 /// builtin tree. Expand as we register more exception constructors.
 pub(crate) fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool {
@@ -416,39 +456,10 @@ pub(crate) fn builtin_exception_issubclass(exc_name: &str, parent: &str) -> bool
         if cur == parent {
             return true;
         }
-        cur = match cur {
-            "ZeroDivisionError" | "OverflowError" | "FloatingPointError" => "ArithmeticError",
-            "KeyError" | "IndexError" => "LookupError",
-            // The OSError family: the direct subclasses collapse to OSError, and
-            // the connection errors go through the intermediate ConnectionError.
-            "FileNotFoundError" | "PermissionError" | "TimeoutError" | "IOError"
-            | "BlockingIOError" | "ChildProcessError" | "FileExistsError" | "InterruptedError"
-            | "IsADirectoryError" | "NotADirectoryError" | "ProcessLookupError"
-            | "ConnectionError" => "OSError",
-            "BrokenPipeError"
-            | "ConnectionAbortedError"
-            | "ConnectionRefusedError"
-            | "ConnectionResetError" => "ConnectionError",
-            "ModuleNotFoundError" => "ImportError",
-            "ImportError" => "Exception",
-            "IndentationError" | "TabError" => "SyntaxError",
-            "SyntaxError" => "Exception",
-            "UnicodeDecodeError" | "UnicodeEncodeError" | "UnicodeTranslateError" => "UnicodeError",
-            "UnicodeError" => "ValueError",
-            // Stdlib module exception types. Stored module-qualified (the
-            // traceback wording) but placed in the hierarchy so `except
-            // ValueError` / `isinstance(e, ValueError)` honour the real
-            // CPython base. `re.error` subclasses Exception directly.
-            "statistics.StatisticsError" | "json.decoder.JSONDecodeError" => "ValueError",
-            "re.error" => "Exception",
-            "NotImplementedError" | "RecursionError" => "RuntimeError",
-            "AssertionError" | "AttributeError" | "NameError" | "TypeError" | "ValueError"
-            | "RuntimeError" | "OSError" | "LookupError" | "ArithmeticError" | "StopIteration"
-            | "ExceptionGroup" => "Exception",
-            "BaseExceptionGroup" => "BaseException",
-            "Exception" => "BaseException",
-            _ => return false,
-        };
+        match builtin_exception_parent(cur) {
+            Some(p) => cur = p,
+            None => return false,
+        }
     }
     false
 }

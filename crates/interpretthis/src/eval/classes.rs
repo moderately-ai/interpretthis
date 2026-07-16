@@ -2427,6 +2427,66 @@ pub fn lookup_method_in_mro(
     None
 }
 
+/// The class's method resolution order as a list of type-object `Value`s,
+/// matching CPython's `Cls.mro()` / `type(x).mro()`. The stored `class.mro`
+/// carries the user-class chain plus the first builtin base; here we expand the
+/// builtin exception tail (`Exception` -> `BaseException`) and always terminate
+/// with `object` (which is implicit and never stored). User-class names become
+/// `Value::Class`; builtin bases become `Value::Type`.
+///
+/// Note: this exposes the same class list as the deliberately-blocked `__mro__`
+/// attribute, but `.mro()` is a normal public method and the actual sandbox
+/// escape gate (`__subclasses__` / `__bases__`) stays blocked, so the class
+/// objects it returns grant no capability the caller lacks.
+pub(crate) fn class_mro_values(state: &InterpreterState, class_name: &str) -> Option<Vec<Value>> {
+    let class = state.classes.get(class_name)?;
+    let mut out: Vec<Value> = class
+        .mro
+        .iter()
+        .map(|n| {
+            if state.classes.contains_key(n) {
+                Value::Class(n.clone())
+            } else {
+                Value::Type(n.clone())
+            }
+        })
+        .collect();
+    // Expand the builtin exception chain past the first stored builtin base.
+    if let Some(last) = class.mro.last() {
+        let mut cur: &str = last;
+        while let Some(parent) = crate::eval::exceptions::builtin_exception_parent(cur) {
+            out.push(Value::Type(parent.to_string()));
+            cur = parent;
+        }
+    }
+    // `object` terminates every MRO and is never stored explicitly.
+    if !matches!(out.last(), Some(Value::Type(n)) if n == "object") {
+        out.push(Value::Type("object".to_string()));
+    }
+    Some(out)
+}
+
+/// `Cls.mro()` for a builtin type object (`int.mro()`, `ValueError.mro()`).
+/// Non-exception builtins linearize to `[name, object]` (`bool` inserts `int`);
+/// exception types expand their hard-coded parent chain up to `object`.
+pub(crate) fn builtin_type_mro_values(name: &str) -> Vec<Value> {
+    if name == "object" {
+        return vec![Value::Type("object".to_string())];
+    }
+    let mut out = vec![Value::Type(name.to_string())];
+    if name == "bool" {
+        out.push(Value::Type("int".to_string()));
+    } else {
+        let mut cur = name;
+        while let Some(parent) = crate::eval::exceptions::builtin_exception_parent(cur) {
+            out.push(Value::Type(parent.to_string()));
+            cur = parent;
+        }
+    }
+    out.push(Value::Type("object".to_string()));
+    out
+}
+
 /// `type(name, bases, dict)` — dynamic class creation.
 pub(crate) fn dynamic_type_new(
     state: &mut InterpreterState,
