@@ -462,10 +462,14 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
     }
     let type_char = if rest.is_empty() { None } else { Some(rest[0]) };
 
+    // Binary/octal/hex group digits by 4, everything else (decimal int,
+    // float) by 3 — CPython's `_PyUnicode_InsertThousandsGrouping`.
+    let grp = if matches!(type_char, Some('b' | 'o' | 'x' | 'X')) { 4 } else { 3 };
+
     // Format the value.
     let raw = format_value_body(value, type_char, precision, alternate)?;
     let formatted = match grouping {
-        Some(sep) => apply_thousands_separator(&raw, sep),
+        Some(sep) => apply_thousands_separator(&raw, sep, grp),
         None => raw,
     };
 
@@ -550,7 +554,6 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
         '=' => {
             // Sign-aware padding goes AFTER any sign and AFTER a radix prefix,
             // so `{:#010x}` of 255 is "0x000000ff", not "0000000xff".
-            let padding = width - display_width;
             let mut head = 0;
             if matches!(with_sign.as_bytes().first(), Some(b'-' | b'+' | b' ')) {
                 head = 1;
@@ -561,7 +564,22 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
                 }
             }
             let (prefix, rest) = with_sign.split_at(head);
-            format!("{prefix}{}{rest}", fill_char.to_string().repeat(padding))
+            match grouping {
+                // `0`-fill with a grouping separator extends the digit run and
+                // re-groups across the padding (`{:010_d}` of 5 -> "0_000_005");
+                // any other fill leaves the padding ungrouped.
+                Some(sep) if fill_char == '0' => {
+                    let int_end = rest.find(['.', 'e', 'E']).unwrap_or(rest.len());
+                    let (int_grouped, tail) = rest.split_at(int_end);
+                    let bare: String = int_grouped.chars().filter(|c| *c != sep).collect();
+                    let avail = width.saturating_sub(prefix.chars().count() + tail.chars().count());
+                    format!("{prefix}{}{tail}", pad_and_group_zero(&bare, avail, grp, sep))
+                }
+                _ => {
+                    let padding = width - display_width;
+                    format!("{prefix}{}{rest}", fill_char.to_string().repeat(padding))
+                }
+            }
         }
         _ => with_sign,
     };
@@ -569,31 +587,72 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> EvalResult {
     Ok(Value::String(padded.into()))
 }
 
-/// Insert `sep` every 3 digits in the integer part of `raw`. The
+/// Insert `sep` every `grp` digits in the integer part of `raw`. The
 /// integer part is the prefix up to the first `.`, `e`, or `E`; any
 /// trailing fraction or exponent passes through unchanged. The sign
-/// prefix (`-` or `+`) is preserved so `-1234` -> `-1,234`. Non-numeric
-/// strings pass through unchanged so format-spec misuses don't crash
-/// the formatter.
-fn apply_thousands_separator(raw: &str, sep: char) -> String {
+/// prefix (`-` or `+`) is preserved so `-1234` -> `-1,234`. `grp` is 3
+/// for decimal/float bodies and 4 for binary/octal/hex (matching
+/// CPython, e.g. `f"{255:_b}" == "1111_1111"`). Non-numeric strings pass
+/// through unchanged so format-spec misuses don't crash the formatter.
+fn apply_thousands_separator(raw: &str, sep: char, grp: usize) -> String {
     let (sign, rest) = match raw.as_bytes().first() {
         Some(b'-' | b'+') => (&raw[..1], &raw[1..]),
         _ => ("", raw),
     };
+    // An alternate-form radix prefix (`0b`/`0o`/`0x`) precedes the digits and
+    // must not be grouped — the `b`/`x` would otherwise read as a hex digit
+    // (`f"{255:#_b}" == "0b1111_1111"`, not `"0b_1111_1111"`).
+    let (prefix, rest) = match rest.get(..2) {
+        Some("0b" | "0B" | "0o" | "0O" | "0x" | "0X") => rest.split_at(2),
+        _ => ("", rest),
+    };
     let int_end = rest.find(['.', 'e', 'E']).unwrap_or(rest.len());
     let (int_part, tail) = rest.split_at(int_end);
-    if !int_part.chars().all(|c| c.is_ascii_digit()) {
+    // Binary/octal/hex bodies (`grp == 4`) carry `a`-`f` digits; decimal
+    // bodies are ASCII digits only. Anything else is not a numeric body.
+    let valid_digit = |c: char| if grp == 4 { c.is_ascii_hexdigit() } else { c.is_ascii_digit() };
+    if int_part.is_empty() || !int_part.chars().all(valid_digit) {
         return raw.to_string();
     }
-    let mut grouped = String::with_capacity(int_part.len() + int_part.len() / 3);
+    let mut grouped = String::with_capacity(int_part.len() + int_part.len() / grp);
     let bytes = int_part.as_bytes();
     for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
+        if i > 0 && (bytes.len() - i) % grp == 0 {
             grouped.push(sep);
         }
         grouped.push(*b as char);
     }
-    format!("{sign}{grouped}{tail}")
+    format!("{sign}{prefix}{grouped}{tail}")
+}
+
+/// CPython's zero-fill-with-grouping: left-pad the bare digit run `digits`
+/// (no separators) with `'0'` and insert `sep` every `grp` digits so the
+/// grouped result reaches at least `avail` characters. Groups are atomic, so
+/// the result can exceed `avail` by up to `grp - 1` when no digit count lands
+/// exactly on the width — e.g. `format(5, "010_b") == "0_0000_0101"` (11 wide
+/// for a requested 10).
+fn pad_and_group_zero(digits: &str, avail: usize, grp: usize, sep: char) -> String {
+    let n = digits.len();
+    // Smallest digit count `d >= n` whose grouped width `d + (d-1)/grp`
+    // reaches `avail`.
+    let mut d = n.max(1);
+    while d + (d - 1) / grp < avail {
+        d += 1;
+    }
+    let mut all = String::with_capacity(d);
+    for _ in 0..d.saturating_sub(n) {
+        all.push('0');
+    }
+    all.push_str(digits);
+    let bytes = all.as_bytes();
+    let mut grouped = String::with_capacity(d + d / grp);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % grp == 0 {
+            grouped.push(sep);
+        }
+        grouped.push(*b as char);
+    }
+    grouped
 }
 
 fn parse_fill_align(chars: &[char]) -> (Option<char>, Option<char>, &[char]) {
