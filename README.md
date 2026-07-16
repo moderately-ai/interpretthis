@@ -61,7 +61,7 @@ async fn main() {
 }
 ```
 
-Requires Rust 1.85+ and Tokio.
+Requires Rust 1.88+ and Tokio.
 
 ## From Python
 

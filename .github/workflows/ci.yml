@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   # Keep in sync with Cargo.toml package.rust-version
-  MSRV: "1.85"
+  MSRV: "1.88"
 
 jobs:
   license-headers:

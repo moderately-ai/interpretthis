@@ -31,7 +31,7 @@ Once you have been invited to work on the crate:
 
 ### Setup
 
-- Rust **1.85+** (`rust-version` in `Cargo.toml`)
+- Rust **1.88+** (`rust-version` in `Cargo.toml`)
 - Host **Python 3.12.x** for the differential parity corpus
 - [pre-commit](https://pre-commit.com/) (asserted via `.pre-commit-config.yaml`)
 - Optional: [addlicense](https://github.com/google/addlicense) for headers
