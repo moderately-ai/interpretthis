@@ -20,6 +20,29 @@ use crate::{
     value::Value,
 };
 
+/// Translate a Python `strftime` format to the equivalent chrono format. The
+/// load-bearing difference is `%f`: Python zero-pads microseconds to 6 digits,
+/// while chrono's `%f` is 9-digit nanoseconds — chrono's `%6f` matches Python.
+fn py_strftime_fmt(fmt: &str) -> String {
+    let mut out = String::with_capacity(fmt.len());
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('f') => out.push_str("%6f"),
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
+                None => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Whether `datetime` provides a **module-level** callable named `name`.
 /// Classmethods on constructors (e.g. `datetime.strptime`) are not listed
 /// here — they resolve through [`type_classmethod`].
@@ -443,8 +466,8 @@ pub fn dispatch_date_method(
             date.ordinal(),
         )),
         "strftime" => {
-            let fmt = arg_str("strftime", args, 0)?;
-            Ok(Value::String(date.format(fmt).to_string().into()))
+            let fmt = py_strftime_fmt(arg_str("strftime", args, 0)?);
+            Ok(Value::String(date.format(&fmt).to_string().into()))
         }
         "replace" => {
             let b = crate::eval::functions::bind_method_params(
@@ -558,8 +581,8 @@ pub fn dispatch_datetime_method(
             dt.ordinal(),
         )),
         "strftime" => {
-            let fmt = arg_str("strftime", args, 0)?;
-            Ok(Value::String(dt.format(fmt).to_string().into()))
+            let fmt = py_strftime_fmt(arg_str("strftime", args, 0)?);
+            Ok(Value::String(dt.format(&fmt).to_string().into()))
         }
         "timestamp" => {
             // CPython treats naive datetime as local time for
@@ -625,8 +648,8 @@ pub fn dispatch_time_method(
             Ok(Value::String(s.into()))
         }
         "strftime" => {
-            let fmt = arg_str("strftime", args, 0)?;
-            Ok(Value::String(t.format(fmt).to_string().into()))
+            let fmt = py_strftime_fmt(arg_str("strftime", args, 0)?);
+            Ok(Value::String(t.format(&fmt).to_string().into()))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "'time' object has no attribute '{method}'"

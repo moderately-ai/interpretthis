@@ -2586,14 +2586,29 @@ impl fmt::Display for Value {
             // CPython: `2026-01-15 14:30:00` for naive datetime;
             // `2026-01-15 14:30:00+00:00` for aware.
             Self::DateTime { dt, tz_offset_secs } => {
+                use chrono::Timelike as _;
                 write!(f, "{}", dt.format("%Y-%m-%d %H:%M:%S"))?;
+                // CPython appends `.ffffff` (6 digits) only when microseconds
+                // are non-zero.
+                let micros = dt.nanosecond() / 1_000;
+                if micros != 0 {
+                    write!(f, ".{micros:06}")?;
+                }
                 if let Some(secs) = tz_offset_secs {
                     write_tz_offset(f, *secs)?;
                 }
                 Ok(())
             }
-            // CPython: `14:30:00`.
-            Self::Time(t) => write!(f, "{}", t.format("%H:%M:%S")),
+            // CPython: `14:30:00`, or `14:30:00.123456` with microseconds.
+            Self::Time(t) => {
+                use chrono::Timelike as _;
+                write!(f, "{}", t.format("%H:%M:%S"))?;
+                let micros = t.nanosecond() / 1_000;
+                if micros != 0 {
+                    write!(f, ".{micros:06}")?;
+                }
+                Ok(())
+            }
             // CPython: `1 day, 3:04:05.000007` etc.
             Self::TimeDelta(micros) => write_timedelta(f, *micros),
             // CPython: `UTC` for offset 0; `UTC+05:00` otherwise.
