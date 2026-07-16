@@ -2184,6 +2184,58 @@ pub struct SuperReceiver<'a> {
 /// the receiver. CPython's `super().method(...)` dispatches against the
 /// original receiver but skips the calling class's own implementation,
 /// which is how cooperative multiple inheritance composes correctly.
+/// `super().attr` attribute READ (not a call): resolve `attr` in the instance's
+/// MRO starting after `defining_class`. A `@property` runs its getter against
+/// the original instance; a class attribute returns its value. The common
+/// `super().method(...)` *call* form is handled separately by
+/// [`super_method_call`]; a bare method capture (`x = super().m`) is rare and
+/// not modelled — it falls through to `AttributeError`.
+pub async fn super_attribute(
+    state: &mut InterpreterState,
+    defining_class: &str,
+    instance: &InstanceValue,
+    attr_name: &str,
+    tools: &Tools,
+) -> EvalResult {
+    let mro = state.classes.get(&instance.class_name).map(|c| c.mro.clone()).ok_or_else(|| {
+        EvalError::from(InterpreterError::Runtime(format!(
+            "super(): instance's class '{}' is not registered",
+            instance.class_name
+        )))
+    })?;
+    let start = mro.iter().position(|c| c == defining_class).ok_or_else(|| {
+        EvalError::from(InterpreterError::TypeError(format!(
+            "super(): '{defining_class}' is not in MRO of '{}'",
+            instance.class_name
+        )))
+    })?;
+    for ancestor_name in mro.iter().skip(start + 1) {
+        let Some(ancestor) = state.classes.get(ancestor_name) else { continue };
+        if let Some(prop) = ancestor.properties.get(attr_name) {
+            let getter = prop.getter.clone();
+            let cache_key = prop.cached.then_some(attr_name);
+            return invoke_property_getter(
+                state,
+                &getter,
+                Value::Instance(instance.clone()),
+                cache_key,
+                tools,
+            )
+            .await;
+        }
+        if let Some(v) = ancestor.class_attrs.get(attr_name) {
+            return Ok(v.clone());
+        }
+        // A method shadows a same-named attribute further up the chain; a bare
+        // super method capture isn't modelled, so stop here.
+        if ancestor.methods.contains_key(attr_name) {
+            break;
+        }
+    }
+    Err(InterpreterError::AttributeError(format!("'super' object has no attribute '{attr_name}'"))
+        .into())
+}
+
 pub async fn super_method_call(
     state: &mut InterpreterState,
     recv: SuperReceiver<'_>,

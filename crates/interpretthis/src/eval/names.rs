@@ -267,6 +267,19 @@ async fn eval_attribute_inner(
         None => (eval_expr(state, &node.value, tools).await?, None),
     };
     let obj = resolve_proxy(&obj).await?;
+    // `super().attr` READ: resolve `attr` through the MRO after the defining
+    // class (a `@property` runs its getter). The `super().method(...)` call form
+    // is handled in the call path, not here.
+    if let Value::Super { defining_class, instance } = &obj {
+        return crate::eval::classes::super_attribute(
+            state,
+            defining_class,
+            instance,
+            attr_name,
+            tools,
+        )
+        .await;
+    }
     getattr_on_value(state, obj, attr_name, tools, place_for_upgrade).await
 }
 
