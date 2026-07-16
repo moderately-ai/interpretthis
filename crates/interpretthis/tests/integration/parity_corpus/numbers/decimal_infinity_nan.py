@@ -23,6 +23,14 @@ print(D("inf") / D("2"))
 print(D("nan") + D("1"))
 print(D("nan") * D("5"))
 
+# A finite dividend over an infinity is a signed zero pinned to the context's
+# Etiny exponent (0E-1000026 for the default context), not a bare 0.
+print(repr(D("1") / D("inf")))
+print(repr(D("-1") / D("inf")))
+print(repr(D("1") / D("-inf")))
+print(repr(D("-1") / D("-inf")))
+print(repr(D("100") / D("inf")))
+
 
 # Operations that create a NaN from non-NaN operands trap InvalidOperation.
 def trap(fn):

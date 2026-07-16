@@ -4469,7 +4469,14 @@ fn decimal_special_arith(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value, E
         BinOp::Div => match (ka.is_infinite(), kb.is_infinite()) {
             (true, true) => invalid(),          // inf / inf
             (true, false) => mk(inf(na != nb)), // inf / finite
-            (false, true) => mk(K::Normal),     // finite / inf -> 0
+            (false, true) => {
+                // finite / inf -> a signed zero pinned to the context's Etiny
+                // exponent (Emin - prec + 1 = -999999 - 28 + 1 = -1000026 for
+                // the default context), so `D(1)/D('inf')` reprs `0E-1000026`.
+                let zero = bigdecimal::BigDecimal::new(num_bigint::BigInt::from(0), 1_000_026);
+                let sign = if na != nb { K::NegZero } else { K::Normal };
+                Ok(Value::Decimal(Box::new(zero), sign))
+            }
             (false, false) => mk(K::Normal),
         },
         // FloorDiv/Mod/Pow with an infinity trap InvalidOperation in CPython too.
