@@ -1089,6 +1089,12 @@ pub struct ClassValue {
     /// Non-empty means the class is abstract and cannot be instantiated.
     #[serde(default)]
     pub abstract_methods: Vec<String>,
+    /// Name of this class's metaclass (a registered class subclassing
+    /// `type`), when one was declared via `metaclass=` or inherited from a
+    /// base. Drives metaclass-hook invocation for subclasses, which inherit
+    /// their metaclass from their bases (CPython's implicit metaclass rule).
+    #[serde(default)]
+    pub metaclass: Option<String>,
 }
 
 impl ClassValue {
@@ -1115,6 +1121,7 @@ impl ClassValue {
             slots: false,
             slot_names: Vec::new(),
             abstract_methods: Vec::new(),
+            metaclass: None,
         }
     }
 }

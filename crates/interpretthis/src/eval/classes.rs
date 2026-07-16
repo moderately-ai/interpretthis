@@ -24,9 +24,12 @@
 //! chain is exhausted, matching CPython's behaviour without modelling
 //! `object`'s instance methods.
 //!
-//! Scope limits (rejected with a clear error rather than silently mis-handled):
-//! metaclass / keyword arguments (out-of-scope) and inheritance cycles
-//! or C3 conflicts (raise `TypeError("Cannot create a consistent method
+//! Metaclasses (`class Meta(type)` + `metaclass=`) are supported for the
+//! common hooks: `__prepare__`, `__new__` (namespace transform via
+//! `super().__new__(mcs, name, bases, ns)`), and `__init__`; a subclass
+//! inherits its base's metaclass. Scope limits (rejected with a clear
+//! error rather than silently mis-handled): inheritance cycles or C3
+//! conflicts (raise `TypeError("Cannot create a consistent method
 //! resolution order")` matching CPython). Class-level decorators
 //! (`@property`-style + `@dataclass` + user callables) are supported;
 //! method-level decorators route through `classify_decorated_method`.
@@ -154,10 +157,29 @@ pub async fn eval_class_def(
         // hierarchy + user MRO.
         let is_exception_base = crate::eval::functions::is_exception_type_name(&base_name)
             || matches!(resolved, Some(Value::ExceptionType(_)));
-        if !state.classes.contains_key(&base_name) && !is_exception_base {
+        // `class Meta(type):` — subclassing the builtin `type` makes the
+        // class a metaclass. `type` is not a registered `ClassValue`; it is
+        // recorded as a base string so `super().__new__(...)` in the
+        // metaclass body walks to the `type.__new__` object default.
+        let is_type_base =
+            base_name == "type" && resolved.is_none() && !state.classes.contains_key(&base_name);
+        if !state.classes.contains_key(&base_name) && !is_exception_base && !is_type_base {
             return Err(InterpreterError::name_not_defined(&base_name).into());
         }
         bases.push(base_name);
+    }
+
+    // A class with no explicit `metaclass=` inherits its metaclass from its
+    // bases (CPython's implicit rule) — the first base that carries one wins.
+    // This is what makes subclasses of a metaclass-managed base (e.g. plugin
+    // registries) run the metaclass hooks too.
+    if metaclass_name.is_none() {
+        for base in &bases {
+            if let Some(mc) = state.classes.get(base).and_then(|c| c.metaclass.clone()) {
+                metaclass_name = Some(mc);
+                break;
+            }
+        }
     }
 
     let mut methods: BTreeMap<String, FunctionDef> = BTreeMap::new();
@@ -399,6 +421,7 @@ pub async fn eval_class_def(
         cv.slots = slots;
         cv.slot_names = slot_names;
         cv.abstract_methods = abstract_methods;
+        cv.metaclass = metaclass_name.clone();
         cv
     });
     state
@@ -2077,22 +2100,41 @@ pub async fn super_class_method_call(
         ))
         .into());
     };
-    let start = class.mro.iter().position(|c| c == defining_class).ok_or_else(|| {
-        EvalError::from(InterpreterError::TypeError(format!(
-            "super(): '{defining_class}' is not in MRO of '{class_name}'"
-        )))
-    })?;
+    // A metaclass method (`InitMeta.__init__(cls, name, bases, ns)`) binds
+    // `super()` to (defining_class=the metaclass, class_name=the *created*
+    // class `cls`). The metaclass is not in the created class's MRO — its
+    // super() resolves against `type`, whose slots are the object defaults
+    // handled below. Detect that case and skip straight to the defaults
+    // rather than raising "not in MRO".
+    let start = match class.mro.iter().position(|c| c == defining_class) {
+        Some(s) => Some(s),
+        None if state
+            .classes
+            .get(defining_class)
+            .is_some_and(|c| c.bases.iter().any(|b| b == "type")) =>
+        {
+            None
+        }
+        None => {
+            return Err(InterpreterError::TypeError(format!(
+                "super(): '{defining_class}' is not in MRO of '{class_name}'"
+            ))
+            .into());
+        }
+    };
     let mut found = None;
-    for ancestor_name in class.mro.iter().skip(start + 1) {
-        if let Some(ancestor) = state.classes.get(ancestor_name) {
-            let def = ancestor
-                .class_methods
-                .get(method_name)
-                .or_else(|| ancestor.static_methods.get(method_name))
-                .or_else(|| ancestor.methods.get(method_name));
-            if let Some(def) = def {
-                found = Some(def.clone());
-                break;
+    if let Some(start) = start {
+        for ancestor_name in class.mro.iter().skip(start + 1) {
+            if let Some(ancestor) = state.classes.get(ancestor_name) {
+                let def = ancestor
+                    .class_methods
+                    .get(method_name)
+                    .or_else(|| ancestor.static_methods.get(method_name))
+                    .or_else(|| ancestor.methods.get(method_name));
+                if let Some(def) = def {
+                    found = Some(def.clone());
+                    break;
+                }
             }
         }
     }
@@ -2101,6 +2143,45 @@ pub async fn super_class_method_call(
             let (returned, _self) =
                 call_method(state, &def, Value::Class(class_name.to_string()), call, tools).await?;
             Ok(returned)
+        }
+        // `super().__new__(mcs, name, bases, ns)` inside a metaclass (a class
+        // subclassing `type`): this is `type.__new__`, which builds the *class*
+        // named `name` from namespace `ns` — not a blank instance. The target
+        // class was already registered before the metaclass ran, so merge the
+        // (possibly metaclass-modified) namespace into its class attributes and
+        // hand back the class.
+        None if method_name == "__new__"
+            && state
+                .classes
+                .get(class_name)
+                .is_some_and(|c| c.bases.iter().any(|b| b == "type"))
+            && call.positional.len() >= 4 =>
+        {
+            let Some(Value::String(new_name)) = call.positional.get(1) else {
+                return Err(InterpreterError::TypeError(
+                    "type.__new__() argument 1 (name) must be str".into(),
+                )
+                .into());
+            };
+            let new_name = new_name.to_string();
+            if let Some(ns) = call.positional.get(3).and_then(Value::as_dict) {
+                let entries: Vec<(String, Value)> = ns
+                    .lock()
+                    .iter()
+                    .filter_map(|(k, v)| match k {
+                        crate::value::ValueKey::String(s) => Some((s.to_string(), v.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                let target = state
+                    .classes
+                    .entry(new_name.clone())
+                    .or_insert_with(|| ClassValue::new(&new_name));
+                for (k, v) in entries {
+                    target.class_attrs.insert(k, v);
+                }
+            }
+            Ok(Value::Class(new_name))
         }
         // `super().__new__(cls)` at the object level: the default
         // `object.__new__` — a blank instance of the class being constructed.
