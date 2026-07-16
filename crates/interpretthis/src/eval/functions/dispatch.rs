@@ -84,6 +84,33 @@ async fn bound_str_format(
     crate::eval::strings::str_format(state, template, &[], &kw, tools).await
 }
 
+/// A captured `list.sort` bound method — async because `key=` runs a user
+/// callable, so (like `str.format`) it can't go through the sync
+/// `dispatch_method` table. Returns the sorted `Vec`; the caller writes it back
+/// (Place receiver) or discards it (Snapshot, where the sort is unobservable).
+/// Mirrors the direct-call sort in `call.rs`.
+async fn bound_list_sort(
+    state: &mut InterpreterState,
+    items: Vec<Value>,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> Result<Vec<Value>, EvalError> {
+    if !args.is_empty() {
+        return Err(
+            InterpreterError::TypeError("sort() takes no positional arguments".into()).into()
+        );
+    }
+    let key_fn = kwargs.get("key").cloned();
+    let reverse = kwargs.get("reverse").is_some_and(Value::is_truthy);
+    super::helpers::dsu_sort(
+        state,
+        tools,
+        super::helpers::SortRequest { items, key_fn: key_fn.as_ref(), reverse },
+    )
+    .await
+}
+
 /// [`grow_stack`] so deep Python recursion doesn't overflow the host
 /// stack (see its docs).
 pub(crate) async fn call_user_function(
@@ -647,6 +674,21 @@ pub(crate) async fn call_value_as_function(
                                 .await;
                         }
                     }
+                    // `list.sort` on a Snapshot receiver: the captured
+                    // `Value::List` shares storage (the `Arc`) with the original,
+                    // so sort the shared buffer in place — `getattr(xs, "sort")()`
+                    // mutates `xs`, while a literal's temp is simply unobserved.
+                    if method == "sort" {
+                        if let Value::List(list) = &**value {
+                            let list = list.clone();
+                            let items = std::mem::take(&mut *list.lock());
+                            let sorted =
+                                Box::pin(bound_list_sort(state, items, args, kwargs, tools))
+                                    .await?;
+                            *list.lock() = sorted;
+                            return Ok(Value::None);
+                        }
+                    }
                     let mut recv = (**value).clone();
                     Ok(dispatch_method(&mut recv, method, args, kwargs)?.value)
                 }
@@ -707,6 +749,34 @@ pub(crate) async fn call_value_as_function(
                         if let Some(template) = template {
                             return bound_str_format(state, &template, method, args, kwargs, tools)
                                 .await;
+                        }
+                    }
+                    // Async `list.sort` on a place-captured list: take the items
+                    // out, sort, write the order back — mutation is observable on
+                    // the original variable, as in the direct-call path.
+                    if method == "sort" {
+                        let taken = {
+                            let root_slot = state.variables.get_mut(root).ok_or_else(|| {
+                                EvalError::from(InterpreterError::name_not_defined(root))
+                            })?;
+                            with_navigate_mut(root_slot, &pl_steps, |target| match target {
+                                Value::List(items) => Some(std::mem::take(&mut *items.lock())),
+                                _ => None,
+                            })?
+                        };
+                        if let Some(items) = taken {
+                            let sorted =
+                                Box::pin(bound_list_sort(state, items, args, kwargs, tools))
+                                    .await?;
+                            let root_slot = state.variables.get_mut(root).ok_or_else(|| {
+                                EvalError::from(InterpreterError::name_not_defined(root))
+                            })?;
+                            with_navigate_mut(root_slot, &pl_steps, |target| {
+                                if let Value::List(items) = target {
+                                    *items.lock() = sorted;
+                                }
+                            })?;
+                            return Ok(Value::None);
                         }
                     }
                     let outcome = {

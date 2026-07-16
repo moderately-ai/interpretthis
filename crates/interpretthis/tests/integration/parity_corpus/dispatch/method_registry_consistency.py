@@ -25,7 +25,7 @@ print(probe("Hello World", ["upper","lower","title","capitalize","swapcase","cas
     {"join":(["a","b"],),"format_map":({},),"translate":({}, )}))
 
 print(probe([1,2,3], ["append","extend","insert","remove","pop","clear","index","count",
-    "reverse","copy"], {"append":(4,),"extend":([5],),"insert":(0,9),"remove":(1,),
+    "sort","reverse","copy"], {"append":(4,),"extend":([5],),"insert":(0,9),"remove":(1,),
     "index":(2,)}))
 
 print(probe({"a":1}, ["keys","values","items","get","pop","popitem","clear","update",
