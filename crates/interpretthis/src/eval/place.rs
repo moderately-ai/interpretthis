@@ -259,6 +259,23 @@ fn nav_recurse<R>(
                 let v = map.entry(k).or_insert(Value::Int(0));
                 nav_recurse(v, tail, f)
             }
+            Value::OrderedDict(map) => {
+                let k = value_to_key(key)?;
+                let mut guard = map.lock();
+                let v = guard
+                    .get_mut(&k)
+                    .ok_or_else(|| EvalError::Exception(ExceptionValue::key_error(&k)))?;
+                nav_recurse(v, tail, f)
+            }
+            Value::Deque { items, .. } => {
+                // `seq_index` has already bounds-checked (and normalised a
+                // negative index), so `get_mut` cannot miss here.
+                let idx = seq_index(items.len(), key)?;
+                let v = items.get_mut(idx).ok_or_else(|| {
+                    EvalError::from(InterpreterError::Runtime("deque index out of range".into()))
+                })?;
+                nav_recurse(v, tail, f)
+            }
             other => Err(InterpreterError::TypeError(format!(
                 "'{}' object is not subscriptable",
                 other.type_name()
@@ -359,6 +376,20 @@ fn set_index(container: &mut Value, key: &Value, value: Value) -> Result<isize, 
             |old| size_delta(estimate_value_size(&old), new_size),
         );
         return Ok(delta);
+    }
+    // `deque[i] = v` assigns in place at a (possibly negative) index — a deque
+    // is a mutable sequence but has no `set_item_slot` type-object entry.
+    if let Value::Deque { items, .. } = container {
+        let idx = seq_index(items.len(), key)?;
+        let new_size = estimate_value_size(&value);
+        return items.get_mut(idx).map_or_else(
+            || Err(InterpreterError::Runtime("deque index out of range".into()).into()),
+            |slot| {
+                let delta = size_delta(estimate_value_size(slot), new_size);
+                *slot = value;
+                Ok(delta)
+            },
+        );
     }
     crate::types::dispatch_setitem(container, key, value)
 }
