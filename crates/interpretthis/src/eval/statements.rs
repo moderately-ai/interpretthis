@@ -317,12 +317,19 @@ fn pretouch_defaultdict_inner<'a>(
             .variables
             .get_mut(&place.root)
             .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&place.root)))?;
-        place::with_navigate_mut(root, &place.steps, |slot| {
+        // Charge the synthesised entry against the budget — without this, a
+        // `dd[i] += ...` loop over fresh keys grows the defaultdict for free.
+        let delta = place::with_navigate_mut(root, &place.steps, |slot| {
             if let (Value::DefaultDict(data), Some(s)) = (slot, synth.take()) {
+                let entry =
+                    crate::state::estimate_key_size(&key) + crate::state::estimate_value_size(&s);
                 data.items.insert(key.clone(), s);
+                place::to_isize(entry)
+            } else {
+                0
             }
         })?;
-        Ok(())
+        place::apply_mem_delta(state, delta)
     })
 }
 

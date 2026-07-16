@@ -184,7 +184,7 @@ pub(crate) fn dispatch_dict_method(
     }
 }
 
-fn insert_entry(map: &mut IndexMap<ValueKey, Value>, k: ValueKey, v: Value) -> isize {
+pub(crate) fn insert_entry(map: &mut IndexMap<ValueKey, Value>, k: ValueKey, v: Value) -> isize {
     let v_size = estimate_value_size(&v);
     map.insert(k.clone(), v).map_or_else(
         || place::to_isize(estimate_key_size(&k) + v_size),

@@ -103,17 +103,17 @@ pub(crate) fn dispatch_counter_method(
         // `c.subtract(other, **kwargs)` decrements counts. Unlike +/- which
         // keep_positive, subtract allows zero and negative counts.
         "subtract" => {
-            counter_apply_in_place(map, args.first(), |cur, delta| cur - delta)?;
-            counter_apply_kwargs(map, kwargs, |cur, delta| cur - delta);
-            Ok(MethodOutcome::pure(Value::None))
+            let mut delta = counter_apply_in_place(map, args.first(), |cur, delta| cur - delta)?;
+            delta += counter_apply_kwargs(map, kwargs, |cur, delta| cur - delta);
+            Ok(counter_mem_outcome(delta))
         }
         // `c.update(other, **kwargs)` increments counts (DIFFERS from
         // dict.update which overwrites). Same semantics as Counter(iter) on
         // first construction; keyword counts merge last (`c.update(a=1)`).
         "update" => {
-            counter_apply_in_place(map, args.first(), |cur, delta| cur + delta)?;
-            counter_apply_kwargs(map, kwargs, |cur, delta| cur + delta);
-            Ok(MethodOutcome::pure(Value::None))
+            let mut delta = counter_apply_in_place(map, args.first(), |cur, delta| cur + delta)?;
+            delta += counter_apply_kwargs(map, kwargs, |cur, delta| cur + delta);
+            Ok(counter_mem_outcome(delta))
         }
         // `c.total()` returns the sum of all counts.
         "total" => {
@@ -135,15 +135,25 @@ pub(crate) fn dispatch_counter_method(
     }
 }
 
+/// Build the `MethodOutcome` carrying the accumulated byte delta so the caller
+/// charges the new entries against the memory budget (Counter growth was
+/// previously unaccounted — a `c.update([...new keys...])` loop could evade the
+/// memory limit).
+fn counter_mem_outcome(mem_delta: isize) -> MethodOutcome {
+    MethodOutcome { value: Value::None, mem_delta }
+}
+
 /// Apply keyword counts (`c.update(a=1, b=2)`) against `map` with `op`.
-/// Each keyword is a string key whose value is the integer delta.
+/// Each keyword is a string key whose value is the integer delta. Returns the
+/// byte delta of newly-added entries.
 fn counter_apply_kwargs(
     map: &mut IndexMap<ValueKey, Value>,
     kwargs: &IndexMap<String, Value>,
     op: fn(i64, i64) -> i64,
-) {
+) -> isize {
+    let mut mem_delta = 0;
     for (name, value) in kwargs {
-        let delta = match value {
+        let amount = match value {
             Value::Int(i) => *i,
             Value::Bool(b) => i64::from(*b),
             _ => continue,
@@ -154,8 +164,13 @@ fn counter_apply_kwargs(
             Some(Value::Bool(b)) => i64::from(*b),
             _ => 0,
         };
-        map.insert(key, Value::Int(op(cur, delta)));
+        mem_delta += crate::eval::functions::methods::dict::insert_entry(
+            map,
+            key,
+            Value::Int(op(cur, amount)),
+        );
     }
+    mem_delta
 }
 
 /// Apply `op` to each (key, delta) from `other_arg` against `map`'s
@@ -167,8 +182,10 @@ fn counter_apply_in_place(
     map: &mut IndexMap<ValueKey, Value>,
     other_arg: Option<&Value>,
     op: fn(i64, i64) -> i64,
-) -> Result<(), EvalError> {
-    let Some(other) = other_arg else { return Ok(()) };
+) -> Result<isize, EvalError> {
+    let Some(other) = other_arg else { return Ok(0) };
+    let insert_entry = crate::eval::functions::methods::dict::insert_entry;
+    let mut mem_delta = 0;
     // Mapping branch. Snapshot Dict/Counter contents into an owned map.
     let other_map = match other {
         Value::Dict(m) => Some(m.lock().clone()),
@@ -177,7 +194,7 @@ fn counter_apply_in_place(
     };
     if let Some(other_map) = other_map {
         for (k, v) in &other_map {
-            let delta = match v {
+            let amount = match v {
                 Value::Int(i) => *i,
                 Value::Bool(b) => i64::from(*b),
                 _ => 0,
@@ -187,10 +204,9 @@ fn counter_apply_in_place(
                 Some(Value::Bool(b)) => i64::from(*b),
                 _ => 0,
             };
-            let new_val = op(cur, delta);
-            map.insert(k.clone(), Value::Int(new_val));
+            mem_delta += insert_entry(map, k.clone(), Value::Int(op(cur, amount)));
         }
-        return Ok(());
+        return Ok(mem_delta);
     }
     // Iterable branch: each item adds 1 to its slot. For subtract,
     // each item subtracts 1.
@@ -201,8 +217,7 @@ fn counter_apply_in_place(
             Some(Value::Bool(b)) => i64::from(*b),
             _ => 0,
         };
-        let new_val = op(cur, 1);
-        map.insert(key, Value::Int(new_val));
+        mem_delta += insert_entry(map, key, Value::Int(op(cur, 1)));
     }
-    Ok(())
+    Ok(mem_delta)
 }

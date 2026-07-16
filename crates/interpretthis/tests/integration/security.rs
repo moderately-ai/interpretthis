@@ -450,6 +450,56 @@ for i in range(100000):
 }
 
 #[tokio::test]
+async fn security_memory_limit_counter_update_loop() {
+    // `Counter.update` with fresh keys grows the counter in place. That growth
+    // must be charged, or an update loop with new keys evades the memory limit.
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_memory_bytes = 8192;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+from collections import Counter
+c = Counter()
+for i in range(100000):
+    c.update([str(i)])
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(
+        resp.error.is_some(),
+        "a Counter.update loop adding new keys must hit the memory limit"
+    );
+}
+
+#[tokio::test]
+async fn security_memory_limit_defaultdict_pretouch_loop() {
+    // `dd[i] += 1` on a defaultdict synthesises a fresh entry per new key; that
+    // synthesis must be charged, or the counting-loop pattern evades the budget.
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_memory_bytes = 8192;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+from collections import defaultdict
+dd = defaultdict(int)
+for i in range(100000):
+    dd[i] += 1
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(
+        resp.error.is_some(),
+        "a defaultdict counting loop over new keys must hit the memory limit"
+    );
+}
+
+#[tokio::test]
 async fn security_memory_limit_string_concat_loop() {
     let mut cfg = InterpreterConfig::default();
     cfg.max_memory_bytes = 2048;
