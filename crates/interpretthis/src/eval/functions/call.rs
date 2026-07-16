@@ -264,6 +264,11 @@ async fn eval_call_inner(
                             receiver: Value,
                             method: String,
                         },
+                        /// `callable.__call__(args)` — invoke the callable (async,
+                        /// so deferred out of the sync place navigation).
+                        CallSelf {
+                            receiver: Value,
+                        },
                     }
                     // Place navigation only models Instance/Dict/List slots.
                     // `module.member.method(...)` (Attr step on Module) cannot
@@ -351,6 +356,19 @@ async fn eval_call_inner(
                                 {
                                     Ok(Dispatch::MakeIterator { receiver: target.clone() })
                                 }
+                                // `f.__call__(args)` on a first-class callable
+                                // invokes it — the explicit form of `f(args)`.
+                                Value::Function(_)
+                                | Value::Lambda(_)
+                                | Value::Partial(_)
+                                | Value::BoundMethod { .. }
+                                | Value::BuiltinTypeMethod { .. }
+                                | Value::LruCache(_)
+                                | Value::SingleDispatch(_)
+                                    if method_name == "__call__" =>
+                                {
+                                    Ok(Dispatch::CallSelf { receiver: target.clone() })
+                                }
                                 _ => {
                                     let outcome = dispatch_method(
                                         target,
@@ -392,6 +410,16 @@ async fn eval_call_inner(
                                 return call_value_as_function(
                                     state,
                                     &unbound,
+                                    &resolved_args,
+                                    &kwargs,
+                                    tools,
+                                )
+                                .await;
+                            }
+                            Dispatch::CallSelf { receiver } => {
+                                return call_value_as_function(
+                                    state,
+                                    &receiver,
                                     &resolved_args,
                                     &kwargs,
                                     tools,
@@ -744,6 +772,12 @@ async fn eval_call_inner(
                 .await?;
                 return call_value_as_function(state, &accessor, &resolved_args, &kwargs, tools)
                     .await;
+            }
+            // `callable.__call__(args)` on a non-place callable receiver
+            // (`str.upper.__call__("x")`, `(lambda: 1).__call__()`) invokes it —
+            // the explicit form of `callable(args)`.
+            if method_name == "__call__" && super::builtins::value_is_callable(state, &temp) {
+                return call_value_as_function(state, &temp, &resolved_args, &kwargs, tools).await;
             }
             // The receiver here is a builtin with a *synchronous* method table
             // (str/list/dict/set/…) — module functions, generators, and
