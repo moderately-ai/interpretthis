@@ -137,8 +137,13 @@ pub(crate) fn dispatch_decimal_method(
                     num_bigint::BigInt::from(1),
                 )
             };
+            // CPython returns a plain `(numerator, denominator)` int tuple in
+            // lowest terms, not a Fraction. `BigRational::new` reduces for us.
             let ratio = num_rational::BigRational::new(num, den);
-            Ok(Value::Fraction(Box::new(ratio)))
+            Ok(Value::Tuple(vec![
+                crate::value::int_from_bigint(ratio.numer().clone()),
+                crate::value::int_from_bigint(ratio.denom().clone()),
+            ]))
         }
         _ => Err(InterpreterError::AttributeError(format!(
             "'Decimal' object has no attribute '{method}'"
