@@ -31,6 +31,24 @@ mod tools;
 use convert::{SandboxValue, value_to_js};
 use tools::{JsToolHandler, ToolEntry};
 
+/// napi's default Tokio runtime inherits the platform's default thread-stack
+/// size. On musl (Alpine) that default is only 128 KiB — far too small for the
+/// async evaluator's `Box::pin`'d recursion plus napi/Tokio's own frames, so the
+/// addon crashed with a stack overflow on Alpine even for trivial scripts (it
+/// works on glibc, whose default is ~8 MiB). Install a runtime with an explicit,
+/// generous stack so the interpreter has head-room before its own
+/// `stacker`-based growth takes over. Runs once, at module load, before any
+/// `execute` call touches the runtime.
+#[napi_derive::module_init]
+fn init_tokio_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()
+        .expect("failed to build the interpretthis Tokio runtime");
+    napi::bindgen_prelude::create_custom_tokio_runtime(runtime);
+}
+
 /// Wire format of `exportState` blobs. Independent of the package version: a blob
 /// is portable between builds that agree on this number, and no others.
 #[napi]
