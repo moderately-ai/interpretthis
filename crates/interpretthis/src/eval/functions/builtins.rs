@@ -771,6 +771,15 @@ pub(super) async fn try_builtin(
                     if target_name == "object" || c.mro.iter().any(|a| a == target_name) {
                         return true;
                     }
+                    // A user exception subclass stores only the user chain plus
+                    // its first builtin base (`ValidationError` -> `ValueError`);
+                    // expand the builtin-exception parent chain from each MRO
+                    // entry so `issubclass(ValidationError, Exception)` is True.
+                    if c.mro.iter().any(|a| {
+                        crate::eval::exceptions::builtin_exception_issubclass(a, target_name)
+                    }) {
+                        return true;
+                    }
                 }
                 builtin_type_issubclass(&child_name, target_name)
             };
