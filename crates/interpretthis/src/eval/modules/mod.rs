@@ -8,9 +8,10 @@
 //! submodule per emulated module. Every module implements the [`Module`]
 //! trait — a single registration point ([`MODULES`]) maps the module name
 //! to its handler so adding a stdlib module is one line in the registry
-//! plus one trait impl in its own file. Modules carry no I/O, randomness,
-//! or clock access, so everything here stays deterministic and
-//! sandbox-safe.
+//! plus one trait impl in its own file. Modules carry no real I/O or
+//! wall-clock access; `random` is deterministic (a seeded Mersenne Twister
+//! in `InterpreterState`, no OS entropy), so everything here stays
+//! reproducible and sandbox-safe.
 
 pub mod abc_mod;
 pub mod array_mod;
