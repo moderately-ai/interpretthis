@@ -8,7 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Post-0.4 hardening: closing CPython parity gaps found by widening the differential
-parity corpus, with no host-boundary surface added.
+parity corpus, plus a sandbox-robustness pass over the host-binding, resource-limit,
+and state-resume seams. No new host-boundary surface.
+
+### Security / robustness
+
+- **Sandbox-constructible inputs can no longer abort the embedding host process**
+  (an uncatchable `SIGSEGV`/`SIGABRT` is an effect outside the sandbox):
+  - Value↔host conversion in both bindings now caps recursion depth and grows the
+    stack, so a self-referential (`a = []; a.append(a)`) or deeply nested value
+    raises a clean error instead of overflowing the FFI stack. The Node `DateTime`
+    conversion uses checked arithmetic (chrono's `-` panics out of range).
+  - `range()` materialisation, `bytes(n)`/`bytearray(n)`, and integer `**` are now
+    bounded *before* allocating, so `list(range(10**18))`, `bytes(10**18)`, and
+    `(2**1000000)**1000000` raise rather than OOM-abort.
+  - Sizing and dropping a deeply-nested value grow the stack instead of overflowing.
+- THREAT_MODEL.md documents the state-resume trust boundary precisely: import
+  fails closed on the size/version gate but trusts blob *contents*, so untrusted
+  blobs must be host-signed (no host-escape primitive is reachable regardless).
+
+### Performance
+
+- Memory sizing of lists and dicts is now O(1) per assignment/mutation via a
+  cached byte size carried on the container, instead of re-walking the whole
+  value each time. Loop-built deep nesting (`a = [a]`) and appending a large
+  nested container go from O(n²)/O(n) to O(n)/O(1); a 50 000-deep build that
+  previously timed out now completes in ~0.1 s.
 
 ### Added
 
