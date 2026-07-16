@@ -1285,6 +1285,11 @@ fn values_equal(left: &Value, right: &Value) -> bool {
             *f == if *b { 1.0 } else { 0.0 }
         }
         (Value::Int(i), Value::Float(f)) | (Value::Float(f), Value::Int(i)) => *f == (*i as f64),
+        // Functions/lambdas compare by object identity (their shared `Arc`),
+        // matching CPython: `f == f` is True, two distinct functions are not
+        // equal, and set/dict membership over functions works by identity.
+        (Value::Function(a), Value::Function(b)) => std::sync::Arc::ptr_eq(a, b),
+        (Value::Lambda(a), Value::Lambda(b)) => std::sync::Arc::ptr_eq(a, b),
         // Collection equality — List and Tuple compare element-wise.
         // List is shared via Arc<Mutex<Vec>> so identity-aliased pairs
         // short-circuit via Arc::ptr_eq before any locking, then both

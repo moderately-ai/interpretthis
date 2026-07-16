@@ -1453,6 +1453,11 @@ impl PartialEq for ValueKey {
                     (Value::Instance(ia), Value::Instance(ib)) => {
                         std::sync::Arc::ptr_eq(&ia.fields, &ib.fields)
                     }
+                    // Functions/lambdas key by object identity (their shared
+                    // `Arc`), so the same function object matches itself and two
+                    // distinct ones never collide.
+                    (Value::Function(fa), Value::Function(fb)) => std::sync::Arc::ptr_eq(fa, fb),
+                    (Value::Lambda(la), Value::Lambda(lb)) => std::sync::Arc::ptr_eq(la, lb),
                     // Instance keys always box an `Instance`; the
                     // structural fallback is defensive only.
                     _ => crate::eval::operations::values_equal_pub(a, b),

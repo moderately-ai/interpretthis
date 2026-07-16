@@ -285,6 +285,19 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
                 })
             }
         },
+        // Functions and lambdas are hashable in CPython (by object identity),
+        // so they can be dict keys / set members. Key on the `Arc` pointer:
+        // distinct function objects get distinct keys, the same object (shared
+        // `Arc`) keys alike. The hash is identity-based (not CPython's exact
+        // address hash, which is non-deterministic there too).
+        Value::Function(fd) => Ok(ValueKey::Instance {
+            hash: std::sync::Arc::as_ptr(fd) as *const () as usize as i64,
+            value: Box::new(val.clone()),
+        }),
+        Value::Lambda(ld) => Ok(ValueKey::Instance {
+            hash: std::sync::Arc::as_ptr(ld) as *const () as usize as i64,
+            value: Box::new(val.clone()),
+        }),
         _ => Err(crate::error::InterpreterError::TypeError(format!(
             "unhashable type: '{}'",
             val.type_name()
