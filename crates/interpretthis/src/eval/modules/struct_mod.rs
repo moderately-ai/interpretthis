@@ -34,12 +34,12 @@ impl super::Module for StructModule {
     }
 
     fn has_function(&self, name: &str) -> bool {
-        matches!(name, "pack" | "unpack" | "calcsize")
+        matches!(name, "pack" | "unpack" | "calcsize" | "iter_unpack")
     }
 
     async fn call(
         &self,
-        _state: &mut InterpreterState,
+        state: &mut InterpreterState,
         func: &str,
         args: &[Value],
         _kwargs: &IndexMap<String, Value>,
@@ -57,6 +57,29 @@ impl super::Module for StructModule {
             "unpack" => {
                 let (mode, items) = parse_format(str_arg(args.first(), "unpack")?)?;
                 unpack(mode, &items, &bytes_arg(args.get(1))?)
+            }
+            // `iter_unpack(fmt, buffer)` — unpack the buffer as a sequence of
+            // fixed-size records, yielding one tuple per record. We materialise
+            // the records (the buffer is finite) into a one-shot iterator.
+            "iter_unpack" => {
+                let (mode, items) = parse_format(str_arg(args.first(), "iter_unpack")?)?;
+                let size = layout_size(mode, &items);
+                let buf = bytes_arg(args.get(1))?;
+                if size == 0 {
+                    return Err(struct_error(
+                        "cannot iteratively unpack with a struct of length 0",
+                    ));
+                }
+                if buf.len() % size != 0 {
+                    return Err(struct_error(format!(
+                        "iterative unpacking requires a buffer of a multiple of {size} bytes"
+                    )));
+                }
+                let mut out = Vec::with_capacity(buf.len() / size);
+                for chunk in buf.chunks(size) {
+                    out.push(unpack(mode, &items, chunk)?);
+                }
+                Ok(state.alloc_lazy(out))
             }
             _ => Err(InterpreterError::AttributeError(format!(
                 "module 'struct' has no callable '{func}'"
