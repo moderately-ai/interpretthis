@@ -1558,10 +1558,12 @@ pub(super) async fn try_builtin(
                         match encoding {
                             "utf-8" | "utf_8" | "ascii" => s.as_bytes().to_vec(),
                             other => {
-                                return Err(InterpreterError::ValueError(format!(
-                                    "unknown encoding: {other}"
-                                ))
-                                .into());
+                                return Err(EvalError::Exception(
+                                    crate::value::ExceptionValue::new(
+                                        "LookupError",
+                                        format!("unknown encoding: {other}"),
+                                    ),
+                                ));
                             }
                         }
                     }

@@ -1703,8 +1703,15 @@ fn format_percent_conversion(value: &Value, spec: &PercentSpec) -> EvalResult {
             Value::Bool(b) => Value::Int(i64::from(*b)),
             Value::Float(f) => Value::Int(percent_trunc(*f)),
             _ => {
+                // CPython splits the wording: the decimal conversions
+                // (`d`/`i`/`u`) accept any real number, the radix conversions
+                // (`o`/`x`/`X`) require an integer.
+                let requirement = match spec.conv {
+                    'o' | 'x' | 'X' => "an integer",
+                    _ => "a real number",
+                };
                 return Err(InterpreterError::TypeError(format!(
-                    "%{} format: a number is required, not {}",
+                    "%{} format: {requirement} is required, not {}",
                     spec.conv,
                     value.type_name()
                 ))
@@ -1712,9 +1719,9 @@ fn format_percent_conversion(value: &Value, spec: &PercentSpec) -> EvalResult {
             }
         },
         'e' | 'E' | 'f' | 'F' | 'g' | 'G' => Value::Float(value.as_float().ok_or_else(|| {
+            // The float conversions carry no `%x format:` prefix in CPython.
             EvalError::from(InterpreterError::TypeError(format!(
-                "%{} format: a float is required, not {}",
-                spec.conv,
+                "must be real number, not {}",
                 value.type_name()
             )))
         })?),

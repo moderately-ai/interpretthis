@@ -435,9 +435,10 @@ pub(crate) fn dispatch_bytes_method(
                 "unicode-escape" | "unicode_escape" => {
                     Ok(Value::String(unicode_escape_decode(b).into()))
                 }
-                other => {
-                    Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
-                }
+                other => Err(EvalError::Exception(ExceptionValue::new(
+                    "LookupError",
+                    format!("unknown encoding: {other}"),
+                ))),
             }
         }
         "hex" => bytes_to_hex(b, args),

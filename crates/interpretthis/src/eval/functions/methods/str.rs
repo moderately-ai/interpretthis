@@ -352,9 +352,10 @@ pub(crate) fn dispatch_string_method(
                     Ok(Value::Bytes(out))
                 }
                 "unicode-escape" | "unicode_escape" => Ok(Value::Bytes(unicode_escape_encode(s))),
-                other => {
-                    Err(InterpreterError::ValueError(format!("unknown encoding: {other}")).into())
-                }
+                other => Err(EvalError::Exception(ExceptionValue::new(
+                    "LookupError",
+                    format!("unknown encoding: {other}"),
+                ))),
             }
         }
         "expandtabs" => {

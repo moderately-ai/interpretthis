@@ -1874,6 +1874,20 @@ pub struct FunctionDef {
     /// `nonlocal` writes (CPython's shared-cell semantics for free variables).
     #[serde(default)]
     pub cell_refreshes: Vec<(String, u64)>,
+    /// Dotted `__qualname__` (`Outer.method`, `outer.<locals>.inner`), computed
+    /// from the lexical `qualname_stack` at def time. Empty on old state imports
+    /// and synthesised defs; consumers fall back to `name`.
+    #[serde(default)]
+    pub qualname: String,
+}
+
+impl FunctionDef {
+    /// The name used in CPython-shaped messages and `__qualname__`: the dotted
+    /// `qualname` when set, else the bare `name` (old imports, synthesised defs).
+    #[must_use]
+    pub fn display_qualname(&self) -> &str {
+        if self.qualname.is_empty() { &self.name } else { &self.qualname }
+    }
 }
 
 impl FunctionDef {
@@ -1930,6 +1944,12 @@ pub struct LambdaDef {
     /// Mirrors [`FunctionDef::cell_refreshes`].
     #[serde(default)]
     pub cell_refreshes: Vec<(String, u64)>,
+    /// Dotted `__qualname__` for this lambda (`<lambda>`,
+    /// `outer.<locals>.<lambda>`), computed from the lexical `qualname_stack`
+    /// at def time. Empty on old state imports; consumers fall back to
+    /// `<lambda>`.
+    #[serde(default)]
+    pub qualname: String,
 }
 
 /// Function parameter specification.

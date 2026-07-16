@@ -213,6 +213,7 @@ pub(crate) fn create_synthetic_generator(
         is_module_level: state.call_depth == 0,
         docstring: None,
         cell_refreshes: Vec::new(),
+        qualname: String::new(),
     };
     Some(create_generator(state, &func_def, body, locals, touched))
 }

@@ -220,14 +220,15 @@ pub async fn eval_class_def(
     // seeding the class dict built so far before each statement and
     // harvesting freshly-bound names afterwards, then restore the enclosing
     // scope so nothing leaks out — even if the body raises.
-    // `__qualname__`: nested classes are dotted with their enclosing class
-    // (`Outer.Inner`). Push this class's qualname so any nested `class` in the
-    // body sees it, and pop once the body is done.
-    let qualname = match state.class_def_stack.last() {
+    // `__qualname__`: a class nested in another class/function is dotted with
+    // the enclosing qualname prefix (`Outer.Inner`, `f.<locals>.C`). Push this
+    // class's own qualname so any nested `class`/`def` in the body sees it, and
+    // pop once the body is done.
+    let qualname = match state.qualname_stack.last() {
         Some(parent) => format!("{parent}.{class_name}"),
         None => class_name.to_string(),
     };
-    state.class_def_stack.push(qualname.clone());
+    state.qualname_stack.push(qualname.clone());
     let class_scope_saved = state.variables.clone();
     let body_result: Result<(), EvalError> = async {
         for stmt in &node.body {
@@ -364,7 +365,7 @@ pub async fn eval_class_def(
     // Restore the enclosing scope: class-body names live in the class dict,
     // not the surrounding namespace.
     state.variables = class_scope_saved;
-    state.class_def_stack.pop();
+    state.qualname_stack.pop();
     body_result?;
 
     // C3 linearization gives the method resolution order for this
@@ -531,6 +532,11 @@ fn classify_decorated_method(
     static_methods: &mut BTreeMap<String, FunctionDef>,
     class_methods: &mut BTreeMap<String, FunctionDef>,
 ) -> Result<(), EvalError> {
+    // `__qualname__` for every variant of this method (getter/setter/plain):
+    // `<class qualname>.<method>` — the class qualname is on the stack (pushed
+    // by the class body), so a method of a nested class dots correctly too. The
+    // property `__get`/`__set` cache-key suffix stays out of the qualname.
+    let method_qualname = state.qualname_for(&method_name);
     let mut register = |key: String, body: Vec<Stmt>, source: String| -> FunctionDef {
         // Walk the method body for `assigned_names` / `global_names`
         // so `VariableCheckpoint` can snapshot only the names this
@@ -563,6 +569,7 @@ fn classify_decorated_method(
             is_module_level: false,
             docstring,
             cell_refreshes: Vec::new(),
+            qualname: method_qualname.clone(),
         }
     };
     // No decorators: regular method.
@@ -1619,7 +1626,7 @@ async fn call_method_inner(
 
     let local_scope = match bind_params_named(
         &method.params,
-        &method.name,
+        method.display_qualname(),
         &full_args,
         call.keyword,
         state,

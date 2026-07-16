@@ -211,6 +211,7 @@ pub async fn eval_function_def(
 
     let is_generator = contains_yield_stmts(&node.body);
     let docstring = extract_docstring(&node.body);
+    let qualname = state.qualname_for(name);
 
     let mut func = Value::Function(std::sync::Arc::new(FunctionDef {
         name: name.to_string(),
@@ -227,6 +228,7 @@ pub async fn eval_function_def(
         is_module_level,
         docstring,
         cell_refreshes,
+        qualname,
     }));
 
     // Apply decorators in REVERSE order so the textually nearest one
@@ -1581,6 +1583,8 @@ pub async fn eval_lambda_def(
     free.retain(|n| !bound.contains(n));
     let cell_refreshes = ensure_capture_cells(state, &free);
 
+    let qualname = state.qualname_for("<lambda>");
+
     Ok(Value::Lambda(std::sync::Arc::new(LambdaDef {
         params,
         lambda_id,
@@ -1589,6 +1593,7 @@ pub async fn eval_lambda_def(
         assigned_names,
         is_module_level,
         cell_refreshes,
+        qualname,
     })))
 }
 

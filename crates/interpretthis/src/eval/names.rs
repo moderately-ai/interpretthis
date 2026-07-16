@@ -525,11 +525,22 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
             {
                 return Ok(v.clone());
             }
-            if attr_name == "__name__" || attr_name == "__qualname__" {
-                // `functools.wraps` overrides the reported name; the real
-                // `name` stays the body-cache key.
-                let reported = func_def.wraps_name.as_ref().unwrap_or(&func_def.name);
-                Ok(Value::String(reported.clone().into()))
+            if attr_name == "__qualname__" {
+                // `functools.wraps` overrides the reported name; otherwise the
+                // dotted qualname (`C.method`, `outer.<locals>.inner`).
+                let reported = func_def
+                    .wraps_name
+                    .clone()
+                    .unwrap_or_else(|| func_def.display_qualname().to_string());
+                Ok(Value::String(reported.into()))
+            } else if attr_name == "__name__" {
+                // The simple name — the last dotted component of the qualname
+                // (methods carry a dotted `name` as their body-cache key).
+                let reported = func_def.wraps_name.clone().unwrap_or_else(|| {
+                    let full = func_def.display_qualname();
+                    full.rsplit('.').next().unwrap_or(full).to_string()
+                });
+                Ok(Value::String(reported.into()))
             } else if attr_name == "__doc__" {
                 // The docstring, or None (CPython's `f.__doc__` for an
                 // undocumented function).
@@ -538,9 +549,16 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                 Err(attribute_error("function", attr_name))
             }
         }
-        Value::Lambda(_) => {
-            if attr_name == "__name__" || attr_name == "__qualname__" {
+        Value::Lambda(lambda_def) => {
+            if attr_name == "__name__" {
                 Ok(Value::String("<lambda>".into()))
+            } else if attr_name == "__qualname__" {
+                let reported = if lambda_def.qualname.is_empty() {
+                    "<lambda>"
+                } else {
+                    lambda_def.qualname.as_str()
+                };
+                Ok(Value::String(reported.into()))
             } else if attr_name == "__doc__" {
                 // Lambdas never have a docstring.
                 Ok(Value::None)

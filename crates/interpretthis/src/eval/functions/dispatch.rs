@@ -128,6 +128,10 @@ async fn call_user_function_inner(
         }
 
         state.body_source_stack.push(func_def.source.clone());
+        // A trivial-frame body can still create a nested `def`/`lambda`
+        // (`return lambda x: x`); it needs the qualname prefix so its
+        // `__qualname__` dots correctly (`f.<locals>.<lambda>`).
+        state.qualname_stack.push(format!("{}.<locals>", func_def.display_qualname()));
         // Even on the trivial-frame path the body may create a nested closure
         // that captures a local (`return [lambda: i for i in range(n)]`); it
         // needs a `frame_cell_owners` scope so the capture cell registers on
@@ -144,6 +148,7 @@ async fn call_user_function_inner(
         };
         state.frame_cell_owners.pop();
         state.body_source_stack.pop();
+        state.qualname_stack.pop();
         state.exit_call();
         return outcome;
     }
@@ -154,8 +159,15 @@ async fn call_user_function_inner(
     state.frame_cell_owners.push(rustc_hash::FxHashMap::default());
 
     // Build local scope from parameters
-    let bind_outcome =
-        bind_params_named(&func_def.params, &func_def.name, args, kwargs, state, tools).await;
+    let bind_outcome = bind_params_named(
+        &func_def.params,
+        func_def.display_qualname(),
+        args,
+        kwargs,
+        state,
+        tools,
+    )
+    .await;
     let local_scope = match bind_outcome {
         Ok(s) => s,
         Err(e) => {
@@ -241,6 +253,10 @@ async fn call_user_function_inner(
     // function's defining source, not from the calling execute()'s
     // source. Popped unconditionally below after the body runs.
     state.body_source_stack.push(func_def.source.clone());
+    // Nested `def`/`lambda`/`class` in this body take `<this qualname>.<locals>`
+    // as their `__qualname__` prefix (CPython's `<locals>` marker). Popped on
+    // every exit path below, mirroring `body_source_stack`.
+    state.qualname_stack.push(format!("{}.<locals>", func_def.display_qualname()));
 
     // If the body contains `yield` / `yield from`, return a suspended
     // generator frame when the body shape is supported. Bodies with
@@ -278,6 +294,7 @@ async fn call_user_function_inner(
                 state.frame_cell_owners.pop();
                 state.exit_call();
                 state.body_source_stack.pop();
+                state.qualname_stack.pop();
                 return Ok(generator);
             }
             // Eager buffer fallback (while-based generators).
@@ -321,6 +338,7 @@ async fn call_user_function_inner(
     // Pop the function's source. Matched 1:1 with the push above,
     // including on every error/early-return path through this fn.
     state.body_source_stack.pop();
+    state.qualname_stack.pop();
 
     // Propagate the result, handling Return signals
     match exec_result {
@@ -384,8 +402,10 @@ async fn call_lambda_inner(
     // Frame-depth bound — same reasoning as `call_user_function`.
     state.enter_call().map_err(EvalError::Interpreter)?;
 
+    let lambda_qualname =
+        if lambda_def.qualname.is_empty() { "<lambda>" } else { lambda_def.qualname.as_str() };
     let bind_outcome =
-        bind_params_named(&lambda_def.params, "<lambda>", args, kwargs, state, tools).await;
+        bind_params_named(&lambda_def.params, lambda_qualname, args, kwargs, state, tools).await;
     let local_scope = match bind_outcome {
         Ok(s) => s,
         Err(e) => {
@@ -428,6 +448,9 @@ async fn call_lambda_inner(
     let body = state.lambda_bodies.get(&lambda_def.lambda_id).cloned();
 
     state.body_source_stack.push(lambda_def.source.clone());
+    // A lambda nested in this body (`lambda: lambda: 0`) dots onto
+    // `<this qualname>.<locals>`.
+    state.qualname_stack.push(format!("{lambda_qualname}.<locals>"));
 
     let result = if let Some(body_expr) = body {
         // Lambda bodies are expressions, so they never cross an `eval_stmt`
@@ -448,6 +471,7 @@ async fn call_lambda_inner(
     };
 
     state.body_source_stack.pop();
+    state.qualname_stack.pop();
     checkpoint.restore(state);
     state.exit_call();
     result
