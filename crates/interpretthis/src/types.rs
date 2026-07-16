@@ -3563,7 +3563,25 @@ fn memoryview_get_attr(value: &Value, name: &str) -> EvalResult {
     if MEMORYVIEW_METHODS.contains(&name) {
         return Ok(bound_method(value, name));
     }
-    Err(attribute_error("memoryview", name))
+    // Data attributes of a 1-D unsigned-byte view (the only shape we model).
+    let len = bytes_view(value).map_or(0, |b| b.len());
+    // A view over immutable `bytes` is read-only; over `bytearray` it is not.
+    let readonly = matches!(value, Value::MemoryView(inner) if matches!(**inner, Value::Bytes(_)));
+    match name {
+        "nbytes" => Ok(Value::Int(i64::try_from(len).unwrap_or(i64::MAX))),
+        "itemsize" | "ndim" => Ok(Value::Int(1)),
+        "format" => Ok(Value::String("B".into())),
+        "shape" => Ok(Value::Tuple(vec![Value::Int(i64::try_from(len).unwrap_or(i64::MAX))])),
+        "strides" => Ok(Value::Tuple(vec![Value::Int(1)])),
+        "suboffsets" => Ok(Value::Tuple(Vec::new())),
+        "readonly" => Ok(Value::Bool(readonly)),
+        "contiguous" | "c_contiguous" | "f_contiguous" => Ok(Value::Bool(true)),
+        "obj" => match value {
+            Value::MemoryView(inner) => Ok((**inner).clone()),
+            _ => Err(attribute_error("memoryview", name)),
+        },
+        _ => Err(attribute_error("memoryview", name)),
+    }
 }
 
 #[expect(clippy::unnecessary_wraps, reason = "LenSlot protocol")]
