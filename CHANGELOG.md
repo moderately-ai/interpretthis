@@ -23,6 +23,10 @@ and state-resume seams. No new host-boundary surface.
     bounded *before* allocating, so `list(range(10**18))`, `bytes(10**18)`, and
     `(2**1000000)**1000000` raise rather than OOM-abort.
   - Sizing and dropping a deeply-nested value grow the stack instead of overflowing.
+- **Closed the in-place-growth memory-accounting holes** that let a loop evade the
+  memory limit and OOM the host: `xs += ys` / `s |= t` (accounted a zero delta by
+  comparing the grown handle to itself), `Counter.update`/`subtract`, and the
+  defaultdict aug-assign pre-touch (`dd[i] += 1`) all now charge their growth.
 - THREAT_MODEL.md documents the state-resume trust boundary precisely: import
   fails closed on the size/version gate but trusts blob *contents*, so untrusted
   blobs must be host-signed (no host-escape primitive is reachable regardless).
