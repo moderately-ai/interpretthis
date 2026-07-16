@@ -1221,9 +1221,14 @@ fn try_builtin_dunder(
                 return Ok(None);
             };
             use crate::eval::operations::{compare_lt, values_equal_pub};
+            // `__eq__`/`__ne__` return `NotImplemented` (not a bool) when the
+            // operand types are unrelated — CPython's asymmetric per-type rule,
+            // e.g. `(5).__eq__("x")` and even `(5).__eq__(5.0)` (int doesn't know
+            // float; the reflected `float.__eq__(int)` is what makes `5 == 5.0`).
+            let eq_bool = |equal: bool| if eq_yields_bool(obj, other) { Some(equal) } else { None };
             let outcome: Option<bool> = match method {
-                "__eq__" => Some(values_equal_pub(obj, other)),
-                "__ne__" => Some(!values_equal_pub(obj, other)),
+                "__eq__" => eq_bool(values_equal_pub(obj, other)),
+                "__ne__" => eq_bool(!values_equal_pub(obj, other)),
                 "__lt__" => compare_lt(obj, other).ok(),
                 "__le__" => {
                     compare_lt(obj, other).ok().map(|lt| lt || values_equal_pub(obj, other))
@@ -1272,17 +1277,95 @@ fn try_builtin_dunder(
             }
             match crate::eval::operations::apply_binop(lhs, rhs, op, 28, 1_048_576) {
                 Ok(v) => pure(v),
-                // A type mismatch means this dunder doesn't apply to the operand
-                // pair (CPython returns NotImplemented) — fall through to
-                // AttributeError rather than surfacing it. But a real failure of
-                // an *applicable* operation (ZeroDivisionError, OverflowError,
-                // ValueError) must propagate, e.g. `(10).__floordiv__(0)`.
-                Err(EvalError::Interpreter(InterpreterError::TypeError(_))) => Ok(None),
+                // On a type mismatch CPython's behaviour splits by receiver: a
+                // NUMERIC dunder returns NotImplemented (`(5).__add__("x")`),
+                // while a SEQUENCE concat/repeat dunder raises the TypeError
+                // (`[1].__add__(5)` → "can only concatenate list ..."). A real
+                // failure of an applicable op (ZeroDivisionError, OverflowError,
+                // ValueError) always propagates, e.g. `(10).__floordiv__(0)`.
+                Err(EvalError::Interpreter(InterpreterError::TypeError(_)))
+                    if is_numeric_value(obj) =>
+                {
+                    pure(Value::NotImplemented)
+                }
                 Err(e) => Err(e),
             }
         }
         _ => Ok(None),
     }
+}
+
+/// Whether `lhs.__eq__(rhs)` / `lhs.__ne__(rhs)` yields a bool rather than
+/// `NotImplemented`, for a builtin `lhs`. CPython's rule is asymmetric and
+/// per-type: a numeric type accepts only the numeric types it promotes FROM
+/// (`int`/`bool` accept int/bool only; `float` also int/bool; `complex` also
+/// float; `Decimal`/`Fraction` their own tower), and each non-numeric family
+/// accepts only its own members (bytes↔bytearray, set↔frozenset, the dict
+/// subclasses, date↔datetime). Unrelated types yield `NotImplemented`. Types not
+/// covered here keep the prior always-bool behaviour (no regression).
+fn eq_yields_bool(lhs: &Value, rhs: &Value) -> bool {
+    use crate::value::EnumKind;
+    let int_like = |v: &Value| {
+        matches!(
+            v,
+            Value::Int(_)
+                | Value::BigInt(_)
+                | Value::Bool(_)
+                | Value::EnumMember { kind: EnumKind::Int | EnumKind::IntFlag, .. }
+        )
+    };
+    let same_enum = |rhs: &Value, class: &str| matches!(rhs, Value::EnumMember { class_name, .. } if class_name == class);
+    match lhs {
+        Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => int_like(rhs),
+        Value::Float(_) => int_like(rhs) || matches!(rhs, Value::Float(_)),
+        Value::Complex(_) => int_like(rhs) || matches!(rhs, Value::Float(_) | Value::Complex(_)),
+        Value::Decimal(..) => {
+            int_like(rhs)
+                || matches!(rhs, Value::Float(_) | Value::Decimal(..) | Value::Fraction(_))
+        }
+        Value::Fraction(_) => int_like(rhs) || matches!(rhs, Value::Float(_) | Value::Fraction(_)),
+        Value::String(_) => matches!(rhs, Value::String(_)),
+        Value::Bytes(_) => matches!(rhs, Value::Bytes(_)),
+        Value::ByteArray(_) => matches!(rhs, Value::Bytes(_) | Value::ByteArray(_)),
+        Value::List(_) => matches!(rhs, Value::List(_)),
+        Value::Tuple(_) => matches!(rhs, Value::Tuple(_)),
+        Value::Dict(_) | Value::OrderedDict(_) | Value::Counter(_) => {
+            matches!(rhs, Value::Dict(_) | Value::OrderedDict(_) | Value::Counter(_))
+        }
+        Value::Set(_) | Value::Frozenset(_) => matches!(rhs, Value::Set(_) | Value::Frozenset(_)),
+        Value::None => matches!(rhs, Value::None),
+        Value::Range { .. } => matches!(rhs, Value::Range { .. }),
+        Value::Date(_) | Value::DateTime { .. } => {
+            matches!(rhs, Value::Date(_) | Value::DateTime { .. })
+        }
+        Value::Time(_) => matches!(rhs, Value::Time(_)),
+        Value::TimeDelta(_) => matches!(rhs, Value::TimeDelta(_)),
+        Value::TimeZone(_) => matches!(rhs, Value::TimeZone(_)),
+        Value::EnumMember { kind, class_name, .. } => match kind {
+            EnumKind::Int | EnumKind::IntFlag => int_like(rhs) || same_enum(rhs, class_name),
+            EnumKind::Str => matches!(rhs, Value::String(_)) || same_enum(rhs, class_name),
+            EnumKind::Plain | EnumKind::Flag => same_enum(rhs, class_name),
+        },
+        // Unknown/other builtins keep the pre-existing always-bool behaviour.
+        _ => true,
+    }
+}
+
+/// A numeric receiver — its arithmetic dunders return `NotImplemented` on a
+/// type mismatch (sequence concat/repeat dunders raise instead).
+fn is_numeric_value(v: &Value) -> bool {
+    use crate::value::EnumKind;
+    matches!(
+        v,
+        Value::Int(_)
+            | Value::BigInt(_)
+            | Value::Bool(_)
+            | Value::Float(_)
+            | Value::Complex(_)
+            | Value::Decimal(..)
+            | Value::Fraction(_)
+            | Value::EnumMember { kind: EnumKind::Int | EnumKind::IntFlag, .. }
+    )
 }
 
 /// Map a binary arithmetic/bitwise dunder name to its operator and whether it
