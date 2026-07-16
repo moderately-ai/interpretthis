@@ -1168,26 +1168,46 @@ pub(super) async fn try_builtin(
             }
             Ok(Some(total))
         }
-        "all" => {
+        "all" | "any" => {
             check_arg_count(name, args, 1, 1)?;
+            // `any`/`all` short-circuit — over a lazy iterator they must step it
+            // one item at a time (so `any(map(pred, count()))` stops at the first
+            // truthy element instead of hanging while materialising the source).
+            let want_any = name == "any";
+            if matches!(
+                &args[0],
+                Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. }
+            ) {
+                let empty = IndexMap::new();
+                loop {
+                    let item = match crate::eval::functions::dispatch_generator_method(
+                        state,
+                        &args[0],
+                        "__next__",
+                        &[],
+                        &empty,
+                        tools,
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
+                        Err(e) => return Err(e),
+                    };
+                    if crate::eval::op::truthy(state, &item, tools).await? == want_any {
+                        return Ok(Some(Value::Bool(want_any)));
+                    }
+                }
+                return Ok(Some(Value::Bool(!want_any)));
+            }
             let items = crate::eval::op::iter(state, &args[0], tools).await?;
             // Async truthiness so instance elements dispatch __bool__/__len__.
             for item in &items {
-                if !crate::eval::op::truthy(state, item, tools).await? {
-                    return Ok(Some(Value::Bool(false)));
+                if crate::eval::op::truthy(state, item, tools).await? == want_any {
+                    return Ok(Some(Value::Bool(want_any)));
                 }
             }
-            Ok(Some(Value::Bool(true)))
-        }
-        "any" => {
-            check_arg_count(name, args, 1, 1)?;
-            let items = crate::eval::op::iter(state, &args[0], tools).await?;
-            for item in &items {
-                if crate::eval::op::truthy(state, item, tools).await? {
-                    return Ok(Some(Value::Bool(true)));
-                }
-            }
-            Ok(Some(Value::Bool(false)))
+            Ok(Some(Value::Bool(!want_any)))
         }
         "sorted" => {
             // `sorted` takes exactly one positional (the iterable); `key` and
