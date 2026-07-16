@@ -69,30 +69,44 @@ jobs:
         with:
           targets: ${{ matrix.rust-target || matrix.target }}
 
-      - name: Install musl toolchain
-        if: ${{ matrix.musl == true }}
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Set up QEMU (aarch64 emulation for the musl build)
+        if: ${{ matrix.musl == true && contains(matrix.target, 'aarch64') }}
+        uses: docker/setup-qemu-action@v3
 
       - uses: Swatinem/rust-cache@v2
 
       - run: npm install
 
+      # Non-musl targets build on the glibc host and smoke natively.
       - name: Build the addon
+        if: ${{ matrix.musl != true }}
         run: npx napi build --platform --release --manifest-path Cargo.toml --dts-header dts-header.d.ts --target ${{ matrix.rust-target || matrix.target }}
 
       - name: Smoke the addon (native)
         if: ${{ matrix.musl != true }}
         run: node --test "__test__/**/*.test.mjs"
 
-      - name: Smoke the addon (musl, inside Alpine)
-        # A glibc host cannot load a musl addon, so the only honest smoke is one
-        # that runs on musl.
+      # musl: cross-compiling from a glibc host yields a `.node` linked against
+      # glibc's `ld-linux` (fails to `dlopen` on Alpine), and the aarch64 cross
+      # linker cannot find `libgcc_s`. Build AND smoke inside the target-arch
+      # Alpine image so the addon links against musl natively. `rustup` (not the
+      # apk `rust`) supplies the 1.88 MSRV.
+      - name: Build and smoke the addon (musl, inside Alpine)
         if: ${{ matrix.musl == true }}
         working-directory: .
         run: |
           docker run --rm \
+            --platform ${{ contains(matrix.target, 'aarch64') && 'linux/arm64' || 'linux/amd64' }} \
             --volume "$PWD:/work" --workdir /work/crates/interpretthis-node \
-            node:24-alpine node --test "__test__/**/*.test.mjs"
+            node:24-alpine sh -c '
+              set -e
+              apk add --no-cache curl build-base
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
+              . "$HOME/.cargo/env"
+              npm install --no-audit --no-fund
+              npx napi build --platform --release --manifest-path Cargo.toml --dts-header dts-header.d.ts
+              node --test "__test__/**/*.test.mjs"
+            '
 
       - uses: actions/upload-artifact@v4
         with:
