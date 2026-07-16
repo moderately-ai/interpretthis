@@ -1495,7 +1495,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (
             Value::ExceptionType(a) | Value::Type(a) | Value::Class(a) | Value::BuiltinName(a),
             Value::ExceptionType(b) | Value::Type(b) | Value::Class(b) | Value::BuiltinName(b),
-        ) => a == b,
+        ) => a == b || union_type_eq(a, b),
         // Temporal types: value-based equality (missing arms previously fell to
         // `_ => false`, so `date == date`, `[date] == [date]`, and `date in
         // [...]` were all False). datetime equality compares the wall clock for
@@ -1532,6 +1532,43 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+/// `typing.Union` compares its members as an unordered set: `Union[int, str] ==
+/// Union[str, int]`. Our typing aliases are type-erased to their repr string, so
+/// equality of two `typing.Union[...]` names splits the top-level (bracket-depth
+/// aware, so nested `Dict[str, int]` stays intact) arguments and set-compares
+/// them. Non-Union names never reach the set path (the caller already tried
+/// string equality).
+fn union_type_eq(a: &str, b: &str) -> bool {
+    let (Some(a_args), Some(b_args)) = (union_members(a), union_members(b)) else {
+        return false;
+    };
+    a_args.len() == b_args.len()
+        && a_args.iter().all(|x| b_args.contains(x))
+        && b_args.iter().all(|x| a_args.contains(x))
+}
+
+/// Top-level argument strings of a `typing.Union[...]` repr, or `None` if `s`
+/// isn't a Union alias. Splits on commas outside any bracket nesting.
+fn union_members(s: &str) -> Option<Vec<&str>> {
+    let inner = s.strip_prefix("typing.Union[")?.strip_suffix(']')?;
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                members.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    members.push(inner[start..].trim());
+    Some(members)
 }
 
 /// Check value identity (Python `is`).

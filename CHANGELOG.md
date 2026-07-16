@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Post-0.4 hardening: closing CPython parity gaps found by widening the differential
+parity corpus, with no host-boundary surface added.
+
+### Added
+
+- `Decimal` total-order and fused arithmetic methods: `compare_total`,
+  `copy_sign`, `fma`, `remainder_near`, and `adjusted` (finite operands), plus a
+  standalone `decimal.Context(prec=…, rounding=…)` constructor. `to_integral_value`
+  / `to_integral` / `to_integral_exact` now honour an explicit `rounding=` keyword.
+- `Fraction.from_decimal` classmethod (exact conversion of a `Decimal`), alongside
+  the existing `Fraction.from_float`.
+
+### Changed
+
+- `Decimal.copy_sign` now takes its sign from `-0`/`-Inf` operands (the sign lives
+  on the value's kind, not its zero payload).
+- `typing` runtime reprs match CPython: a `TypeVar`/`ParamSpec` reprs as `~T`, and
+  `None` inside a generic alias reprs as `NoneType` (`Union[int, None]` →
+  `typing.Union[int, NoneType]`). `Union[...]` compares equal regardless of member
+  order (`Union[int, str] == Union[str, int]`).
+- `x.__class__` is now readable (returns the type object, identical to `type(x)`);
+  assigning to `__class__` remains blocked. No new host-boundary surface — the
+  result only names classes already reachable in the sandbox.
+- ASCII decode errors now carry CPython's full detail
+  (`'ascii' codec can't decode byte 0xNN in position P: ordinal not in range(128)`)
+  instead of a truncated message.
+
 ## [0.4.0] — 2026-07-13
 
 ### Added

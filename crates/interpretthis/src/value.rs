@@ -2789,8 +2789,12 @@ impl fmt::Display for Value {
             // `typing` aliases and PEP 585 builtin generic aliases repr as their
             // bare name (`typing.List[int]`, `list[int]`), not the `<class '...'>`
             // form plain builtin types use. A parametrised alias always carries a
-            // `[` — that's what distinguishes `list[int]` from bare `list`.
-            Self::Type(n) if n.starts_with("typing.") || n.contains('[') => write!(f, "{n}"),
+            // `[` — that's what distinguishes `list[int]` from bare `list`. A
+            // `TypeVar`/`ParamSpec` carries a `~` variance prefix and likewise
+            // reprs bare (`~T`).
+            Self::Type(n) if n.starts_with("typing.") || n.contains('[') || n.starts_with('~') => {
+                write!(f, "{n}")
+            }
             Self::Type(n) => write!(f, "<class '{n}'>"),
             Self::Class(n) => write!(f, "<class '__main__.{n}'>"),
             Self::Module(n) => write!(f, "<module '{n}'>"),

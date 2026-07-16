@@ -23,9 +23,47 @@ pub fn has_function(name: &str) -> bool {
     matches!(name, "Fraction")
 }
 
+/// `Fraction.from_float(f)` / `Fraction.from_decimal(d)` classmethods.
+#[must_use]
+pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
+    match (type_name, method) {
+        ("Fraction", "from_float") => Some("from_float"),
+        ("Fraction", "from_decimal") => Some("from_decimal"),
+        _ => None,
+    }
+}
+
 pub fn call(func: &str, args: &[Value]) -> EvalResult {
     match func {
         "Fraction" => construct_fraction(args),
+        // `from_float`/`from_decimal` build the EXACT fraction of the argument —
+        // the same result `Fraction(x)` gives, but only accepting the one type.
+        "from_float" => match args.first() {
+            Some(Value::Float(_)) => from_single(&args[0]),
+            Some(other) => Err(InterpreterError::TypeError(format!(
+                "Fraction.from_float() only takes floats, not {} ({})",
+                other,
+                other.type_name()
+            ))
+            .into()),
+            None => {
+                Err(InterpreterError::TypeError("from_float() missing required argument".into())
+                    .into())
+            }
+        },
+        "from_decimal" => match args.first() {
+            Some(Value::Decimal(..)) => from_single(&args[0]),
+            Some(other) => Err(InterpreterError::TypeError(format!(
+                "Fraction.from_decimal() only takes Decimals, not {} ({})",
+                other,
+                other.type_name()
+            ))
+            .into()),
+            None => {
+                Err(InterpreterError::TypeError("from_decimal() missing required argument".into())
+                    .into())
+            }
+        },
         _ => Err(InterpreterError::AttributeError(format!(
             "module 'fractions' has no attribute '{func}'"
         ))
@@ -67,6 +105,17 @@ fn from_single(arg: &Value) -> EvalResult {
                     "cannot convert float {f} to Fraction"
                 )))
             })?
+        }
+        // A `Decimal` is exactly `mantissa * 10^-scale` (CPython converts it
+        // losslessly), used by `Fraction(decimal)` / `Fraction.from_decimal`.
+        Value::Decimal(d, _) => {
+            let (mantissa, scale) = d.as_bigint_and_exponent();
+            let ten = BigInt::from(10);
+            if scale >= 0 {
+                BigRational::new(mantissa, ten.pow(u32::try_from(scale).unwrap_or(0)))
+            } else {
+                BigRational::from_integer(mantissa * ten.pow(u32::try_from(-scale).unwrap_or(0)))
+            }
         }
         other => {
             return Err(InterpreterError::TypeError(format!(

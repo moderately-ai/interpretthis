@@ -1139,7 +1139,9 @@ fn typing_arg_repr(v: &Value) -> String {
             n.clone()
         }
         Value::Ellipsis => "...".to_string(),
-        Value::None => "None".to_string(),
+        // Inside a generic alias CPython renders the `None` singleton as its
+        // type: `Union[int, None]` reprs `Union[int, NoneType]`.
+        Value::None => "NoneType".to_string(),
         Value::Tuple(items) => items.iter().map(typing_arg_repr).collect::<Vec<_>>().join(", "),
         Value::List(items) => {
             let inner = items.lock().iter().map(typing_arg_repr).collect::<Vec<_>>().join(", ");

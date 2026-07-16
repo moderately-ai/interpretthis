@@ -342,6 +342,7 @@ pub fn type_classmethod(module: &str, type_name: &str, method: &str) -> Option<&
     match module {
         "datetime" => datetime::type_classmethod(type_name, method),
         "decimal" => decimal::type_classmethod(type_name, method),
+        "fractions" => fractions::type_classmethod(type_name, method),
         // itertools.chain.from_iterable(iterable) — dispatched through the
         // itertools module as a dedicated flattening function.
         "itertools" if type_name == "chain" && method == "from_iterable" => {

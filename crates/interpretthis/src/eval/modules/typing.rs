@@ -86,7 +86,10 @@ pub fn call(func: &str, args: &[Value]) -> EvalResult {
         // which the evaluator erases; the name is carried for a faithful repr.
         "TypeVar" | "ParamSpec" => {
             let param_name = args.first().and_then(Value::as_str).unwrap_or("anon");
-            Ok(Value::Type(format!("typing.{func}:{param_name}")))
+            // CPython reprs an invariant type parameter as `~T` (covariant `+T`,
+            // contravariant `-T`); the `~` prefix is what shows in `Generic[~T]`
+            // and bare `print(T)`. Variance kwargs are erased here, so default `~`.
+            Ok(Value::Type(format!("~{param_name}")))
         }
         // TYPE_CHECKING is a constant False (the runtime check). The
         // constant() path also resolves it; calling it as a function

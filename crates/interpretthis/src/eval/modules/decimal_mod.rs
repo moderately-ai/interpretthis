@@ -155,15 +155,19 @@ pub(crate) fn dispatch_decimal_method(
         "copy_abs" => Ok(Value::Decimal(Box::new(d.abs()), DecimalKind::Normal)),
         "copy_negate" => Ok(Value::Decimal(Box::new(-d.clone()), DecimalKind::Normal)),
         "copy_sign" => {
-            let Some(Value::Decimal(other, _)) = args.first() else {
+            let Some(Value::Decimal(other, other_kind)) = args.first() else {
                 return Err(InterpreterError::TypeError(
                     "copy_sign() requires a Decimal argument".into(),
                 )
                 .into());
             };
+            // The sign source includes `-0`/`-Inf`, whose BigDecimal payload is a
+            // signless zero — the kind carries the sign.
+            let other_neg = other.is_negative()
+                || matches!(other_kind, DecimalKind::NegZero | DecimalKind::NegInf);
             let magnitude = d.abs();
             Ok(Value::Decimal(
-                Box::new(if other.is_negative() { -magnitude } else { magnitude }),
+                Box::new(if other_neg { -magnitude } else { magnitude }),
                 DecimalKind::Normal,
             ))
         }
@@ -243,6 +247,65 @@ pub(crate) fn dispatch_decimal_method(
             };
             Ok(Value::Decimal(Box::new(BigDecimal::from(sign)), DecimalKind::Normal))
         }
+        // `compare_total(other)` is the IEEE total ordering: unlike `compare`,
+        // equal numeric values with different exponents are ordered (`1.5` >
+        // `1.50` because its exponent is larger). Yields Decimal(-1 / 0 / 1).
+        "compare_total" => {
+            let Some(Value::Decimal(other, other_kind)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "compare_total() requires a Decimal argument".into(),
+                )
+                .into());
+            };
+            let sign = compare_total_sign(d, kind, other, *other_kind);
+            Ok(Value::Decimal(Box::new(BigDecimal::from(sign)), DecimalKind::Normal))
+        }
+        // `fma(other, third)` = self*other + third with a single final rounding.
+        // BigDecimal is exact, so the fused product and sum carry no intermediate
+        // rounding — exactly the guarantee `fma` makes.
+        "fma" => {
+            let (Some(Value::Decimal(other, _)), Some(Value::Decimal(third, _))) =
+                (args.first(), args.get(1))
+            else {
+                return Err(InterpreterError::TypeError(
+                    "fma() requires two Decimal arguments".into(),
+                )
+                .into());
+            };
+            let result = d.clone() * (**other).clone() + (**third).clone();
+            Ok(Value::Decimal(Box::new(result), DecimalKind::Normal))
+        }
+        // `remainder_near(other)` = self - other*n, where n is the integer
+        // nearest self/other (ties to even); the result has the smallest
+        // possible magnitude (and may be negative).
+        "remainder_near" => {
+            let Some(Value::Decimal(other, _)) = args.first() else {
+                return Err(InterpreterError::TypeError(
+                    "remainder_near() requires a Decimal argument".into(),
+                )
+                .into());
+            };
+            if other.is_zero() {
+                return Err(InterpreterError::ValueError(
+                    "remainder_near() division by zero".into(),
+                )
+                .into());
+            }
+            let n = (d.clone() / (**other).clone())
+                .with_scale_round(0, bigdecimal::RoundingMode::HalfEven);
+            let result = d.clone() - (**other).clone() * n;
+            Ok(Value::Decimal(Box::new(result), DecimalKind::Normal))
+        }
+        // `adjusted()` is the adjusted exponent: exponent + (significant digits
+        // - 1). Returns a plain int (zero coefficient reports 0).
+        "adjusted" => {
+            let (mantissa, scale) = d.as_bigint_and_exponent();
+            if mantissa.is_zero() {
+                return Ok(Value::Int(0));
+            }
+            let digits = i64::try_from(mantissa.abs().to_string().len()).unwrap_or(i64::MAX);
+            Ok(Value::Int(digits - 1 - scale))
+        }
         // `scaleb(n)` shifts the decimal exponent by `n` (multiply by 10**n)
         // while preserving the coefficient, so the E-notation is retained.
         "scaleb" => {
@@ -262,10 +325,14 @@ pub(crate) fn dispatch_decimal_method(
             let (mantissa, scale) = d.as_bigint_and_exponent();
             Ok(Value::Decimal(Box::new(BigDecimal::new(mantissa, scale - n)), DecimalKind::Normal))
         }
-        "to_integral_value" | "to_integral" => Ok(Value::Decimal(
-            Box::new(d.with_scale_round(0, bigdecimal::RoundingMode::HalfEven)),
-            DecimalKind::Normal,
-        )),
+        "to_integral_value" | "to_integral" => {
+            // Optional `rounding=ROUND_*`; defaults to the context (HalfEven).
+            let rounding = match args.first().or_else(|| kwargs.get("rounding")) {
+                Some(Value::String(s)) => rounding_mode(s)?,
+                _ => bigdecimal::RoundingMode::HalfEven,
+            };
+            Ok(Value::Decimal(Box::new(d.with_scale_round(0, rounding)), DecimalKind::Normal))
+        }
         "as_integer_ratio" => {
             let (mantissa, scale) = d.as_bigint_and_exponent();
             let (num, den) = if scale >= 0 {
@@ -316,6 +383,46 @@ pub(crate) fn dispatch_decimal_method(
 
 /// `InvalidOperation` for `ln`/`log10` of a value that is not strictly
 /// positive, matching CPython's error class.
+/// IEEE 754 total ordering of two Decimals (the `compare_total` result as
+/// -1/0/1). `self` is always finite here (special kinds return earlier); a
+/// special `other` is ranked: finite sorts below +Inf/NaN and above -Inf. For
+/// two finite operands the numeric order decides, and equal numeric values are
+/// broken by exponent (larger exponent is greater when positive, smaller when
+/// negative), so `1.5` > `1.50`.
+fn compare_total_sign(
+    a: &BigDecimal,
+    a_kind: DecimalKind,
+    b: &BigDecimal,
+    b_kind: DecimalKind,
+) -> i64 {
+    use num_traits::Signed as _;
+    match b_kind {
+        DecimalKind::Nan | DecimalKind::PosInf => -1,
+        DecimalKind::NegInf => 1,
+        DecimalKind::Normal | DecimalKind::NegZero => {
+            let a_neg = a.is_negative() || matches!(a_kind, DecimalKind::NegZero);
+            let b_neg = b.is_negative() || matches!(b_kind, DecimalKind::NegZero);
+            if a_neg != b_neg {
+                return if a_neg { -1 } else { 1 };
+            }
+            match a.cmp(b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Greater => 1,
+                std::cmp::Ordering::Equal => {
+                    let a_exp = -a.as_bigint_and_exponent().1;
+                    let b_exp = -b.as_bigint_and_exponent().1;
+                    let base = match a_exp.cmp(&b_exp) {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Greater => 1,
+                        std::cmp::Ordering::Equal => 0,
+                    };
+                    if a_neg { -base } else { base }
+                }
+            }
+        }
+    }
+}
+
 fn non_positive_log_error(op: &str) -> EvalError {
     EvalError::Exception(crate::value::ExceptionValue::new(
         "InvalidOperation",
@@ -366,7 +473,7 @@ pub const LOCAL_CONTEXT_CLASS: &str = "decimal.LocalContext";
 pub fn has_function(name: &str) -> bool {
     // from_float is a Decimal classmethod only (type_classmethod), not a
     // module-level import.
-    matches!(name, "Decimal" | "getcontext" | "setcontext" | "localcontext")
+    matches!(name, "Decimal" | "getcontext" | "setcontext" | "localcontext" | "Context")
 }
 
 /// Classmethods on `decimal.Decimal`.
@@ -618,9 +725,19 @@ impl crate::eval::modules::Module for DecimalModule {
         state: &mut crate::state::InterpreterState,
         func: &str,
         args: &[Value],
-        _kwargs: &indexmap::IndexMap<String, Value>,
+        kwargs: &indexmap::IndexMap<String, Value>,
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
+        // `Context(prec=…, rounding=…)` builds a fresh context instance carrying
+        // the requested precision (used with `localcontext(ctx)` / `setcontext`).
+        if func == "Context" {
+            ensure_context_class(state);
+            let ctx = make_context_instance(state);
+            if let (Value::Instance(inst), Some(Value::Int(prec))) = (&ctx, kwargs.get("prec")) {
+                inst.fields.lock().insert("prec".into(), Value::Int(*prec));
+            }
+            return Ok(ctx);
+        }
         call(func, args, state)
     }
 }

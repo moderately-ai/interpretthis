@@ -1140,10 +1140,18 @@ fn decode_ascii_with_errors(b: &[u8], errors: &str) -> EvalResult {
         "ignore" => Ok(Value::String(
             b.iter().filter(|&&c| c < 128).map(|&c| c as char).collect::<String>().into(),
         )),
-        "strict" => Err(EvalError::Exception(ExceptionValue::new(
-            "UnicodeDecodeError",
-            "'ascii' codec can't decode byte",
-        ))),
+        "strict" => {
+            // CPython names the first out-of-range byte, its position, and the
+            // reason, matching the UTF-8 path above.
+            let pos = b.iter().position(|&c| c >= 128).unwrap_or(0);
+            let byte = b.get(pos).copied().unwrap_or(0);
+            Err(EvalError::Exception(ExceptionValue::new(
+                "UnicodeDecodeError",
+                format!(
+                    "'ascii' codec can't decode byte 0x{byte:02x} in position {pos}: ordinal not in range(128)"
+                ),
+            )))
+        }
         other => Err(unknown_error_handler(other)),
     }
 }

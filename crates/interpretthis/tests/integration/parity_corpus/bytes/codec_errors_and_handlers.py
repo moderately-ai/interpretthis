@@ -12,6 +12,14 @@ try:
 except UnicodeDecodeError as e:
     print("decode err:", type(e).__name__)
 try:
+    b"\xff".decode("utf-8")
+except UnicodeDecodeError as e:
+    print(str(e))
+try:
+    b"A\xffB".decode("ascii")
+except UnicodeDecodeError as e:
+    print(str(e))
+try:
     "café".encode("ascii")
 except UnicodeEncodeError as e:
     print("encode err:", type(e).__name__)

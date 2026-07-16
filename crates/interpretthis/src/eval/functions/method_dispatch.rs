@@ -1001,9 +1001,9 @@ fn decimal_methods(
     let Value::Decimal(d, kind) = obj else {
         return Err(type_mismatch("Decimal"));
     };
-    // `quantize(exp, rounding=…)` is the only Decimal method that takes a
-    // keyword; every other rejects kwargs as CPython does.
-    if method != "quantize" {
+    // `quantize`/`to_integral*` take a `rounding=` keyword; every other Decimal
+    // method rejects kwargs as CPython does.
+    if !matches!(method, "quantize" | "to_integral_value" | "to_integral" | "to_integral_exact") {
         crate::eval::functions::reject_kwargs(method, kwargs)?;
     }
     crate::eval::modules::decimal::dispatch_decimal_method(d, *kind, method, args, kwargs)

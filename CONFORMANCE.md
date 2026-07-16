@@ -215,7 +215,7 @@ The currently supported subset on `strftime` / `strptime` covers what `chrono::N
 ## `Fraction` float conversion and arithmetic
 <a id="fraction-float-rejection"></a>
 
-`Fraction(float)` and mixed Fraction/float arithmetic are supported for the common CPython-aligned cases. Remaining arithmetic parity gaps are `%` and `**`, tracked by `gap-fraction-mod-pow-parity`.
+`Fraction(float)` and mixed Fraction/float arithmetic are supported for the common CPython-aligned cases, as are the `Fraction.from_float` and `Fraction.from_decimal` classmethods (exact conversion of the binary float / decimal value). Remaining arithmetic parity gaps are `%` and `**`, tracked by `gap-fraction-mod-pow-parity`.
 
 **Status**: Constructor and mixed float arithmetic shipped; modulo/power follow-up tracked.
 
@@ -310,11 +310,16 @@ Until then, prefer host-side async around `Interpreter::execute`.
 ## Decimal context subset
 <a id="decimal-context-subset"></a>
 
-`getcontext` / `setcontext` / `localcontext` and mutable `prec` are supported.
-`rounding` is exposed as a field (default `ROUND_HALF_EVEN`) but trap flags and
-alternate rounding modes are not fully modelled.
+`getcontext` / `setcontext` / `localcontext`, mutable `prec`, and constructing a
+standalone `Context(prec=…, rounding=…)` are supported. `rounding` is exposed as
+a field (default `ROUND_HALF_EVEN`); `quantize` and `to_integral_value` /
+`to_integral` / `to_integral_exact` honour an explicit `rounding=` keyword, but
+context-wide trap flags are not modelled. The total-order and fused arithmetic
+methods `compare_total`, `copy_sign`, `fma`, `remainder_near`, `scaleb`, and
+`adjusted` are shipped (finite operands; special-value inputs to these specific
+methods raise rather than follow the IEEE special-ordering rules).
 
-**Status**: Partial subset; traps/full rounding open.
+**Status**: Partial subset; traps open, arithmetic/total-order methods shipped.
 
 ---
 
