@@ -795,12 +795,23 @@ pub(super) async fn try_builtin(
                 }
             };
             let obj = resolve_proxy(&args[0]).await?;
+            let has_default = args.len() >= 3;
             match crate::eval::names::getattr_on_value(state, obj, attr_name, tools, None).await {
                 Ok(v) => Ok(Some(v)),
                 // Default only swallows AttributeError — Security on blocked
-                // dunders stays a hard failure.
-                Err(EvalError::Interpreter(InterpreterError::AttributeError(_)))
-                    if args.len() >= 3 =>
+                // dunders stays a hard failure. A user `__getattr__` that raises
+                // `AttributeError` surfaces as an Exception value, so catch that
+                // (and subclasses) too, not just the interpreter-internal miss.
+                Err(EvalError::Interpreter(InterpreterError::AttributeError(_))) if has_default => {
+                    Ok(Some(args[2].clone()))
+                }
+                Err(EvalError::Exception(ref e))
+                    if has_default
+                        && (e.type_name == "AttributeError"
+                            || crate::eval::exceptions::builtin_exception_issubclass(
+                                &e.type_name,
+                                "AttributeError",
+                            )) =>
                 {
                     Ok(Some(args[2].clone()))
                 }
@@ -927,6 +938,51 @@ pub(super) async fn try_builtin(
             // exposes a `__call__`, and no non-callable does.
             if attr_name == "__call__" {
                 return Ok(Some(Value::Bool(value_is_callable(state, &args[0]))));
+            }
+            // An instance whose class overrides attribute access
+            // (`__getattr__` / `__getattribute__`) can resolve names the static
+            // lookup below misses. Mirror CPython by running the real lookup and
+            // reporting whether it raised AttributeError (any other exception
+            // propagates, as in CPython 3).
+            if let Value::Instance(inst) = &args[0] {
+                let overrides = crate::eval::classes::lookup_method_in_mro(
+                    state,
+                    &inst.class_name,
+                    "__getattr__",
+                )
+                .is_some()
+                    || crate::eval::classes::lookup_method_in_mro(
+                        state,
+                        &inst.class_name,
+                        "__getattribute__",
+                    )
+                    .is_some();
+                if overrides {
+                    let resolved = crate::eval::names::getattr_on_value(
+                        state,
+                        args[0].clone(),
+                        attr_name,
+                        tools,
+                        None,
+                    )
+                    .await;
+                    return Ok(Some(Value::Bool(match resolved {
+                        Ok(_) => true,
+                        // Internal miss, or a user `raise AttributeError` (which
+                        // surfaces as an Exception value) / a subclass thereof.
+                        Err(EvalError::Interpreter(InterpreterError::AttributeError(_))) => false,
+                        Err(EvalError::Exception(ref e))
+                            if e.type_name == "AttributeError"
+                                || crate::eval::exceptions::builtin_exception_issubclass(
+                                    &e.type_name,
+                                    "AttributeError",
+                                ) =>
+                        {
+                            false
+                        }
+                        Err(e) => return Err(e),
+                    })));
+                }
             }
             // CPython hasattr(obj, name): True iff getattr(obj, name)
             // doesn't raise. Route through dispatch_getattr_opt first
