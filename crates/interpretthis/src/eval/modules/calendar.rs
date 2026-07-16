@@ -110,6 +110,14 @@ impl crate::eval::modules::Module for CalendarModule {
             "FRIDAY" => Some(Value::Int(4)),
             "SATURDAY" => Some(Value::Int(5)),
             "SUNDAY" => Some(Value::Int(6)),
+            // Days per month, index 0 unused (a leading 0), February = 28 (the
+            // non-leap length); CPython exposes this as a plain list.
+            "mdays" => Some(Value::List(crate::value::shared_list(
+                [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                    .iter()
+                    .map(|&n| Value::Int(n))
+                    .collect(),
+            ))),
             _ => None,
         }
     }

@@ -48,6 +48,21 @@ pub fn type_classmethod(type_name: &str, method: &str) -> Option<&'static str> {
 pub fn type_attribute(type_name: &str, attr: &str) -> Option<Value> {
     match (type_name, attr) {
         ("timezone", "utc") => Some(Value::TimeZone(0)),
+        // date/datetime/time bounds and resolution (CPython class constants).
+        ("date", "max") => Some(Value::Date(NaiveDate::from_ymd_opt(9999, 12, 31)?)),
+        ("date", "min") => Some(Value::Date(NaiveDate::from_ymd_opt(1, 1, 1)?)),
+        ("date", "resolution") => Some(Value::TimeDelta(86_400_000_000)),
+        ("datetime", "max") => Some(Value::DateTime {
+            dt: NaiveDate::from_ymd_opt(9999, 12, 31)?.and_hms_micro_opt(23, 59, 59, 999_999)?,
+            tz_offset_secs: None,
+        }),
+        ("datetime", "min") => Some(Value::DateTime {
+            dt: NaiveDate::from_ymd_opt(1, 1, 1)?.and_hms_opt(0, 0, 0)?,
+            tz_offset_secs: None,
+        }),
+        ("datetime", "resolution") | ("time", "resolution") => Some(Value::TimeDelta(1)),
+        ("time", "max") => Some(Value::Time(NaiveTime::from_hms_micro_opt(23, 59, 59, 999_999)?)),
+        ("time", "min") => Some(Value::Time(NaiveTime::from_hms_opt(0, 0, 0)?)),
         _ => None,
     }
 }
@@ -707,6 +722,17 @@ pub fn try_arith(op: &str, lhs: &Value, rhs: &Value) -> Option<EvalResult> {
         ("*", Value::TimeDelta(a), Value::Int(n)) | ("*", Value::Int(n), Value::TimeDelta(a)) => {
             Some(Ok(Value::TimeDelta(a.checked_mul(*n)?)))
         }
+        // timedelta * float -> timedelta (and reflected). CPython scales by the
+        // float's *exact* rational value and rounds to the nearest microsecond
+        // (ties to even), so `timedelta(hours=1) * 2.5 == 2:30:00`.
+        ("*", Value::TimeDelta(a), Value::Float(f))
+        | ("*", Value::Float(f), Value::TimeDelta(a)) => {
+            td_scale_float(*a, *f, false).map(|us| Ok(Value::TimeDelta(us)))
+        }
+        // timedelta / float -> timedelta (divide by the exact rational value).
+        ("/", Value::TimeDelta(a), Value::Float(f)) if *f != 0.0 => {
+            td_scale_float(*a, *f, true).map(|us| Ok(Value::TimeDelta(us)))
+        }
         // timedelta // int -> timedelta (integer microseconds)
         ("//", Value::TimeDelta(a), Value::Int(n)) if *n != 0 => Some(Ok(Value::TimeDelta(a / n))),
         // timedelta / timedelta -> float ratio (`timedelta(days=1) / timedelta(hours=1)` == 24.0).
@@ -753,6 +779,51 @@ const fn td_divide_and_round(a: i64, b: i64) -> i64 {
     let r2 = r * 2;
     let greater_than_half = if b > 0 { r2 > b } else { r2 < b };
     if greater_than_half || (r2 == b && q % 2 != 0) {
+        q += 1;
+    }
+    q
+}
+
+/// Scale a microsecond count by a float using CPython's exact-rational
+/// arithmetic: `td * f` (divide=false) or `td / f` (divide=true), rounded to
+/// the nearest microsecond with ties to even. Returns `None` for a non-finite
+/// float or a result outside `i64` (CPython raises `OverflowError` there).
+fn td_scale_float(a: i64, f: f64, divide: bool) -> Option<i64> {
+    use num_bigint::BigInt;
+    use num_rational::BigRational;
+    use num_traits::ToPrimitive as _;
+    if !f.is_finite() {
+        return None;
+    }
+    let frac = BigRational::from_float(f)?;
+    let a_big = BigInt::from(a);
+    // For `a * (num/den)` → round(a*num / den); for `a / (num/den)` →
+    // round(a*den / num).
+    let (numerator, denominator) = if divide {
+        (&a_big * frac.denom(), frac.numer().clone())
+    } else {
+        (&a_big * frac.numer(), frac.denom().clone())
+    };
+    big_divide_and_round(&numerator, &denominator).to_i64()
+}
+
+/// BigInt port of [`td_divide_and_round`]: `a / b` rounded to the nearest
+/// integer, ties to even.
+fn big_divide_and_round(a: &num_bigint::BigInt, b: &num_bigint::BigInt) -> num_bigint::BigInt {
+    use num_bigint::BigInt;
+    use num_integer::Integer as _;
+    use num_traits::{Signed as _, Zero as _};
+    // Floor division (rounds toward negative infinity), matching Python divmod.
+    let (mut q, r) = a.div_rem(b);
+    let floored_r = if !r.is_zero() && (r.is_negative() != b.is_negative()) {
+        q -= 1;
+        &r + b
+    } else {
+        r
+    };
+    let r2 = &floored_r * BigInt::from(2);
+    let greater_than_half = if b.is_positive() { r2 > *b } else { r2 < *b };
+    if greater_than_half || (r2 == *b && q.is_odd()) {
         q += 1;
     }
     q
