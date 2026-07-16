@@ -238,7 +238,289 @@ pub type SetAttrSlot =
 /// Instance/Class/Type/Function/Lambda/Module/Date, which need the
 /// class registry and so live in `eval/names.rs`.
 pub fn dispatch_getattr_opt(value: &Value, name: &str) -> Result<Option<Value>, EvalError> {
+    // Builtin dunder methods (`[].__iter__`, `(5).__add__`, `"x".__len__`)
+    // resolve to a bound method-wrapper when CPython's type defines the dunder,
+    // so `hasattr(x, "__iter__")` / `getattr(x, "__len__")` match. Uniform
+    // across builtin types; user Instance/Class resolution is handled by the
+    // caller and excluded by `builtin_dunder_present`. Security-blocked dunders
+    // never reach here (callers run `validate_attribute` first).
+    if is_dunder_name(name) && builtin_dunder_present(value, name) {
+        return Ok(Some(bound_method(value, name)));
+    }
     type_of(value).get_attr_slot.map_or_else(|| Ok(None), |slot| slot(value, name).map(Some))
+}
+
+/// A `__dunder__` identifier: two leading and two trailing underscores.
+fn is_dunder_name(name: &str) -> bool {
+    name.len() > 4 && name.starts_with("__") && name.ends_with("__")
+}
+
+/// Dunders present on every object (from CPython 3.12 `dir(object)`), minus the
+/// security-blocked ones. `__hash__` is here too: unhashable builtins
+/// (list/dict/set/bytearray) still *have* the attribute (it is `None`), so
+/// `hasattr([], "__hash__")` is `True`.
+const COMMON_DUNDERS: &[&str] = &[
+    "__delattr__",
+    "__dir__",
+    "__doc__",
+    "__eq__",
+    "__format__",
+    "__ge__",
+    "__getattribute__",
+    "__getstate__",
+    "__gt__",
+    "__hash__",
+    "__init__",
+    "__init_subclass__",
+    "__le__",
+    "__lt__",
+    "__ne__",
+    "__new__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__repr__",
+    "__setattr__",
+    "__sizeof__",
+    "__str__",
+    "__subclasshook__",
+];
+
+// Per-type extra dunders (beyond COMMON), transcribed from CPython 3.12
+// `dir(type)`. `bool` shares `int`'s set (it subclasses int).
+const INT_DUNDERS: &[&str] = &[
+    "__abs__",
+    "__add__",
+    "__and__",
+    "__bool__",
+    "__ceil__",
+    "__divmod__",
+    "__float__",
+    "__floor__",
+    "__floordiv__",
+    "__getnewargs__",
+    "__index__",
+    "__int__",
+    "__invert__",
+    "__lshift__",
+    "__mod__",
+    "__mul__",
+    "__neg__",
+    "__or__",
+    "__pos__",
+    "__pow__",
+    "__radd__",
+    "__rand__",
+    "__rdivmod__",
+    "__rfloordiv__",
+    "__rlshift__",
+    "__rmod__",
+    "__rmul__",
+    "__ror__",
+    "__round__",
+    "__rpow__",
+    "__rrshift__",
+    "__rshift__",
+    "__rsub__",
+    "__rtruediv__",
+    "__rxor__",
+    "__sub__",
+    "__truediv__",
+    "__trunc__",
+    "__xor__",
+];
+const FLOAT_DUNDERS: &[&str] = &[
+    "__abs__",
+    "__add__",
+    "__bool__",
+    "__ceil__",
+    "__divmod__",
+    "__float__",
+    "__floor__",
+    "__floordiv__",
+    "__getformat__",
+    "__getnewargs__",
+    "__int__",
+    "__mod__",
+    "__mul__",
+    "__neg__",
+    "__pos__",
+    "__pow__",
+    "__radd__",
+    "__rdivmod__",
+    "__rfloordiv__",
+    "__rmod__",
+    "__rmul__",
+    "__round__",
+    "__rpow__",
+    "__rsub__",
+    "__rtruediv__",
+    "__sub__",
+    "__truediv__",
+    "__trunc__",
+];
+const COMPLEX_DUNDERS: &[&str] = &[
+    "__abs__",
+    "__add__",
+    "__bool__",
+    "__complex__",
+    "__getnewargs__",
+    "__mul__",
+    "__neg__",
+    "__pos__",
+    "__pow__",
+    "__radd__",
+    "__rmul__",
+    "__rpow__",
+    "__rsub__",
+    "__rtruediv__",
+    "__sub__",
+    "__truediv__",
+];
+const STR_DUNDERS: &[&str] = &[
+    "__add__",
+    "__contains__",
+    "__getitem__",
+    "__getnewargs__",
+    "__iter__",
+    "__len__",
+    "__mod__",
+    "__mul__",
+    "__rmod__",
+    "__rmul__",
+];
+const BYTES_DUNDERS: &[&str] = &[
+    "__add__",
+    "__buffer__",
+    "__bytes__",
+    "__contains__",
+    "__getitem__",
+    "__getnewargs__",
+    "__iter__",
+    "__len__",
+    "__mod__",
+    "__mul__",
+    "__rmod__",
+    "__rmul__",
+];
+const BYTEARRAY_DUNDERS: &[&str] = &[
+    "__add__",
+    "__alloc__",
+    "__buffer__",
+    "__contains__",
+    "__delitem__",
+    "__getitem__",
+    "__iadd__",
+    "__imul__",
+    "__iter__",
+    "__len__",
+    "__mod__",
+    "__mul__",
+    "__release_buffer__",
+    "__rmod__",
+    "__rmul__",
+    "__setitem__",
+];
+const LIST_DUNDERS: &[&str] = &[
+    "__add__",
+    "__class_getitem__",
+    "__contains__",
+    "__delitem__",
+    "__getitem__",
+    "__iadd__",
+    "__imul__",
+    "__iter__",
+    "__len__",
+    "__mul__",
+    "__reversed__",
+    "__rmul__",
+    "__setitem__",
+];
+const TUPLE_DUNDERS: &[&str] = &[
+    "__add__",
+    "__class_getitem__",
+    "__contains__",
+    "__getitem__",
+    "__getnewargs__",
+    "__iter__",
+    "__len__",
+    "__mul__",
+    "__rmul__",
+];
+const DICT_DUNDERS: &[&str] = &[
+    "__class_getitem__",
+    "__contains__",
+    "__delitem__",
+    "__getitem__",
+    "__ior__",
+    "__iter__",
+    "__len__",
+    "__or__",
+    "__reversed__",
+    "__ror__",
+    "__setitem__",
+];
+const SET_DUNDERS: &[&str] = &[
+    "__and__",
+    "__class_getitem__",
+    "__contains__",
+    "__iand__",
+    "__ior__",
+    "__isub__",
+    "__iter__",
+    "__ixor__",
+    "__len__",
+    "__or__",
+    "__rand__",
+    "__ror__",
+    "__rsub__",
+    "__rxor__",
+    "__sub__",
+    "__xor__",
+];
+const FROZENSET_DUNDERS: &[&str] = &[
+    "__and__",
+    "__class_getitem__",
+    "__contains__",
+    "__iter__",
+    "__len__",
+    "__or__",
+    "__rand__",
+    "__ror__",
+    "__rsub__",
+    "__rxor__",
+    "__sub__",
+    "__xor__",
+];
+const RANGE_DUNDERS: &[&str] =
+    &["__bool__", "__contains__", "__getitem__", "__iter__", "__len__", "__reversed__"];
+const NONE_DUNDERS: &[&str] = &["__bool__"];
+// Every builtin iterator/generator (`iter([])`, `(x for x in ...)`), which in
+// this engine are `Value::Lazy` / `Value::Generator` / `Value::BuiltinIter`.
+const ITER_DUNDERS: &[&str] = &["__iter__", "__length_hint__", "__next__", "__setstate__"];
+
+/// Whether CPython's `type(value)` defines dunder `name`, for `hasattr` /
+/// `getattr` on builtin values. Returns `false` for user `Instance` / `Class`
+/// values (their dunders resolve through the class registry) and any type not
+/// modelled here, so the caller falls back to its existing behaviour.
+pub(crate) fn builtin_dunder_present(value: &Value, name: &str) -> bool {
+    let extras: &[&str] = match value {
+        Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => INT_DUNDERS,
+        Value::Float(_) => FLOAT_DUNDERS,
+        Value::Complex(_) => COMPLEX_DUNDERS,
+        Value::String(_) => STR_DUNDERS,
+        Value::Bytes(_) => BYTES_DUNDERS,
+        Value::ByteArray(_) => BYTEARRAY_DUNDERS,
+        Value::List(_) => LIST_DUNDERS,
+        Value::Tuple(_) => TUPLE_DUNDERS,
+        Value::Dict(_) => DICT_DUNDERS,
+        Value::Set(_) => SET_DUNDERS,
+        Value::Frozenset(_) => FROZENSET_DUNDERS,
+        Value::Range { .. } => RANGE_DUNDERS,
+        Value::None => NONE_DUNDERS,
+        Value::Lazy { .. } | Value::Generator { .. } | Value::BuiltinIter { .. } => ITER_DUNDERS,
+        _ => return false,
+    };
+    COMMON_DUNDERS.contains(&name) || extras.contains(&name)
 }
 
 /// Dispatch `obj.name = new_val` through the type-object layer.

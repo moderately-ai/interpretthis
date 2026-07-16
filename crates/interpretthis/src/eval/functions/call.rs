@@ -248,6 +248,11 @@ async fn eval_call_inner(
                             receiver: Value,
                             method: String,
                         },
+                        /// `iterable.__iter__()` — build a fresh iterator (async,
+                        /// so it is deferred out of the sync place-navigation).
+                        MakeIterator {
+                            receiver: Value,
+                        },
                         /// ExceptionGroup.subgroup / .split, etc.
                         Exception {
                             receiver: Value,
@@ -318,6 +323,14 @@ async fn eval_call_inner(
                                 receiver: target.clone(),
                                 method: method_name.to_string(),
                             }),
+                            // `xs.__iter__()` on a builtin iterable — build a
+                            // fresh iterator (deferred; needs async state).
+                            _ if method_name == "__iter__"
+                                && resolved_args.is_empty()
+                                && crate::types::builtin_dunder_present(target, "__iter__") =>
+                            {
+                                Ok(Dispatch::MakeIterator { receiver: target.clone() })
+                            }
                             _ => {
                                 let outcome =
                                     dispatch_method(target, method_name, &resolved_args, &kwargs)?;
@@ -344,6 +357,10 @@ async fn eval_call_inner(
                                     tools,
                                 )
                                 .await;
+                            }
+                            Dispatch::MakeIterator { receiver } => {
+                                return super::builtins::make_iterator(state, &receiver, tools)
+                                    .await;
                             }
                             Dispatch::Exception { receiver, method } => {
                                 let Value::Exception(exc) = receiver else {
@@ -534,6 +551,15 @@ async fn eval_call_inner(
                     tools,
                 )
                 .await;
+            }
+            // `[1, 2, 3].__iter__()` on a builtin iterable — build a fresh
+            // iterator (matches the `__iter__` the getattr/hasattr layer reports).
+            if method_name == "__iter__"
+                && resolved_args.is_empty()
+                && !matches!(temp, Value::Instance(_))
+                && crate::types::builtin_dunder_present(&temp, "__iter__")
+            {
+                return super::builtins::make_iterator(state, &temp, tools).await;
             }
             if matches!(temp, Value::Instance(_)) {
                 let call = CallArgs { positional: &resolved_args, keyword: &kwargs };

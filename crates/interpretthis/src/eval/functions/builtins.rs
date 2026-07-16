@@ -1459,32 +1459,7 @@ pub(super) async fn try_builtin(
                 .into());
             }
             // One-arg form: return a real iterator that `next()` can advance.
-            match &args[0] {
-                // Already an iterator — CPython returns it unchanged (iter(it) is it).
-                Value::Lazy { .. } | Value::Generator { .. } => Ok(Some(args[0].clone())),
-                // A user object that already defines __next__ is its own iterator.
-                Value::Instance(inst)
-                    if crate::eval::classes::lookup_method_in_mro(
-                        state,
-                        &inst.class_name,
-                        "__next__",
-                    )
-                    .is_some() =>
-                {
-                    Ok(Some(args[0].clone()))
-                }
-                // Any other iterable: materialise into a fresh cursor-backed
-                // iterator (a list/tuple/str/range/dict/set is iterable but not
-                // itself an iterator). `op::iter` raises TypeError for a
-                // non-iterable.
-                other => {
-                    let items = crate::eval::op::iter(state, other, tools).await?;
-                    let cursor_id = state.next_cursor_id;
-                    state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
-                    state.lazy_cursors.insert(cursor_id, 0);
-                    Ok(Some(Value::Lazy { items, cursor_id }))
-                }
-            }
+            make_iterator(state, &args[0], tools).await.map(Some)
         }
         "bytes" | "bytearray" => {
             // CPython: bytes() -> b''; bytes(int) -> b'\x00' * n;
@@ -1871,6 +1846,40 @@ pub(super) async fn try_builtin(
 /// `start` or any item is non-numeric, or when nothing is a float (a
 /// pure-int sum stays exact — and arbitrary-precision — on the generic
 /// path).
+/// Build a fresh iterator (`iter(value)` / `value.__iter__()`): an existing
+/// iterator (or user object with `__next__`) is returned as-is; any other
+/// iterable is materialised into a cursor-backed [`Value::Lazy`]. Shared by the
+/// `iter` builtin and the `__iter__` dunder dispatch so both agree.
+pub(crate) async fn make_iterator(
+    state: &mut InterpreterState,
+    value: &Value,
+    tools: &Tools,
+) -> Result<Value, EvalError> {
+    match value {
+        // Already an iterator — CPython returns it unchanged (iter(it) is it).
+        Value::Lazy { .. } | Value::Generator { .. } | Value::BuiltinIter { .. } => {
+            Ok(value.clone())
+        }
+        // A user object that already defines __next__ is its own iterator.
+        Value::Instance(inst)
+            if crate::eval::classes::lookup_method_in_mro(state, &inst.class_name, "__next__")
+                .is_some() =>
+        {
+            Ok(value.clone())
+        }
+        // Any other iterable: materialise into a fresh cursor-backed iterator (a
+        // list/tuple/str/range/dict/set is iterable but not itself an iterator).
+        // `op::iter` raises TypeError for a non-iterable.
+        other => {
+            let items = crate::eval::op::iter(state, other, tools).await?;
+            let cursor_id = state.next_cursor_id;
+            state.next_cursor_id = state.next_cursor_id.wrapping_add(1);
+            state.lazy_cursors.insert(cursor_id, 0);
+            Ok(Value::Lazy { items, cursor_id })
+        }
+    }
+}
+
 fn sum_float_neumaier(start: &Value, items: &[Value]) -> Option<Value> {
     use num_traits::ToPrimitive as _;
     let as_num = |v: &Value| -> Option<(f64, bool)> {

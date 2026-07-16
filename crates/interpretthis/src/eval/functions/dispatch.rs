@@ -530,6 +530,14 @@ pub(crate) async fn call_value_as_function(
                             return Ok(returned);
                         }
                     }
+                    // A captured `__iter__` bound method (`it = xs.__iter__; it()`)
+                    // builds a fresh iterator, needing async state.
+                    if method == "__iter__"
+                        && args.is_empty()
+                        && crate::types::builtin_dunder_present(value, "__iter__")
+                    {
+                        return super::builtins::make_iterator(state, value, tools).await;
+                    }
                     let mut recv = (**value).clone();
                     Ok(dispatch_method(&mut recv, method, args, kwargs)?.value)
                 }
