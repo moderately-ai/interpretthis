@@ -287,6 +287,42 @@ pub async fn eval_class_def(
                         .filter(|d| !is_abstractmethod_decorator(d))
                         .cloned()
                         .collect();
+                    // A single custom (non-builtin-shape) decorator: evaluate
+                    // it and apply it to the method as a normal callable, then
+                    // store the result. A function/lambda result stays a method
+                    // (binds `self`); any other result (a descriptor instance,
+                    // etc.) becomes a class attribute so `__get__`/`__set__`/
+                    // `__set_name__` drive access — this is how CPython treats a
+                    // decorated method. Builtin shapes and multi-decorator stacks
+                    // fall through to `classify_decorated_method`.
+                    if decorators.len() == 1
+                        && !is_builtin_method_decorator(&decorators[0], &properties)
+                    {
+                        let key = format!("{class_name}.{method_name}");
+                        let qualname = state.qualname_for(&method_name);
+                        let func_def = build_plain_method_def(
+                            state,
+                            key,
+                            params,
+                            method.body.clone(),
+                            source,
+                            qualname,
+                            method_is_async,
+                        );
+                        let func_value = Value::Function(Arc::new(func_def));
+                        let decorator_val = eval_expr(state, &decorators[0], tools).await?;
+                        let empty_kwargs = indexmap::IndexMap::new();
+                        let decorated = crate::eval::functions::call_value_as_function(
+                            state,
+                            &decorator_val,
+                            std::slice::from_ref(&func_value),
+                            &empty_kwargs,
+                            tools,
+                        )
+                        .await?;
+                        class_attrs.insert(method_name, decorated);
+                        continue;
+                    }
                     // The body cache key gets a per-decorator suffix so
                     // `@property def x` / `@x.setter def x` / `@x.deleter
                     // def x` don't collide. Regular methods use the plain
@@ -542,6 +578,60 @@ fn is_abstractmethod_decorator(decorator: &Expr) -> bool {
         _ => return false,
     };
     crate::eval::modules::abc_mod::ABSTRACT_DECORATORS.contains(&name)
+}
+
+/// Whether a method decorator is one of the builtin shapes handled by
+/// [`classify_decorated_method`] (`@property` / `@cached_property` /
+/// `@staticmethod` / `@classmethod` / `@<prop>.setter` / `@<prop>.deleter`).
+/// Everything else is a user callable applied to the method the normal way.
+fn is_builtin_method_decorator(dec: &Expr, properties: &BTreeMap<String, PropertyDef>) -> bool {
+    match dec {
+        Expr::Name(n) => {
+            matches!(n.id.as_str(), "property" | "cached_property" | "staticmethod" | "classmethod")
+        }
+        Expr::Attribute(a) if a.attr.as_str() == "cached_property" => true,
+        Expr::Attribute(a) if matches!(a.attr.as_str(), "setter" | "deleter") => {
+            matches!(a.value.as_ref(), Expr::Name(base) if properties.contains_key(base.id.as_str()))
+        }
+        _ => false,
+    }
+}
+
+/// Build a plain (undecorated) method `FunctionDef`, caching its body under
+/// `key`. Shared by the builtin-shape classifier and the custom-decorator path.
+fn build_plain_method_def(
+    state: &mut InterpreterState,
+    key: String,
+    params: crate::value::FunctionParams,
+    body: Vec<Stmt>,
+    source: String,
+    qualname: String,
+    is_async: bool,
+) -> FunctionDef {
+    let (mut assigned_names, global_names) = crate::eval::functions::collect_assigned_names(&body);
+    assigned_names.retain(|n| !global_names.contains(n));
+    let is_generator = crate::eval::functions::contains_yield_stmts(&body);
+    let docstring = crate::eval::functions::extract_docstring(&body);
+    state.function_bodies.insert(key.clone(), Arc::new(body));
+    FunctionDef {
+        name: key,
+        body_key: String::new(),
+        wraps_name: None,
+        params,
+        closure: BTreeMap::new(),
+        source,
+        nonlocal_names: Vec::new(),
+        is_generator,
+        nonlocal_cell_id: None,
+        assigned_names,
+        global_names,
+        is_module_level: false,
+        docstring,
+        cell_refreshes: Vec::new(),
+        qualname,
+        annotations: Vec::new(),
+        is_async,
+    }
 }
 
 /// Dispatch a method's decorator list to the right ClassValue bucket
