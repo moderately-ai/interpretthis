@@ -213,6 +213,37 @@ pub async fn eval_function_def(
     let docstring = extract_docstring(&node.body);
     let qualname = state.qualname_for(name);
 
+    // `__annotations__`: evaluate each parameter's annotation (declaration
+    // order) then the return annotation, at def time (as CPython does). Lenient
+    // — an annotation whose expression fails to evaluate is skipped rather than
+    // aborting the def.
+    let mut ann_specs: Vec<(&str, Option<&ast::Expr>)> = Vec::new();
+    for awd in node.args.posonlyargs.iter().chain(node.args.args.iter()) {
+        ann_specs.push((awd.def.arg.as_str(), awd.def.annotation.as_deref()));
+    }
+    if let Some(a) = node.args.vararg.as_deref() {
+        ann_specs.push((a.arg.as_str(), a.annotation.as_deref()));
+    }
+    for awd in &node.args.kwonlyargs {
+        ann_specs.push((awd.def.arg.as_str(), awd.def.annotation.as_deref()));
+    }
+    if let Some(a) = node.args.kwarg.as_deref() {
+        ann_specs.push((a.arg.as_str(), a.annotation.as_deref()));
+    }
+    let mut annotations: Vec<(String, Value)> = Vec::new();
+    for (pname, ann) in ann_specs {
+        if let Some(expr) = ann {
+            if let Ok(v) = eval_expr(state, expr, tools).await {
+                annotations.push((pname.to_string(), v));
+            }
+        }
+    }
+    if let Some(ret) = node.returns.as_deref() {
+        if let Ok(v) = eval_expr(state, ret, tools).await {
+            annotations.push(("return".to_string(), v));
+        }
+    }
+
     let mut func = Value::Function(std::sync::Arc::new(FunctionDef {
         name: name.to_string(),
         body_key,
@@ -229,6 +260,7 @@ pub async fn eval_function_def(
         docstring,
         cell_refreshes,
         qualname,
+        annotations,
     }));
 
     // Apply decorators in REVERSE order so the textually nearest one

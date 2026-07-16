@@ -584,6 +584,18 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                 // just re-invokes it. We model it as the function itself so
                 // `hasattr`/`callable(getattr(...))` stay consistent.
                 Ok(Value::Function(func_def.clone()))
+            } else if attr_name == "__annotations__" {
+                // The def-time parameter/return annotation dict (insertion
+                // order: parameters then `return`).
+                let mut map: indexmap::IndexMap<crate::value::ValueKey, Value> =
+                    indexmap::IndexMap::new();
+                for (k, v) in &func_def.annotations {
+                    map.insert(
+                        crate::eval::literals::value_to_key(&Value::String(k.as_str().into()))?,
+                        v.clone(),
+                    );
+                }
+                Ok(Value::Dict(crate::value::shared_dict(map)))
             } else {
                 Err(attribute_error("function", attr_name))
             }

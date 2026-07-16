@@ -1147,6 +1147,28 @@ fn try_builtin_dunder(
         },
         "__str__" => pure(Value::String(format!("{obj}").into())),
         "__repr__" => pure(Value::String(obj.repr().into())),
+        // `x.__format__(spec)` on a builtin: an empty spec is `str(x)`, a
+        // non-empty spec runs the format-spec mini-language — the same paths the
+        // `format()` builtin takes for a builtin receiver.
+        "__format__" => {
+            let spec = match args.first() {
+                Some(Value::String(s)) => s.as_str(),
+                None => "",
+                Some(other) => {
+                    return Err(InterpreterError::TypeError(format!(
+                        "__format__() argument 1 must be str, not {}",
+                        other.type_name()
+                    ))
+                    .into());
+                }
+            };
+            if spec.is_empty() {
+                pure(Value::String(format!("{obj}").into()))
+            } else {
+                crate::eval::strings::apply_format_spec(obj, spec)
+                    .map(|v| Some(MethodOutcome::pure(v)))
+            }
+        }
         "__bool__" => pure(Value::Bool(obj.is_truthy())),
         // `__floor__`/`__ceil__`/`__trunc__` return the integral part per the
         // numeric type (exact for Fraction/Decimal/int, truncating floor/ceil

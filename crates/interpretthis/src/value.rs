@@ -1948,6 +1948,12 @@ pub struct FunctionDef {
     /// and synthesised defs; consumers fall back to `name`.
     #[serde(default)]
     pub qualname: String,
+    /// `__annotations__`: each annotated parameter (in declaration order) then
+    /// `"return"`, mapped to the annotation value evaluated at def time. An
+    /// annotation whose expression fails to evaluate is skipped rather than
+    /// raising (CPython evaluates strictly; the sandbox is lenient here).
+    #[serde(default)]
+    pub annotations: Vec<(String, Value)>,
 }
 
 impl FunctionDef {

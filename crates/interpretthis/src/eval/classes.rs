@@ -574,6 +574,7 @@ fn classify_decorated_method(
             docstring,
             cell_refreshes: Vec::new(),
             qualname: method_qualname.clone(),
+            annotations: Vec::new(),
         }
     };
     // No decorators: regular method.

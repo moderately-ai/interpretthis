@@ -393,6 +393,7 @@ async fn try_lazy_genexp(
         docstring: None,
         cell_refreshes: Vec::new(),
         qualname: state.qualname_for("<genexpr>"),
+        annotations: Vec::new(),
     };
     let generator =
         crate::eval::functions::create_generator(state, &func_def, body, locals, touched);

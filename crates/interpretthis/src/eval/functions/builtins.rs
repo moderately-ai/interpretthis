@@ -1013,6 +1013,8 @@ pub(super) async fn try_builtin(
                         attr_name == "__name__"
                             || attr_name == "__qualname__"
                             || attr_name == "__doc__"
+                            || attr_name == "__annotations__"
+                            || attr_name == "__call__"
                             || state
                                 .function_attrs
                                 .get(func_def.body_cache_key())
