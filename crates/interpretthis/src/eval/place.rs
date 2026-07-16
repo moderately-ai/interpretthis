@@ -251,6 +251,14 @@ fn nav_recurse<R>(
                     .ok_or_else(|| EvalError::Exception(ExceptionValue::key_error(&k)))?;
                 nav_recurse(v, tail, f)
             }
+            Value::Counter(map) => {
+                // Counter's `__missing__` yields 0 without inserting; for the
+                // aug-assign navigation (`c[k] += 1`, the canonical counting
+                // idiom) the entry is materialised at 0 so the write-back lands.
+                let k = value_to_key(key)?;
+                let v = map.entry(k).or_insert(Value::Int(0));
+                nav_recurse(v, tail, f)
+            }
             other => Err(InterpreterError::TypeError(format!(
                 "'{}' object is not subscriptable",
                 other.type_name()
@@ -341,6 +349,17 @@ pub(crate) fn assign_terminal(
 /// lives in one place; the dispatch returns the signed byte delta the
 /// caller folds into the memory budget.
 fn set_index(container: &mut Value, key: &Value, value: Value) -> Result<isize, EvalError> {
+    // Counter is a dict subclass — `c[k] = n` assigns like a dict (it stores
+    // value-semantic, so it has no `set_item_slot` type-object entry).
+    if let Value::Counter(map) = container {
+        let k = value_to_key(key)?;
+        let new_size = estimate_value_size(&value);
+        let delta = map.insert(k.clone(), value).map_or_else(
+            || to_isize(crate::state::estimate_key_size(&k) + new_size),
+            |old| size_delta(estimate_value_size(&old), new_size),
+        );
+        return Ok(delta);
+    }
     crate::types::dispatch_setitem(container, key, value)
 }
 
