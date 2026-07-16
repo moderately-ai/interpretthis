@@ -1018,9 +1018,14 @@ pub(super) async fn try_builtin(
                                 .get(func_def.body_cache_key())
                                 .is_some_and(|m| m.contains_key(attr_name))
                     }
-                    Value::Type(_) | Value::Lambda(_) => {
-                        attr_name == "__name__" || attr_name == "__qualname__"
+                    // A builtin type object (`str`, `float`, ...) exposes its
+                    // methods and dunders as unbound descriptors, so
+                    // `hasattr(str, "upper")` is True — mirror the resolution
+                    // `getattr` uses via the shared attribute registry.
+                    Value::BuiltinName(type_name) | Value::Type(type_name) => {
+                        crate::types::builtin_type_attr_present(type_name, attr_name)
                     }
+                    Value::Lambda(_) => attr_name == "__name__" || attr_name == "__qualname__",
                     Value::Module(module) => {
                         crate::eval::modules::module_member(module, attr_name).is_ok()
                     }

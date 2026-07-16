@@ -172,7 +172,7 @@ fn format_value_body(
         // Non-finite floats render as CPython's `nan`/`inf` (lowercase for the
         // lowercase codes, uppercase for F/E/G) rather than Rust's `NaN`/`inf`;
         // the sign is applied by the caller, so return the magnitude form.
-        (Value::Float(f), Some(c @ ('f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%')))
+        (Value::Float(f), Some(c @ ('f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'n' | '%')))
             if !f.is_finite() =>
         {
             let base = if f.is_nan() {
@@ -211,7 +211,9 @@ fn format_value_body(
         },
         (Value::Float(f), Some('e')) => Ok(format_scientific(*f, prec(), false)),
         (Value::Float(f), Some('E')) => Ok(format_scientific(*f, prec(), true)),
-        (Value::Float(f), Some('g' | 'G')) => Ok(format_general(
+        // `n` is locale-aware `g` in CPython; with no locale support we render
+        // the C-locale form, which is plain `g` (no digit grouping).
+        (Value::Float(f), Some('g' | 'G' | 'n')) => Ok(format_general(
             *f,
             precision.map_or(6, |p| spec_usize(p, 6)),
             type_char == Some('G'),
@@ -227,7 +229,7 @@ fn format_value_body(
         // A complex under a float presentation code formats each part with that
         // code and joins them with the imaginary part's explicit sign, e.g.
         // `f"{3+4j:.2f}"` is "3.00+4.00j".
-        (Value::Complex(c), Some('f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%')) => {
+        (Value::Complex(c), Some('f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'n' | '%')) => {
             let re = format_value_body(&Value::Float(c.re), type_char, precision, alternate)?;
             let im = format_value_body(&Value::Float(c.im.abs()), type_char, precision, alternate)?;
             let sign = if c.im.is_sign_negative() { "-" } else { "+" };
@@ -242,7 +244,7 @@ fn format_value_body(
             let scaled = d.as_ref().clone() * bigdecimal::BigDecimal::from(100);
             Ok(format!("{}%", format_decimal_fixed(&scaled, prec())))
         }
-        (Value::Decimal(d, _), Some('e' | 'E' | 'g' | 'G')) => {
+        (Value::Decimal(d, _), Some('e' | 'E' | 'g' | 'G' | 'n')) => {
             use num_traits::ToPrimitive as _;
             let f = d.to_f64().unwrap_or(f64::NAN);
             let body = format_value_body(&Value::Float(f), type_char, precision, alternate)?;

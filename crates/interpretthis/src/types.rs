@@ -592,6 +592,41 @@ pub(crate) fn builtin_dunder_present(value: &Value, name: &str) -> bool {
     COMMON_DUNDERS.contains(&name) || extras.contains(&name)
 }
 
+/// Whether the builtin TYPE object named `type_name` exposes attribute `attr`
+/// — the basis for `hasattr(str, "upper")` / `getattr(float, "__format__")` and
+/// for rejecting `str.fakemethod`. Mirrors [`builtin_dir`] over the same static
+/// tables, so getattr/hasattr on a type object agree with `dir` and with
+/// instance attribute access. `__name__`/`__qualname__`/`__call__` are the type
+/// object's own attributes. Blocked type-object dunders (`__mro__`, `__dict__`,
+/// ...) are intentionally excluded — `validate_attribute` denies them upstream.
+pub(crate) fn builtin_type_attr_present(type_name: &str, attr: &str) -> bool {
+    if matches!(attr, "__name__" | "__qualname__" | "__call__") {
+        return true;
+    }
+    let (dunders, methods, data): (&[&str], &[&str], &[&str]) = match type_name {
+        "int" | "bool" => (INT_DUNDERS, INT_METHODS, &["denominator", "imag", "numerator", "real"]),
+        "float" => (FLOAT_DUNDERS, FLOAT_METHODS, &["imag", "real"]),
+        "complex" => (COMPLEX_DUNDERS, COMPLEX_METHODS, &["imag", "real"]),
+        "str" => (STR_DUNDERS, STR_METHODS, &[]),
+        "bytes" => (BYTES_DUNDERS, BYTES_METHODS, &[]),
+        "bytearray" => (BYTEARRAY_DUNDERS, BYTEARRAY_METHODS, &[]),
+        "list" => (LIST_DUNDERS, LIST_METHODS, &[]),
+        "tuple" => (TUPLE_DUNDERS, TUPLE_METHODS, &[]),
+        "dict" => (DICT_DUNDERS, DICT_METHODS, &[]),
+        "set" => (SET_DUNDERS, SET_METHODS, &[]),
+        "frozenset" => (FROZENSET_DUNDERS, FROZENSET_METHODS, &[]),
+        "range" => (RANGE_DUNDERS, RANGE_METHODS, &["start", "step", "stop"]),
+        "NoneType" => (NONE_DUNDERS, &[], &[]),
+        // `object` carries only the universal dunders (checked below).
+        "object" => (&[], &[], &[]),
+        _ => return false,
+    };
+    COMMON_DUNDERS.contains(&attr)
+        || dunders.contains(&attr)
+        || methods.contains(&attr)
+        || data.contains(&attr)
+}
+
 /// Dispatch `obj.name = new_val` through the type-object layer.
 /// Returns the signed byte delta on the container's estimated heap
 /// size. Raises `TypeError` when the value's type has no

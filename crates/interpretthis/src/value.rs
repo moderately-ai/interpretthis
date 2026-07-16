@@ -2247,9 +2247,19 @@ impl Value {
             // Generic name for instances; the concrete class name is exposed via
             // `python_type_name` where it matters (errors, `type()`).
             Self::Instance(_) => "object",
+            // An unbound builtin instance-method descriptor (`str.upper`,
+            // `list.append`) is a `method_descriptor`; the class/static-style
+            // entries (`dict.fromkeys`, `int.from_bytes`, `str.maketrans`,
+            // `*.fromhex`) are plain `builtin_function_or_method`, as in CPython.
+            Self::BuiltinTypeMethod { method, .. } => {
+                if matches!(method.as_str(), "fromkeys" | "fromhex" | "from_bytes" | "maketrans") {
+                    "builtin_function_or_method"
+                } else {
+                    "method_descriptor"
+                }
+            }
             Self::ModuleFunction { .. }
             | Self::BoundMethod { .. }
-            | Self::BuiltinTypeMethod { .. }
             | Self::BuiltinName(_)
             | Self::ToolName(_)
             | Self::UnboundClassMethod { .. } => "builtin_function_or_method",

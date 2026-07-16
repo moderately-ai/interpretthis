@@ -707,6 +707,15 @@ async fn eval_call_inner(
             // route to the classmethod-aware handler in
             // call_value_as_function.
             if let Value::BuiltinName(type_name) = &temp {
+                // Reject an unknown attribute on the type object with CPython's
+                // "type object ..." phrasing before dispatch (which would report
+                // the instance-form "'str' object ..." message instead).
+                if !crate::types::builtin_type_attr_present(type_name, method_name) {
+                    return Err(InterpreterError::AttributeError(format!(
+                        "type object '{type_name}' has no attribute '{method_name}'"
+                    ))
+                    .into());
+                }
                 let unbound = Value::BuiltinTypeMethod {
                     type_name: type_name.clone(),
                     method: method_name.to_string(),

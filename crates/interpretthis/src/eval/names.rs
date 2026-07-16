@@ -370,10 +370,20 @@ pub(crate) async fn getattr_normal_lookup(
         if attr_name == "__name__" || attr_name == "__qualname__" {
             return Ok(Value::String(type_name.as_str().into()));
         }
-        return Ok(Value::BuiltinTypeMethod {
-            type_name: type_name.clone(),
-            method: attr_name.to_string(),
-        });
+        // Only real attributes of the type resolve to an unbound method
+        // descriptor; an unknown name is an AttributeError so `getattr(str, x,
+        // default)` falls back and `hasattr(str, x)` reports False, matching
+        // CPython (`str.fakemethod` raises rather than fabricating a method).
+        if crate::types::builtin_type_attr_present(type_name, attr_name) {
+            return Ok(Value::BuiltinTypeMethod {
+                type_name: type_name.clone(),
+                method: attr_name.to_string(),
+            });
+        }
+        return Err(InterpreterError::AttributeError(format!(
+            "type object '{type_name}' has no attribute '{attr_name}'"
+        ))
+        .into());
     }
 
     if let Some(val) = crate::types::dispatch_getattr_opt(&obj, attr_name)? {
