@@ -35,7 +35,10 @@ pub(crate) fn line_of(source: &str, offset: usize) -> usize {
     if offset > source.len() {
         return 1;
     }
-    source[..offset].bytes().filter(|b| *b == b'\n').count() + 1
+    // Count newlines over the byte slice, not `source[..offset]` — a byte offset
+    // that lands inside a multi-byte character (e.g. an em-dash in a comment)
+    // would panic on the `str` slice while a byte-slice index never does.
+    source.as_bytes()[..offset].iter().filter(|b| **b == b'\n').count() + 1
 }
 
 /// Stamp ` (at line N)` onto an error's user-visible message when it
@@ -236,10 +239,11 @@ pub fn eval_stmt<'a>(
             let r = modules::eval_import(state, node).map_err(|e| stamp_line(e, stmt_line));
             Box::pin(async move { r })
         }
-        Stmt::ImportFrom(node) => {
-            let r = modules::eval_import_from(state, node).map_err(|e| stamp_line(e, stmt_line));
-            Box::pin(async move { r })
-        }
+        Stmt::ImportFrom(node) => Box::pin(async move {
+            modules::eval_import_from(state, node, tools)
+                .await
+                .map_err(|e| stamp_line(e, stmt_line))
+        }),
         Stmt::ClassDef(node) => {
             guarded_block!(state, stmt_line, classes::eval_class_def(state, node, tools))
         }
@@ -643,4 +647,25 @@ pub async fn eval_body(state: &mut InterpreterState, body: &[Stmt], tools: &Tool
         result = eval_stmt(state, stmt, tools).await?;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_of;
+
+    #[test]
+    fn line_of_never_panics_on_offset_inside_multibyte_char() {
+        // A body's AST offsets can be applied to a different source (a
+        // bootstrapped class, a generator body, ...) that contains multi-byte
+        // characters. Slicing `&str` by such an offset panicked; the byte-slice
+        // form must be infallible. The em-dash occupies 3 bytes.
+        let src = "a\n— dashed comment\nb = 1";
+        assert_eq!(line_of(src, 0), 1);
+        assert_eq!(line_of(src, 2), 2);
+        // Offsets 3 and 4 fall inside the em-dash bytes — must not panic.
+        assert_eq!(line_of(src, 3), 2);
+        assert_eq!(line_of(src, 4), 2);
+        assert_eq!(line_of(src, src.len()), 3);
+        assert_eq!(line_of(src, src.len() + 100), 1);
+    }
 }

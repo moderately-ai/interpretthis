@@ -149,7 +149,10 @@ async fn eval_call_inner(
             // `list.sort()` is special-cased: CPython 3.12 makes both
             // `key=` and `reverse=` keyword-only, and key= needs async
             // call_value_as_function. Shares `dsu_sort` with `sorted`.
-            if method_name == "sort" {
+            // A user-class instance that defines its own `sort` (e.g. a
+            // `collections.UserList` subclass) must dispatch normally, not hit
+            // the list-only path, which requires a `Value::List` receiver.
+            if method_name == "sort" && !instance_method_shadows(state, obj_expr, "sort") {
                 if !resolved_args.is_empty() {
                     return Err(InterpreterError::TypeError(
                         "sort() takes no positional arguments".into(),
@@ -890,6 +893,19 @@ async fn eval_call_inner(
 /// Async `list.count` / `list.index` / `list.remove` using user-class
 /// `__eq__` when needed. Returns `Ok(None)` if the receiver is not a
 /// list (caller falls through to the positional method table).
+/// Whether `obj_expr` is a bare name bound to a user-class instance whose class
+/// (through its MRO) defines `method` — used to skip builtin method special
+/// cases (`list.sort()`) when the receiver has its own override.
+fn instance_method_shadows(state: &InterpreterState, obj_expr: &Expr, method: &str) -> bool {
+    if let Expr::Name(n) = obj_expr {
+        if let Some(Value::Instance(inst)) = state.variables.get(n.id.as_str()) {
+            return crate::eval::classes::lookup_method_in_mro(state, &inst.class_name, method)
+                .is_some();
+        }
+    }
+    false
+}
+
 async fn list_eq_method(
     state: &mut InterpreterState,
     obj_expr: &Expr,
