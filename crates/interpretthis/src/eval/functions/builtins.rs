@@ -1015,6 +1015,8 @@ pub(super) async fn try_builtin(
                             || attr_name == "__doc__"
                             || attr_name == "__annotations__"
                             || attr_name == "__call__"
+                            || attr_name == "__defaults__"
+                            || attr_name == "__kwdefaults__"
                             || state
                                 .function_attrs
                                 .get(func_def.body_cache_key())

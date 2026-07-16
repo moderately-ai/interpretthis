@@ -596,6 +596,30 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
                     );
                 }
                 Ok(Value::Dict(crate::value::shared_dict(map)))
+            } else if attr_name == "__defaults__" {
+                // Tuple of the trailing positional parameters' defaults, or None
+                // when the function has none (CPython uses None, not `()`).
+                let dv = &func_def.params.default_values;
+                if dv.is_empty() { Ok(Value::None) } else { Ok(Value::Tuple(dv.clone())) }
+            } else if attr_name == "__kwdefaults__" {
+                // Dict of keyword-only parameters that have a default, or None.
+                let mut map: indexmap::IndexMap<crate::value::ValueKey, Value> =
+                    indexmap::IndexMap::new();
+                for (i, p) in func_def.params.kwonlyargs.iter().enumerate() {
+                    if let Some(Some(v)) = func_def.params.kw_default_values.get(i) {
+                        map.insert(
+                            crate::eval::literals::value_to_key(&Value::String(
+                                p.name.as_str().into(),
+                            ))?,
+                            v.clone(),
+                        );
+                    }
+                }
+                if map.is_empty() {
+                    Ok(Value::None)
+                } else {
+                    Ok(Value::Dict(crate::value::shared_dict(map)))
+                }
             } else {
                 Err(attribute_error("function", attr_name))
             }
