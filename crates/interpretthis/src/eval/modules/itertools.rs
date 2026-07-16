@@ -4,11 +4,14 @@
 
 //! Emulation of Python's `itertools` module.
 //!
-//! All functions materialise their result as a list — same eager
-//! shape as Track C's generator support. Infinite iterators
-//! (`count`, `cycle`, `repeat` without a count) bound themselves
-//! against the interpreter's operation counter rather than running
-//! forever; explicit small bounds give predictable behaviour.
+//! Most functions materialise their result as a list — same eager
+//! shape as Track C's generator support. The exceptions are the lazy
+//! producers `count`/`cycle`/`repeat` (a [`Value::BuiltinIter`]) and
+//! `islice`, which over a lazy input returns a synthesized generator so
+//! it consumes its source one item at a time (an early stop does not
+//! over-run — or hang on — an infinite source). Infinite iterators
+//! bound themselves against the interpreter's operation counter rather
+//! than running forever; explicit small bounds give predictable behaviour.
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
