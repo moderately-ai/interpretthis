@@ -1431,10 +1431,22 @@ pub(super) async fn try_builtin(
             }
             let mut items = crate::eval::op::iter(state, &args[0], tools).await?;
             items.reverse();
-            // CPython names the reverse-iterator by source type
-            // (`list_reverseiterator`, else generic `reversed`); we surface the
-            // generic generator name rather than model each per-type variant.
-            Ok(Some(into_iter_value(state, items, LazyKind::Generator)))
+            // CPython names the reverse-iterator by source type: `list` ->
+            // `list_reverseiterator`, `range` -> `range_iterator`, `dict` ->
+            // `dict_reversekeyiterator`, and the other sequences -> the generic
+            // `reversed`.
+            let kind = match &args[0] {
+                Value::List(_) => LazyKind::ListReverseIterator,
+                Value::Range { .. } => LazyKind::RangeIterator,
+                Value::Dict(_) | Value::OrderedDict(_) => LazyKind::DictReverseKeyIterator,
+                Value::Tuple(_)
+                | Value::String(_)
+                | Value::Bytes(_)
+                | Value::ByteArray(_)
+                | Value::Array { .. } => LazyKind::Reversed,
+                _ => LazyKind::Generator,
+            };
+            Ok(Some(into_iter_value(state, items, kind)))
         }
         "chr" => {
             check_arg_count(name, args, 1, 1)?;
@@ -2108,9 +2120,44 @@ pub(crate) async fn make_iterator(
             crate::value::BuiltinIterName::BytearrayIterator,
             crate::state::BuiltinIterState::BytearrayIter { data: data.clone(), index: 0 },
         )),
-        // Any other iterable: materialise into a fresh cursor-backed iterator (a
-        // tuple/str/range/dict/set is iterable but not itself an iterator, and
-        // being immutable a snapshot is indistinguishable from a live cursor).
+        // Immutable sources: a snapshot is behaviourally identical to a live
+        // cursor, so materialise and tag with CPython's iterator type name.
+        Value::Tuple(items) => Ok(state.alloc_lazy_kind(items.clone(), LazyKind::TupleIterator)),
+        Value::String(s) => {
+            // CPython uses `str_ascii_iterator` for an all-ASCII string and
+            // `str_iterator` otherwise.
+            let kind =
+                if s.is_ascii() { LazyKind::StrAsciiIterator } else { LazyKind::StrIterator };
+            let items = crate::eval::op::iter(state, value, tools).await?;
+            Ok(state.alloc_lazy_kind(items, kind))
+        }
+        Value::Set(_) | Value::Frozenset(_) => {
+            let items = crate::eval::op::iter(state, value, tools).await?;
+            Ok(state.alloc_lazy_kind(items, LazyKind::SetIterator))
+        }
+        Value::Range { .. } => {
+            let items = crate::eval::op::iter(state, value, tools).await?;
+            Ok(state.alloc_lazy_kind(items, LazyKind::RangeIterator))
+        }
+        Value::Bytes(_) => {
+            let items = crate::eval::op::iter(state, value, tools).await?;
+            Ok(state.alloc_lazy_kind(items, LazyKind::BytesIterator))
+        }
+        // `iter(dict)` iterates keys; a dict view iterates keys/values/items.
+        Value::Dict(_) | Value::OrderedDict(_) | Value::DefaultDict(_) | Value::Counter(_) => {
+            let items = crate::eval::op::iter(state, value, tools).await?;
+            Ok(state.alloc_lazy_kind(items, LazyKind::DictKeyIterator))
+        }
+        Value::DictView { kind, .. } => {
+            let lazy_kind = match kind {
+                crate::value::DictViewKind::Keys => LazyKind::DictKeyIterator,
+                crate::value::DictViewKind::Values => LazyKind::DictValueIterator,
+                crate::value::DictViewKind::Items => LazyKind::DictItemIterator,
+            };
+            let items = crate::eval::op::iter(state, value, tools).await?;
+            Ok(state.alloc_lazy_kind(items, lazy_kind))
+        }
+        // Any other iterable: materialise into a fresh cursor-backed iterator.
         // `op::iter` raises TypeError for a non-iterable.
         other => {
             let items = crate::eval::op::iter(state, other, tools).await?;

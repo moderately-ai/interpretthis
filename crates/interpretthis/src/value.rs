@@ -425,6 +425,22 @@ pub enum LazyKind {
     Tee,
     ZipLongest,
     Batched,
+    // Snapshot iterators over immutable sources (a live cursor is
+    // indistinguishable from the snapshot); tagged only so `type(x).__name__`
+    // matches CPython's implementation-detail iterator names.
+    TupleIterator,
+    StrAsciiIterator,
+    StrIterator,
+    SetIterator,
+    DictKeyIterator,
+    DictValueIterator,
+    DictItemIterator,
+    RangeIterator,
+    BytesIterator,
+    // `reversed(...)` results.
+    ListReverseIterator,
+    DictReverseKeyIterator,
+    Reversed,
 }
 
 impl LazyKind {
@@ -454,6 +470,18 @@ impl LazyKind {
             Self::Tee => "_tee",
             Self::ZipLongest => "zip_longest",
             Self::Batched => "batched",
+            Self::TupleIterator => "tuple_iterator",
+            Self::StrAsciiIterator => "str_ascii_iterator",
+            Self::StrIterator => "str_iterator",
+            Self::SetIterator => "set_iterator",
+            Self::DictKeyIterator => "dict_keyiterator",
+            Self::DictValueIterator => "dict_valueiterator",
+            Self::DictItemIterator => "dict_itemiterator",
+            Self::RangeIterator => "range_iterator",
+            Self::BytesIterator => "bytes_iterator",
+            Self::ListReverseIterator => "list_reverseiterator",
+            Self::DictReverseKeyIterator => "dict_reversekeyiterator",
+            Self::Reversed => "reversed",
         }
     }
 }
