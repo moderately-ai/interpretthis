@@ -428,6 +428,28 @@ for i in range(10000):
 }
 
 #[tokio::test]
+async fn security_memory_limit_list_iadd_loop() {
+    // `xs += [...]` grows the shared list in place. The aug-assign accounting
+    // must size the value BEFORE the in-place op, or it compares the grown
+    // handle to itself (delta 0) and the growth escapes the memory budget.
+    let mut cfg = InterpreterConfig::default();
+    cfg.max_memory_bytes = 8192;
+    let interp = Interpreter::new(InterpreterDeps { tools: Tools::new() }, cfg);
+    let resp = interp
+        .execute(
+            r"
+xs = []
+for i in range(100000):
+    xs += [0] * 100
+",
+            &no_tools(),
+            HashMap::new(),
+        )
+        .await;
+    assert!(resp.error.is_some(), "an in-place `+=` growth loop must hit the memory limit");
+}
+
+#[tokio::test]
 async fn security_memory_limit_string_concat_loop() {
     let mut cfg = InterpreterConfig::default();
     cfg.max_memory_bytes = 2048;

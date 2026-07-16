@@ -208,6 +208,13 @@ pub async fn eval_aug_assign(
         place::with_navigate_mut(root, &place.steps, |slot| slot.clone())?
     };
 
+    // Size the old value BEFORE the aug-op runs. An in-place aug-op (`lst += xs`,
+    // `s |= t`) mutates the shared backing store, so `current`, the slot, and
+    // `new_value` all become the *grown* handle — sizing the slot afterwards
+    // would compare the grown value to itself (delta 0) and leave the growth
+    // uncharged, letting a `+=` loop evade the memory limit.
+    let old_size = estimate_value_size(&current);
+
     let rhs = eval_expr(state, &node.value, tools).await?;
     let new_value = crate::eval::op::aug_binop(state, node.op, &current, &rhs, tools).await?;
 
@@ -229,8 +236,7 @@ pub async fn eval_aug_assign(
             .get_mut(&place.root)
             .ok_or_else(|| EvalError::from(InterpreterError::name_not_defined(&place.root)))?;
         place::with_navigate_mut(root, &place.steps, |slot| {
-            let delta =
-                place::size_delta(estimate_value_size(slot), estimate_value_size(&new_value));
+            let delta = place::size_delta(old_size, estimate_value_size(&new_value));
             *slot = new_value;
             delta
         })?
