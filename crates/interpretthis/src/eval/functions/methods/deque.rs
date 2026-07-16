@@ -148,6 +148,74 @@ pub(crate) fn dispatch_deque_method(
             let copied = Value::Deque { items: items.clone(), maxlen: maxlen.copied() };
             Ok(MethodOutcome::pure(copied))
         }
+        // `deque.index(x)` — first index of `x`, else ValueError (as `list`).
+        "index" => {
+            let target = arg1(method, args)?;
+            for (i, item) in items.iter().enumerate() {
+                if crate::eval::operations::values_equal_pub(item, target) {
+                    return Ok(MethodOutcome::pure(Value::Int(i as i64)));
+                }
+            }
+            Err(InterpreterError::ValueError(format!("{} is not in deque", target.repr())).into())
+        }
+        // `deque.count(x)` — number of occurrences of `x`.
+        "count" => {
+            let target = arg1(method, args)?;
+            let n = items
+                .iter()
+                .filter(|it| crate::eval::operations::values_equal_pub(it, target))
+                .count();
+            Ok(MethodOutcome::pure(Value::Int(n as i64)))
+        }
+        // `deque.insert(i, x)` — insert before position `i` (clamped, negative
+        // aware). A bounded deque already at capacity raises IndexError.
+        "insert" => {
+            let raw = match args.first() {
+                Some(Value::Int(i)) => *i,
+                Some(Value::Bool(b)) => i64::from(*b),
+                _ => {
+                    return Err(InterpreterError::TypeError(
+                        "insert() argument 1 must be an integer".into(),
+                    )
+                    .into());
+                }
+            };
+            let value = args.get(1).cloned().unwrap_or(Value::None);
+            if maxlen.is_some_and(|&m| items.len() >= m) {
+                return Err(EvalError::Exception(ExceptionValue::new(
+                    "IndexError",
+                    "deque already at its maximum size",
+                )));
+            }
+            let len = items.len() as i64;
+            let idx = raw.clamp(-len, len);
+            let idx = if idx < 0 { (idx + len).max(0) } else { idx.min(len) } as usize;
+            let grew = estimate_value_size(&value);
+            items.insert(idx, value);
+            Ok(MethodOutcome::grew(Value::None, grew))
+        }
+        // `deque.remove(x)` — remove first occurrence, else ValueError.
+        "remove" => {
+            let target = arg1(method, args)?;
+            let pos =
+                items.iter().position(|it| crate::eval::operations::values_equal_pub(it, target));
+            match pos {
+                Some(i) => {
+                    let removed = items.remove(i);
+                    let freed = removed.as_ref().map_or(0, estimate_value_size);
+                    Ok(MethodOutcome::shrank(Value::None, freed))
+                }
+                None => {
+                    Err(InterpreterError::ValueError("deque.remove(x): x not in deque".into())
+                        .into())
+                }
+            }
+        }
+        // `deque.reverse()` — reverse in place.
+        "reverse" => {
+            items.make_contiguous().reverse();
+            Ok(MethodOutcome::pure(Value::None))
+        }
         _ => Err(InterpreterError::AttributeError(format!(
             "'deque' object has no attribute '{method}'"
         ))

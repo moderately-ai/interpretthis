@@ -3694,6 +3694,11 @@ fn deque_get_attr(value: &Value, name: &str) -> EvalResult {
         "rotate",
         "clear",
         "copy",
+        "index",
+        "count",
+        "insert",
+        "remove",
+        "reverse",
     ];
     if DEQUE_METHODS.contains(&name) {
         return Ok(bound_method(value, name));
