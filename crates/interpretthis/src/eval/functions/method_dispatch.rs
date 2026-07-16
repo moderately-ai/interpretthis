@@ -1200,6 +1200,45 @@ fn try_builtin_dunder(
                 _ => Ok(None),
             }
         }
+        // `x.__hash__()` on a hashable builtin — the CPython-exact value
+        // (matching the `hash()` builtin). Unhashable/unsupported receivers
+        // fall through to AttributeError.
+        "__hash__" if !matches!(obj, Value::Instance(_) | Value::Class(_)) => {
+            match crate::pyhash::python_hash(obj) {
+                Some(h) => pure(Value::Int(h)),
+                None => Ok(None),
+            }
+        }
+        // Rich-comparison dunders on builtins (`(1.5).__eq__(1.5)`,
+        // `(10).__lt__(20)`). `__eq__`/`__ne__` use the shared value equality
+        // (which honours the numeric tower); the ordering dunders return
+        // NotImplemented for incomparable operand types, as CPython does.
+        // Instances keep their own user-defined comparison dunders.
+        "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__"
+            if !matches!(obj, Value::Instance(_) | Value::Class(_)) =>
+        {
+            let Some(other) = args.first() else {
+                return Ok(None);
+            };
+            use crate::eval::operations::{compare_lt, values_equal_pub};
+            let outcome: Option<bool> = match method {
+                "__eq__" => Some(values_equal_pub(obj, other)),
+                "__ne__" => Some(!values_equal_pub(obj, other)),
+                "__lt__" => compare_lt(obj, other).ok(),
+                "__le__" => {
+                    compare_lt(obj, other).ok().map(|lt| lt || values_equal_pub(obj, other))
+                }
+                "__gt__" => compare_lt(other, obj).ok(),
+                "__ge__" => {
+                    compare_lt(other, obj).ok().map(|gt| gt || values_equal_pub(obj, other))
+                }
+                _ => None,
+            };
+            match outcome {
+                Some(b) => pure(Value::Bool(b)),
+                None => pure(Value::NotImplemented),
+            }
+        }
         // Binary arithmetic / bitwise dunders on builtins (`(10).__add__(5)`,
         // `(100).__divmod__(7)`). Routed through the shared sync binop with
         // default context (prec 28, 1 Mibit) — the only divergence is a Decimal
