@@ -520,7 +520,15 @@ pub(super) async fn try_builtin(
                 // `type(Color.RED).__name__ == 'Color'` and
                 // `type(Color.RED) is Color`.
                 Value::EnumMember { class_name, .. } => Value::Class(class_name.clone()),
-                Value::Type(_) | Value::Class(_) => Value::Type("type".to_string()),
+                Value::Type(_) | Value::Class(_) | Value::ExceptionType(_) => {
+                    Value::Type("type".to_string())
+                }
+                // A bare builtin *type* name (`int`, `str`, `list`) is itself a
+                // type object, so its type is `type`. A builtin *function*
+                // (`len`, `print`) falls through to `builtin_function_or_method`.
+                Value::BuiltinName(n) if crate::value::is_builtin_type_name(n) => {
+                    Value::Type("type".to_string())
+                }
                 Value::Module(_) => Value::Type("module".to_string()),
                 other => Value::Type(other.type_name().to_string()),
             };
