@@ -10,6 +10,11 @@ use rustpython_parser::{
 use crate::error::InterpreterError;
 
 /// Parse Python source code into an AST suite (list of statements).
+///
+/// Applies CPython's compile-time private-name mangling (`__x` inside a class
+/// body → `_ClassName__x`) as a post-parse AST pass.
 pub fn parse(code: &str) -> Result<Suite, InterpreterError> {
-    ast::Suite::parse(code, "<interpreter>").map_err(|e| InterpreterError::Syntax(format!("{e}")))
+    let suite = ast::Suite::parse(code, "<interpreter>")
+        .map_err(|e| InterpreterError::Syntax(format!("{e}")))?;
+    Ok(crate::mangle::mangle_private_names(suite))
 }

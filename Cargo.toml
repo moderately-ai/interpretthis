@@ -41,6 +41,14 @@ rustpython-parser = { version = "=0.4.0", default-features = false, features = [
     "location",
     "num-bigint",
 ] }
+# Direct dep on the AST crate (the same instance rustpython-parser re-exports)
+# purely to enable its `fold` feature, which the parser does not pass through.
+# We use it for the compile-time private-name-mangling pass over class bodies.
+rustpython-ast = { version = "=0.4.0", default-features = false, features = [
+    "location",
+    "num-bigint",
+    "fold",
+] }
 tokio = { version = "=1.50.0", features = [
     "rt",
     "rt-multi-thread",

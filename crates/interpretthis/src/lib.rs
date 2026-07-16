@@ -73,6 +73,8 @@ pub mod value;
 
 pub(crate) mod cycle;
 pub(crate) mod eval;
+/// CPython compile-time private-name mangling (`__x` → `_Class__x`).
+pub(crate) mod mangle;
 pub(crate) mod parser;
 /// CPython-compatible hashing (and the residual ValueKey-frozenset ordering used
 /// by the dict-key repr). Internal — sets now carry their own order.

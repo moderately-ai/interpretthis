@@ -32,6 +32,7 @@ autobenches = false
 
 [dependencies]
 rustpython-parser = { workspace = true }
+rustpython-ast = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
