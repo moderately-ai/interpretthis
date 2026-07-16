@@ -663,6 +663,24 @@ fn complex_methods(
 ) -> Result<MethodOutcome, EvalError> {
     let Value::Complex(c) = obj else { return Err(type_mismatch("complex")) };
     reject_kwargs(method, kwargs)?;
+    // Binary dunders delegate to the same arithmetic `+ - * / **` use, so
+    // `(1+2j).__add__(3)` matches `(1+2j) + 3`.
+    let binop = match method {
+        "__add__" => Some(crate::types::BinOp::Add),
+        "__sub__" => Some(crate::types::BinOp::Sub),
+        "__mul__" => Some(crate::types::BinOp::Mul),
+        "__truediv__" => Some(crate::types::BinOp::Div),
+        "__pow__" => Some(crate::types::BinOp::Pow),
+        _ => None,
+    };
+    if let Some(op) = binop {
+        let rhs = args.first().ok_or_else(|| {
+            EvalError::from(InterpreterError::TypeError(format!(
+                "{method}() takes exactly one argument (0 given)"
+            )))
+        })?;
+        return crate::eval::operations::apply_binop_builtin(op, obj, rhs).map(MethodOutcome::pure);
+    }
     if !args.is_empty() {
         return Err(InterpreterError::TypeError(format!("{method}() takes no arguments")).into());
     }
@@ -670,6 +688,12 @@ fn complex_methods(
         "conjugate" => Ok(MethodOutcome::pure(Value::Complex(Box::new(c.conj())))),
         "real" => Ok(MethodOutcome::pure(Value::Float(c.re))),
         "imag" => Ok(MethodOutcome::pure(Value::Float(c.im))),
+        // `abs(z)` is the magnitude (a float); the unary dunders mirror the
+        // operators so the explicit `z.__abs__()` / `z.__neg__()` forms work.
+        "__abs__" => Ok(MethodOutcome::pure(Value::Float(c.norm()))),
+        "__neg__" => Ok(MethodOutcome::pure(Value::Complex(Box::new(-**c)))),
+        "__pos__" | "__complex__" => Ok(MethodOutcome::pure(Value::Complex(c.clone()))),
+        "__bool__" => Ok(MethodOutcome::pure(Value::Bool(c.re != 0.0 || c.im != 0.0))),
         _ => Err(InterpreterError::AttributeError(format!(
             "'complex' object has no attribute '{method}'"
         ))
