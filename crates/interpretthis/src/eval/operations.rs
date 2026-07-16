@@ -879,9 +879,16 @@ fn pow_values(left: &Value, right: &Value, max_int_bits: u64) -> Result<Value, E
         // OverflowError when a finite base/exponent overflows the result.
         let result = l.powf(r);
         if result.is_infinite() && l.is_finite() && r.is_finite() {
+            // CPython's message is `(errno, os_strerror(errno))` for ERANGE (34),
+            // and that string is platform-specific ("Result too large" on
+            // macOS/BSD, "Numerical result out of range" on glibc). Derive it
+            // from the OS the same way so the parity corpus matches on every
+            // platform. `io::Error` Display appends " (os error 34)"; strip it.
+            let os = std::io::Error::from_raw_os_error(34).to_string();
+            let strerror = os.split(" (os error").next().unwrap_or(&os);
             return Err(EvalError::Exception(crate::value::ExceptionValue::new(
                 "OverflowError",
-                "(34, 'Result too large')",
+                format!("(34, '{strerror}')"),
             )));
         }
         Ok(Value::Float(result))
