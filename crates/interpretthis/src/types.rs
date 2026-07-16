@@ -247,6 +247,14 @@ pub fn dispatch_getattr_opt(value: &Value, name: &str) -> Result<Option<Value>, 
     if is_dunder_name(name) && builtin_dunder_present(value, name) {
         return Ok(Some(bound_method(value, name)));
     }
+    // Generator-iterator protocol methods (`send`/`throw`/`close`) on a lazy
+    // iterator — a generator / genexp exposes them, so `hasattr(g, "send")` and
+    // `g.close` match CPython. `__next__`/`__iter__` come through the dunder path.
+    if matches!(value, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. })
+        && matches!(name, "send" | "throw" | "close")
+    {
+        return Ok(Some(bound_method(value, name)));
+    }
     type_of(value).get_attr_slot.map_or_else(|| Ok(None), |slot| slot(value, name).map(Some))
 }
 
