@@ -1917,6 +1917,19 @@ pub fn class_attribute(state: &InterpreterState, class_name: &str, attr: &str) -
     if let Some(value) = lookup_class_attr(state, class_name, attr) {
         return Ok(value);
     }
+    // A property accessed through the class (`C.prop`, not `instance.prop`) is
+    // the descriptor object itself, not the computed value. Walk the MRO so an
+    // inherited property is found on the most-derived owner.
+    if let Some(class) = state.classes.get(class_name) {
+        for ancestor in &class.mro {
+            if state.classes.get(ancestor).is_some_and(|c| c.properties.contains_key(attr)) {
+                return Ok(Value::Property {
+                    class_name: ancestor.clone(),
+                    name: attr.to_string(),
+                });
+            }
+        }
+    }
     // A regular method accessed through the class (`C.method`, not `instance.method`)
     // is the plain function in CPython — callable as `C.method(instance, ...)` with
     // the receiver passed explicitly. Return the underlying FunctionDef.

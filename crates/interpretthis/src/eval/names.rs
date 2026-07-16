@@ -102,6 +102,9 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "bytearray",
         "__import__",
         "dir",
+        // The `property` type — bindable as a name so `isinstance(x, property)`
+        // and `type(C.prop) is property`-style checks resolve.
+        "property",
     ];
     if builtin_functions.contains(&name) {
         return Ok(Value::BuiltinName(name.to_string()));
@@ -506,6 +509,27 @@ fn legacy_attribute(state: &InterpreterState, obj: &Value, attr_name: &str) -> E
         Value::Instance(inst) => crate::eval::classes::instance_attribute(state, inst, attr_name),
         Value::Class(class_name) => {
             crate::eval::classes::class_attribute(state, class_name, attr_name)
+        }
+        // A `property` descriptor object exposes its accessor functions and doc.
+        Value::Property { class_name, name } => {
+            let prop = state.classes.get(class_name).and_then(|c| c.properties.get(name));
+            let Some(prop) = prop else {
+                return Err(attribute_error("property", attr_name));
+            };
+            let as_func =
+                |fd: &crate::value::FunctionDef| Value::Function(std::sync::Arc::new(fd.clone()));
+            match attr_name {
+                "fget" => Ok(as_func(&prop.getter)),
+                "fset" => Ok(prop.setter.as_ref().map_or(Value::None, as_func)),
+                "fdel" => Ok(prop.deleter.as_ref().map_or(Value::None, as_func)),
+                "__doc__" => Ok(prop
+                    .getter
+                    .docstring
+                    .clone()
+                    .map_or(Value::None, |d| Value::String(d.into()))),
+                "__isabstractmethod__" => Ok(Value::Bool(false)),
+                _ => Err(attribute_error("property", attr_name)),
+            }
         }
         Value::Type(type_name) | Value::ExceptionType(type_name) => {
             if attr_name == "__name__" || attr_name == "__qualname__" {

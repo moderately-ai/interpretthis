@@ -920,6 +920,9 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
             16 + estimate_value_size(&sd.default)
                 + sd.registry.lock().values().map(estimate_value_size).sum::<usize>()
         }
+        // Two short names referencing a class's PropertyDef; the def itself
+        // lives in the class registry, not here.
+        Value::Property { class_name, name } => 16 + class_name.len() + name.len(),
     }
 }
 

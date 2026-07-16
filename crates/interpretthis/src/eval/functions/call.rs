@@ -721,6 +721,21 @@ async fn eval_call_inner(
                     &resolved_args,
                 );
             }
+            // A `property` descriptor object has no builtin method table; its
+            // callables (`fget`/`fset`/`fdel`) resolve via attribute access, so
+            // `C.prop.fget(inst)` is getattr-then-call.
+            if let Value::Property { .. } = &temp {
+                let accessor = crate::eval::names::getattr_on_value(
+                    state,
+                    temp.clone(),
+                    method_name,
+                    tools,
+                    None,
+                )
+                .await?;
+                return call_value_as_function(state, &accessor, &resolved_args, &kwargs, tools)
+                    .await;
+            }
             return Ok(dispatch_method(&mut temp, method_name, &resolved_args, &kwargs)?.value);
         }
     }

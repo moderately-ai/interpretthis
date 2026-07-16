@@ -709,6 +709,12 @@ pub enum Value {
     /// MRO starting after `defining_class` and dispatch the matching classmethod
     /// with `cls` (`class_name`) as the receiver.
     SuperClass { defining_class: String, class_name: String },
+    /// A `property` descriptor object as accessed through the class (`C.prop`,
+    /// not an instance). Carries `(class_name, name)` so it resolves back to the
+    /// class's `PropertyDef` for `fget`/`fset`/`fdel`/`__doc__`; reports
+    /// `type(...).__name__ == "property"`. Instance access still routes through
+    /// the normal descriptor path — this is only the descriptor object itself.
+    Property { class_name: String, name: String },
     /// `collections.Counter`. Models CPython's
     /// `Counter(dict)` subclass: same key-value storage as `Dict` but
     /// with `__missing__` returning `0` (no insert), a distinct repr
@@ -2089,6 +2095,7 @@ impl Value {
             | Self::Slice(_)
             | Self::Super { .. }
             | Self::SuperClass { .. }
+            | Self::Property { .. }
             | Self::DateTime { .. }
             | Self::Time(_)
             | Self::TimeZone(_)
@@ -2188,6 +2195,7 @@ impl Value {
             Self::RePattern(_) => "re.Pattern",
             Self::Slice(_) => "slice",
             Self::Super { .. } | Self::SuperClass { .. } => "super",
+            Self::Property { .. } => "property",
             Self::Counter(_) => "Counter",
             Self::DateTime { .. } => "datetime",
             Self::Time(_) => "time",
@@ -2813,6 +2821,8 @@ impl fmt::Display for Value {
             // CPython shows `<_io.StringIO object at 0x…>`; the address is
             // unreproducible, so emit the address-free form.
             Self::StringIO(_) => write!(f, "<_io.StringIO object>"),
+            // CPython: `<property object at 0x…>` — address-free form here.
+            Self::Property { .. } => write!(f, "<property object>"),
         }
     }
 }
