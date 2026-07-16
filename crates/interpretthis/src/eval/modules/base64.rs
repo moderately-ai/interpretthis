@@ -22,6 +22,8 @@ pub fn has_function(name: &str) -> bool {
         name,
         "b64encode"
             | "b64decode"
+            | "standard_b64encode"
+            | "standard_b64decode"
             | "urlsafe_b64encode"
             | "urlsafe_b64decode"
             | "b16encode"
@@ -34,11 +36,15 @@ pub fn has_function(name: &str) -> bool {
 pub fn call(func: &str, args: &[Value]) -> EvalResult {
     let input = arg_bytes(func, args)?;
     let result = match func {
-        "b64encode" => base64::engine::general_purpose::STANDARD.encode(&input).into_bytes(),
+        // `standard_b64encode`/`decode` are exact aliases for `b64encode`/`decode`
+        // (the plain-alphabet form, no altchars).
+        "b64encode" | "standard_b64encode" => {
+            base64::engine::general_purpose::STANDARD.encode(&input).into_bytes()
+        }
         "urlsafe_b64encode" => {
             base64::engine::general_purpose::URL_SAFE.encode(&input).into_bytes()
         }
-        "b64decode" => base64::engine::general_purpose::STANDARD
+        "b64decode" | "standard_b64decode" => base64::engine::general_purpose::STANDARD
             .decode(&input)
             .map_err(|e| value_error(format!("Invalid base64-encoded string: {e}")))?,
         "urlsafe_b64decode" => base64::engine::general_purpose::URL_SAFE
