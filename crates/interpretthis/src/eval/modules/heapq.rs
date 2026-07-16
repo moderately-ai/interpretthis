@@ -229,15 +229,19 @@ async fn n_extreme(
         };
         decorated.push((key, item));
     }
-    // Stable sort by key; reverse for `nlargest`.
+    // Sort by key — ascending for `nsmallest`, descending for `nlargest`.
+    // The sort is stable and ties compare Equal, so equal-key elements keep
+    // their original order in BOTH directions (CPython breaks key ties by
+    // first-seen; a sort-then-reverse would invert nlargest's ties).
     let mut err: Option<EvalError> = None;
     decorated.sort_by(|a, b| {
         if err.is_some() {
             return std::cmp::Ordering::Equal;
         }
-        match compare_lt(&a.0, &b.0) {
+        let (lo, hi) = if largest { (&b.0, &a.0) } else { (&a.0, &b.0) };
+        match compare_lt(lo, hi) {
             Ok(true) => std::cmp::Ordering::Less,
-            Ok(false) => match compare_lt(&b.0, &a.0) {
+            Ok(false) => match compare_lt(hi, lo) {
                 Ok(true) => std::cmp::Ordering::Greater,
                 Ok(false) => std::cmp::Ordering::Equal,
                 Err(e) => {
@@ -253,9 +257,6 @@ async fn n_extreme(
     });
     if let Some(e) = err {
         return Err(e);
-    }
-    if largest {
-        decorated.reverse();
     }
     let take = usize::try_from(n).unwrap_or(usize::MAX).min(decorated.len());
     Ok(Value::List(shared_list(decorated.into_iter().take(take).map(|(_, v)| v).collect())))
