@@ -588,6 +588,10 @@ const ERF_SERIES_CUTOFF: f64 = 1.5;
 const ERF_SERIES_NTERMS: usize = 25;
 const ERFC_CONTFRAC_CUTOFF: f64 = 30.0;
 const ERFC_CONTFRAC_TERMS: usize = 50;
+// The full-precision √π literal from CPython's `mathmodule.c`, kept verbatim so
+// `erf`/`erfc` match bit-for-bit; the compiler rounds it to the same `f64` a
+// shorter literal would. `allow` (not `expect`): only some clippy versions fire.
+#[allow(clippy::excessive_precision)]
 const SQRTPI: f64 = 1.772_453_850_905_516_027_298_167_483_341_145_182_8;
 
 fn erf_series(x: f64) -> f64 {

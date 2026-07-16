@@ -124,7 +124,9 @@ def test_dangerous_builtins_do_not_exist(source: str) -> None:
     assert isinstance(result.error, SandboxNameError)
 
 
-@pytest.mark.parametrize("source", ["x = ().__class__.__mro__", "x = [].__class__.__bases__"])
+@pytest.mark.parametrize(
+    "source", ["x = ().__class__.__mro__", "x = [].__class__.__bases__"]
+)
 def test_introspection_escape_attempts_are_a_security_error(source: str) -> None:
     # Reading `__class__` is allowed — it just returns the type, the same object
     # `type(x)` gives, which reaches nothing new inside the sandbox. The escape
@@ -555,5 +557,7 @@ def test_bytearray_round_trips_mutable() -> None:
 
 def test_bytearray_built_and_mutated_in_sandbox() -> None:
     interp = Interpreter()
-    interp.execute("b = bytearray(b'abc')\nb[0] = 88\nb.append(100)\nout = bytes(b)").check()
+    interp.execute(
+        "b = bytearray(b'abc')\nb[0] = 88\nb.append(100)\nout = bytes(b)"
+    ).check()
     assert interp.get_variable("out") == b"Xbcd"
