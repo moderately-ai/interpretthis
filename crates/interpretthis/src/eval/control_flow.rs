@@ -272,6 +272,123 @@ pub async fn eval_with(
     body_result.map_or_else(|_| Ok(Value::None), Ok)
 }
 
+/// Call `receiver.method(args)` and, if it returns a coroutine (an `async def`
+/// protocol method like `__aenter__`/`__anext__`), drive it to its result.
+async fn call_and_drive(
+    state: &mut InterpreterState,
+    receiver: &Value,
+    method: &str,
+    args: &[Value],
+    tools: &Tools,
+) -> EvalResult {
+    let result = call_context_method(state, receiver, method, args, tools).await?;
+    match result {
+        Value::Coroutine(coro) => {
+            crate::eval::functions::drive_coroutine(state, &coro, tools).await
+        }
+        other => Ok(other),
+    }
+}
+
+/// `async for target in aiter: body`. Drives the async-iterator protocol
+/// (`__aiter__` then `__anext__`, awaiting each) sequentially, ending on
+/// `StopAsyncIteration`. Reuses the sync for-body machinery — `StmtAsyncFor`
+/// carries the same fields as `StmtFor`.
+pub async fn eval_async_for(
+    state: &mut InterpreterState,
+    node: &ast::StmtAsyncFor,
+    tools: &Tools,
+) -> EvalResult {
+    let sync_node = ast::StmtFor {
+        target: node.target.clone(),
+        iter: node.iter.clone(),
+        body: node.body.clone(),
+        orelse: node.orelse.clone(),
+        type_comment: node.type_comment.clone(),
+        range: node.range,
+    };
+    let iterable = eval_expr(state, &node.iter, tools).await?;
+    let iterable = resolve_proxy(&iterable).await?;
+    // `__aiter__` returns the async iterator (often `self`); fall back to the
+    // object itself if it is already an async iterator without `__aiter__`.
+    let aiter = match call_and_drive(state, &iterable, "__aiter__", &[], tools).await {
+        Ok(v) => v,
+        Err(_) => iterable.clone(),
+    };
+
+    let mut result = Value::None;
+    let mut broke = false;
+    loop {
+        let item = match call_and_drive(state, &aiter, "__anext__", &[], tools).await {
+            Ok(v) => v,
+            Err(EvalError::Exception(e)) if e.type_name == "StopAsyncIteration" => break,
+            Err(e) => return Err(e),
+        };
+        let body = ForBodyArgs { state, item, node: &sync_node, tools };
+        let cont = run_for_body(body, &mut result, &mut broke).await?;
+        if broke {
+            break;
+        }
+        let _ = cont;
+    }
+    if !broke {
+        for stmt in &sync_node.orelse {
+            result = eval_stmt(state, stmt, tools).await?;
+        }
+    }
+    Ok(result)
+}
+
+/// `async with cm() as x: body`. Enters/exits via the async context-manager
+/// protocol (`__aenter__`/`__aexit__`, awaited), otherwise mirroring `eval_with`.
+pub async fn eval_async_with(
+    state: &mut InterpreterState,
+    node: &ast::StmtAsyncWith,
+    tools: &Tools,
+) -> EvalResult {
+    let mut managers: Vec<Value> = Vec::with_capacity(node.items.len());
+    for item in &node.items {
+        let cm = eval_expr(state, &item.context_expr, tools).await?;
+        let cm = resolve_proxy(&cm).await?;
+        let entered = call_and_drive(state, &cm, "__aenter__", &[], tools).await?;
+        if let Some(var_expr) = &item.optional_vars {
+            assign_target(state, var_expr, entered, tools).await?;
+        }
+        managers.push(cm);
+    }
+
+    let body_result = eval_body(state, &node.body, tools).await;
+
+    // Exit in reverse order, awaiting each `__aexit__` and applying its
+    // suppression against the body's error.
+    let mut current_error = match &body_result {
+        Err(EvalError::Signal(_)) | Ok(_) => None,
+        Err(e) => Some(e.clone()),
+    };
+    let signal_to_propagate = match &body_result {
+        Err(e @ EvalError::Signal(_)) => Some(e.clone()),
+        _ => None,
+    };
+    for cm in managers.into_iter().rev() {
+        let (is_suppressible, exit_args) = build_exit_args(current_error.as_ref());
+        match call_and_drive(state, &cm, "__aexit__", &exit_args, tools).await {
+            Ok(v) => {
+                if v.is_truthy() && is_suppressible {
+                    current_error = None;
+                }
+            }
+            Err(e) => current_error = Some(e),
+        }
+    }
+    if let Some(sig) = signal_to_propagate {
+        return Err(sig);
+    }
+    if let Some(err) = current_error {
+        return Err(err);
+    }
+    body_result.map_or_else(|_| Ok(Value::None), Ok)
+}
+
 /// Exit a stack of already-entered context managers in REVERSE order,
 /// applying `__exit__`'s suppression rules against `body_err` (the error
 /// or signal that escaped the `with` body, if any). Returns `Ok(())` when

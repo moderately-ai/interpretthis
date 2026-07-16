@@ -253,6 +253,12 @@ pub fn eval_stmt<'a>(
         Stmt::With(node) => {
             guarded_block!(state, stmt_line, control_flow::eval_with(state, node, tools))
         }
+        Stmt::AsyncFor(node) => {
+            guarded_block!(state, stmt_line, control_flow::eval_async_for(state, node, tools))
+        }
+        Stmt::AsyncWith(node) => {
+            guarded_block!(state, stmt_line, control_flow::eval_async_with(state, node, tools))
+        }
         Stmt::Import(node) => {
             let r = modules::eval_import(state, node).map_err(|e| stamp_line(e, stmt_line));
             Box::pin(async move { r })

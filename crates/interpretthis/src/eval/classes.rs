@@ -241,7 +241,28 @@ pub async fn eval_class_def(
                 state.variables.insert(name.clone(), value.clone());
             }
             match stmt {
-                Stmt::FunctionDef(method) => {
+                // `async def` methods share the `def` handling (same fields);
+                // the resulting `FunctionDef` is flagged async afterwards so a
+                // call yields a coroutine (needed for `__anext__`/`__aenter__`).
+                Stmt::FunctionDef(_) | Stmt::AsyncFunctionDef(_) => {
+                    let async_converted;
+                    let (method, method_is_async): (&ast::StmtFunctionDef, bool) = match stmt {
+                        Stmt::FunctionDef(m) => (m, false),
+                        Stmt::AsyncFunctionDef(m) => {
+                            async_converted = ast::StmtFunctionDef {
+                                name: m.name.clone(),
+                                args: m.args.clone(),
+                                body: m.body.clone(),
+                                decorator_list: m.decorator_list.clone(),
+                                returns: m.returns.clone(),
+                                type_comment: m.type_comment.clone(),
+                                type_params: m.type_params.clone(),
+                                range: m.range,
+                            };
+                            (&async_converted, true)
+                        }
+                        _ => unreachable!(),
+                    };
                     let mut params = build_function_params(&method.args)?;
                     // Evaluate the method's default args at def time in
                     // the class body scope — same CPython semantics as
@@ -270,6 +291,7 @@ pub async fn eval_class_def(
                     // `@property def x` / `@x.setter def x` / `@x.deleter
                     // def x` don't collide. Regular methods use the plain
                     // `Class.name` key.
+                    let patch_name = method_name.clone();
                     classify_decorated_method(
                         state,
                         &decorators,
@@ -283,6 +305,15 @@ pub async fn eval_class_def(
                         &mut static_methods,
                         &mut class_methods,
                     )?;
+                    if method_is_async {
+                        if let Some(fd) = methods
+                            .get_mut(&patch_name)
+                            .or_else(|| static_methods.get_mut(&patch_name))
+                            .or_else(|| class_methods.get_mut(&patch_name))
+                        {
+                            fd.is_async = true;
+                        }
+                    }
                 }
                 Stmt::Assign(assign) => {
                     // Every target receives the value: chained (`a = b = 1`) and
