@@ -971,6 +971,11 @@ pub fn estimate_value_size(value: &crate::value::Value) -> usize {
         // Two short names referencing a class's PropertyDef; the def itself
         // lives in the class registry, not here.
         Value::Property { class_name, name } => 16 + class_name.len() + name.len(),
+        // The captured call arguments dominate a coroutine's size.
+        Value::Coroutine(c) => {
+            32 + c.args.iter().map(estimate_value_size).sum::<usize>()
+                + c.kwargs.values().map(estimate_value_size).sum::<usize>()
+        }
     }
 }
 

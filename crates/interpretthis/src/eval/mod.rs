@@ -214,6 +214,24 @@ pub fn eval_stmt<'a>(
                 .await
                 .map_err(|e| stamp_line(e, stmt_line))
         }),
+        // `async def` shares the `def` machinery — `StmtAsyncFunctionDef` has the
+        // same fields — with the resulting function marked async so calling it
+        // yields a coroutine.
+        Stmt::AsyncFunctionDef(node) => Box::pin(async move {
+            let fdef = rustpython_parser::ast::StmtFunctionDef {
+                name: node.name.clone(),
+                args: node.args.clone(),
+                body: node.body.clone(),
+                decorator_list: node.decorator_list.clone(),
+                returns: node.returns.clone(),
+                type_comment: node.type_comment.clone(),
+                type_params: node.type_params.clone(),
+                range: node.range,
+            };
+            functions::eval_function_def_with(state, &fdef, true, tools)
+                .await
+                .map_err(|e| stamp_line(e, stmt_line))
+        }),
         Stmt::Try(node) => {
             guarded_block!(state, stmt_line, exceptions::eval_try(state, node, tools))
         }
@@ -630,12 +648,18 @@ pub fn eval_expr<'a>(
             )
             .into())
         }),
-        Expr::Await(_) => Box::pin(async move {
-            Err(InterpreterError::Runtime(
-                "'await' is not supported (see CONFORMANCE.md#unsupported-language-features)"
-                    .into(),
-            )
-            .into())
+        // `await expr`: drive a coroutine to its result. Any already-resolved
+        // awaitable (an `asyncio.sleep`/`gather` result, which this sandbox
+        // computes eagerly) passes through unchanged. Awaiting a non-awaitable
+        // matches CPython's TypeError.
+        Expr::Await(node) => Box::pin(async move {
+            let awaited = eval_expr(state, &node.value, tools).await?;
+            match awaited {
+                Value::Coroutine(coro) => functions::drive_coroutine(state, &coro, tools).await,
+                // asyncio.sleep / gather results are computed eagerly here, so
+                // they arrive as ordinary values — pass them through.
+                other => Ok(other),
+            }
         }),
     }
 }

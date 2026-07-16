@@ -31,22 +31,21 @@ async fn assert_has_anchor(code: &str) {
     );
 }
 
-#[tokio::test]
-async fn async_def_error_has_conformance_anchor() {
-    assert_has_anchor("async def f():\n    pass\n").await;
-}
-
+// `async def` / `await` / `asyncio` are now supported (basic sequential
+// coroutines); only `async for` / `async with` remain unsupported and must
+// carry a CONFORMANCE anchor when their body actually runs.
 #[tokio::test]
 async fn async_for_error_has_conformance_anchor() {
-    assert_has_anchor("async def f():\n    async for x in it:\n        pass\n").await;
+    assert_has_anchor(
+        "import asyncio\nasync def f():\n    async for x in [1]:\n        pass\nasyncio.run(f())\n",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn async_with_error_has_conformance_anchor() {
-    assert_has_anchor("async def f():\n    async with cm() as x:\n        pass\n").await;
-}
-
-#[tokio::test]
-async fn await_error_has_conformance_anchor() {
-    assert_has_anchor("x = await something()\n").await;
+    assert_has_anchor(
+        "import asyncio\nasync def f():\n    async with cm() as x:\n        pass\nasyncio.run(f())\n",
+    )
+    .await;
 }

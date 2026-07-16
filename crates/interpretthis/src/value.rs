@@ -645,6 +645,11 @@ pub enum Value {
     /// `def`s would copy each prior function's closure into the next one,
     /// growing storage as O(2^N) in the number of definitions (see F2.5).
     Function(Arc<FunctionDef>),
+    /// A suspended `async def` call — a coroutine that runs its body only when
+    /// driven (`await coro` / `asyncio.run(coro)`). Captures the async function
+    /// and the bound call arguments. `awaited` guards double-driving (CPython
+    /// raises `RuntimeError: cannot reuse already awaited coroutine`).
+    Coroutine(Box<CoroutineValue>),
     /// Lambda expression — captures free names at definition time (see
     /// [`LambdaDef::closure`]). `Arc`-wrapped for cheap clone when lambdas are
     /// passed as arguments or assigned to variables.
@@ -1990,6 +1995,21 @@ pub struct FunctionDef {
     /// raising (CPython evaluates strictly; the sandbox is lenient here).
     #[serde(default)]
     pub annotations: Vec<(String, Value)>,
+    /// `async def` — calling it returns a [`Value::Coroutine`] that runs the
+    /// body only when driven (`await` / `asyncio.run`), rather than executing
+    /// immediately.
+    #[serde(default)]
+    pub is_async: bool,
+}
+
+/// A suspended `async def` call (see [`Value::Coroutine`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoroutineValue {
+    pub func: Arc<FunctionDef>,
+    pub args: Vec<Value>,
+    pub kwargs: indexmap::IndexMap<String, Value>,
+    /// A coroutine can be driven only once.
+    pub awaited: bool,
 }
 
 impl FunctionDef {
@@ -2244,6 +2264,8 @@ impl Value {
                     start > stop
                 }
             }
+            // A coroutine object is always truthy.
+            Self::Coroutine(_) => true,
         }
     }
 
@@ -2278,6 +2300,7 @@ impl Value {
             // Both Function (named def) and Lambda (anonymous) are "function"
             // in Python's type system.
             Self::Function(_) | Self::Lambda(_) => "function",
+            Self::Coroutine(_) => "coroutine",
             Self::Range { .. } => "range",
             Self::Exception(_) => "Exception",
             Self::ExceptionMethod { .. } => "method",
@@ -2942,6 +2965,9 @@ impl fmt::Display for Value {
             Self::StringIO(_) => write!(f, "<_io.StringIO object>"),
             // CPython: `<property object at 0x…>` — address-free form here.
             Self::Property { .. } => write!(f, "<property object>"),
+            // CPython: `<coroutine object main at 0x...>`; the address is not
+            // reproducible in the sandbox, so a stable placeholder is used.
+            Self::Coroutine(c) => write!(f, "<coroutine object {}>", c.func.name),
         }
     }
 }

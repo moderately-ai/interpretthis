@@ -15,6 +15,7 @@
 
 pub mod abc_mod;
 pub mod array_mod;
+pub mod asyncio_mod;
 pub mod base64;
 pub mod bisect;
 pub mod calendar;
@@ -109,7 +110,8 @@ pub trait Module: Sync + Send {
 /// plus one `pub struct XModule;` + `impl Module for XModule` in its
 /// own file. Lookup is O(1) hashed by module name.
 static MODULES: LazyLock<HashMap<&'static str, &'static dyn Module>> = LazyLock::new(|| {
-    let modules: [&'static dyn Module; 30] = [
+    let modules: [&'static dyn Module; 31] = [
+        &asyncio_mod::AsyncioModule,
         &math::MathModule,
         &cmath::CmathModule,
         &bisect::BisectModule,

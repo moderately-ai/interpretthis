@@ -27,9 +27,13 @@ pub(crate) use definitions::{
     extract_docstring, extract_function_source,
 };
 // Re-exports from definitions
-pub use definitions::{build_function_params, eval_function_def, eval_lambda_def};
+pub use definitions::{
+    build_function_params, eval_function_def, eval_function_def_with, eval_lambda_def,
+};
 // Re-exports from dispatch
-pub(crate) use dispatch::{call_lambda, call_user_function, call_value_as_function};
+pub(crate) use dispatch::{
+    call_lambda, call_user_function, call_value_as_function, drive_coroutine,
+};
 // Re-exports from method_dispatch
 pub(crate) use generators::{
     create_generator, create_synthetic_generator, dispatch_generator_method, finalize_generators,

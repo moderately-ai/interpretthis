@@ -231,6 +231,7 @@ pub(crate) fn create_synthetic_generator(
         cell_refreshes: Vec::new(),
         qualname: String::new(),
         annotations: Vec::new(),
+        is_async: false,
     };
     Some(create_generator(state, &func_def, body, locals, touched))
 }

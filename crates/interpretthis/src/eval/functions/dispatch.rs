@@ -61,7 +61,29 @@ pub(crate) async fn call_user_function(
     kwargs: &IndexMap<String, Value>,
     tools: &Tools,
 ) -> EvalResult {
+    // Calling an `async def` does not run the body — it captures the call into a
+    // coroutine that is driven later by `await` / `asyncio.run` (which call the
+    // inner path directly, bypassing this check).
+    if func_def.is_async {
+        return Ok(Value::Coroutine(Box::new(crate::value::CoroutineValue {
+            func: std::sync::Arc::new(func_def.clone()),
+            args: args.to_vec(),
+            kwargs: kwargs.clone(),
+            awaited: false,
+        })));
+    }
     grow_stack(call_user_function_inner(state, func_def, args, kwargs, tools)).await
+}
+
+/// Run a coroutine's body to completion (the sequential-await drive), returning
+/// its `return` value. Bypasses the `is_async` short-circuit in
+/// [`call_user_function`] by calling the inner executor directly.
+pub(crate) async fn drive_coroutine(
+    state: &mut InterpreterState,
+    coro: &crate::value::CoroutineValue,
+    tools: &Tools,
+) -> EvalResult {
+    grow_stack(call_user_function_inner(state, &coro.func, &coro.args, &coro.kwargs, tools)).await
 }
 
 async fn call_user_function_inner(

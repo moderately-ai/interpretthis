@@ -94,6 +94,18 @@ pub async fn eval_function_def(
     node: &ast::StmtFunctionDef,
     tools: &Tools,
 ) -> EvalResult {
+    eval_function_def_with(state, node, false, tools).await
+}
+
+/// Shared `def` / `async def` evaluation. `is_async` marks the resulting
+/// [`FunctionDef`] so that calling it returns a [`Value::Coroutine`] rather than
+/// executing the body.
+pub async fn eval_function_def_with(
+    state: &mut InterpreterState,
+    node: &ast::StmtFunctionDef,
+    is_async: bool,
+    tools: &Tools,
+) -> EvalResult {
     let name = node.name.as_str();
 
     // Block dangerous builtin names
@@ -261,6 +273,7 @@ pub async fn eval_function_def(
         cell_refreshes,
         qualname,
         annotations,
+        is_async,
     }));
 
     // Apply decorators in REVERSE order so the textually nearest one
