@@ -435,34 +435,49 @@ pub(super) async fn try_builtin(
                     "complex() arg is a malformed string",
                 ))
             };
-            let result = match args {
-                [] => Complex64::new(0.0, 0.0),
+            // `real`/`imag` may be passed positionally OR by keyword
+            // (`complex(real=3, imag=4)`, `complex(imag=5)`).
+            for k in kwargs.keys() {
+                if k != "real" && k != "imag" {
+                    return Err(InterpreterError::TypeError(format!(
+                        "'{k}' is an invalid keyword argument for complex()"
+                    ))
+                    .into());
+                }
+            }
+            let real_arg = args.first().or_else(|| kwargs.get("real"));
+            let imag_arg = args.get(1).or_else(|| kwargs.get("imag"));
+            let result = match (real_arg, imag_arg) {
+                (None, None) => Complex64::new(0.0, 0.0),
                 // A single string argument is parsed as a complex literal.
-                [Value::String(s)] => parse_complex_str(s).ok_or_else(malformed)?,
-                [re] => crate::types::value_to_complex(re).ok_or_else(|| {
-                    EvalError::from(InterpreterError::TypeError(format!(
-                        "complex() first argument must be a string or a number, not '{}'",
-                        re.type_name()
-                    )))
-                })?,
-                [Value::String(_), _] => {
+                (Some(Value::String(s)), None) => parse_complex_str(s).ok_or_else(malformed)?,
+                (Some(Value::String(_)), Some(_)) => {
                     return Err(InterpreterError::TypeError(
                         "complex() can't take second arg if first is a string".into(),
                     )
                     .into());
                 }
-                [re, im] => {
+                (Some(re), None) => crate::types::value_to_complex(re).ok_or_else(|| {
+                    EvalError::from(InterpreterError::TypeError(format!(
+                        "complex() first argument must be a string or a number, not '{}'",
+                        re.type_name()
+                    )))
+                })?,
+                (real_arg, Some(im)) => {
                     if matches!(im, Value::String(_)) {
                         return Err(InterpreterError::TypeError(
                             "complex() second arg can't be a string".into(),
                         )
                         .into());
                     }
-                    let a = crate::types::value_to_complex(re).ok_or_else(|| {
-                        EvalError::from(InterpreterError::TypeError(
-                            "complex() first argument must be a string or a number".into(),
-                        ))
-                    })?;
+                    let a = match real_arg {
+                        None => Complex64::new(0.0, 0.0),
+                        Some(re) => crate::types::value_to_complex(re).ok_or_else(|| {
+                            EvalError::from(InterpreterError::TypeError(
+                                "complex() first argument must be a string or a number".into(),
+                            ))
+                        })?,
+                    };
                     let b = crate::types::value_to_complex(im).ok_or_else(|| {
                         EvalError::from(InterpreterError::TypeError(
                             "complex() second argument must be a number".into(),
@@ -471,7 +486,6 @@ pub(super) async fn try_builtin(
                     // complex(real, imag) == real + imag*1j (both may be complex).
                     a + b * Complex64::new(0.0, 1.0)
                 }
-                _ => unreachable!("check_arg_count bounds args to 0..=2"),
             };
             Ok(Some(Value::Complex(Box::new(result))))
         }
