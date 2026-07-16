@@ -13,29 +13,52 @@
 
 use md5::Md5;
 use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
 use crate::{
     error::{EvalError, EvalResult, InterpreterError},
     value::Value,
 };
 
+/// The digest constructors this module exposes (the SHA-2 family + md5/sha1).
+const ALGOS: &[&str] = &["md5", "sha1", "sha224", "sha256", "sha384", "sha512"];
+
 pub fn has_function(name: &str) -> bool {
-    matches!(name, "md5" | "sha1" | "sha256" | "sha512")
+    name == "new" || ALGOS.contains(&name)
 }
 
 pub fn call(func: &str, args: &[Value]) -> EvalResult {
-    // The optional argument seeds the hash buffer; no argument starts empty.
-    let input = match args.first() {
-        None => Vec::new(),
-        Some(_) => arg_bytes(func, args)?,
-    };
-    if !matches!(func, "md5" | "sha1" | "sha256" | "sha512") {
+    // `hashlib.new(name, data=b"")` constructs by algorithm name.
+    if func == "new" {
+        let Some(Value::String(algo)) = args.first() else {
+            return Err(
+                InterpreterError::TypeError("new() argument 'name' must be str".into()).into()
+            );
+        };
+        let algo = algo.to_string();
+        if !ALGOS.contains(&algo.as_str()) {
+            return Err(EvalError::Exception(crate::value::ExceptionValue::new(
+                "ValueError",
+                format!("unsupported hash type {algo}"),
+            )));
+        }
+        let input = match args.get(1) {
+            None => Vec::new(),
+            Some(_) => arg_bytes("new", &args[1..])?,
+        };
+        return Ok(Value::HashDigest { algo, bytes: input });
+    }
+    if !ALGOS.contains(&func) {
         return Err(InterpreterError::AttributeError(format!(
             "module 'hashlib' has no attribute '{func}'"
         ))
         .into());
     }
+    // The optional argument seeds the hash buffer; no argument starts empty.
+    let input = match args.first() {
+        None => Vec::new(),
+        Some(_) => arg_bytes(func, args)?,
+    };
     Ok(Value::HashDigest { algo: func.to_string(), bytes: input })
 }
 
@@ -44,7 +67,9 @@ fn compute_digest(algo: &str, input: &[u8]) -> Vec<u8> {
     match algo {
         "md5" => Md5::digest(input).to_vec(),
         "sha1" => Sha1::digest(input).to_vec(),
+        "sha224" => Sha224::digest(input).to_vec(),
         "sha256" => Sha256::digest(input).to_vec(),
+        "sha384" => Sha384::digest(input).to_vec(),
         // Any unknown algo cannot be constructed (call() gates it), so sha512
         // is the only remaining case.
         _ => Sha512::digest(input).to_vec(),
@@ -57,7 +82,9 @@ fn sizes(algo: &str) -> (i64, i64) {
     match algo {
         "md5" => (16, 64),
         "sha1" => (20, 64),
+        "sha224" => (28, 64),
         "sha256" => (32, 64),
+        "sha384" => (48, 128),
         _ => (64, 128),
     }
 }
