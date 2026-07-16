@@ -74,6 +74,8 @@ pub fn has_function(name: &str) -> bool {
             | "modf"
             | "gamma"
             | "lgamma"
+            | "erf"
+            | "erfc"
             | "sinh"
             | "cosh"
             | "tanh"
@@ -121,6 +123,8 @@ pub fn call(func: &str, args: &[Value], kwargs: &indexmap::IndexMap<String, Valu
         }
         "gamma" => Ok(Value::Float(gamma(arg_f64(func, args, 0)?))),
         "lgamma" => Ok(Value::Float(gamma(arg_f64(func, args, 0)?).abs().ln())),
+        "erf" => Ok(Value::Float(erf(arg_f64(func, args, 0)?))),
+        "erfc" => Ok(Value::Float(erfc(arg_f64(func, args, 0)?))),
         "sinh" => Ok(Value::Float(arg_f64(func, args, 0)?.sinh())),
         "cosh" => Ok(Value::Float(arg_f64(func, args, 0)?.cosh())),
         "tanh" => Ok(Value::Float(arg_f64(func, args, 0)?.tanh())),
@@ -574,6 +578,76 @@ impl crate::eval::modules::Module for MathModule {
         _tools: &crate::tools::Tools,
     ) -> EvalResult {
         call(func, args, kwargs)
+    }
+}
+
+// `math.erf` / `math.erfc`, ported operation-for-operation from CPython's
+// `mathmodule.c` (`m_erf`/`m_erfc`) so results match bit-for-bit: a power series
+// for |x| < 1.5 and a continued fraction for erfc otherwise.
+const ERF_SERIES_CUTOFF: f64 = 1.5;
+const ERF_SERIES_NTERMS: usize = 25;
+const ERFC_CONTFRAC_CUTOFF: f64 = 30.0;
+const ERFC_CONTFRAC_TERMS: usize = 50;
+const SQRTPI: f64 = 1.772_453_850_905_516_027_298_167_483_341_145_182_8;
+
+fn erf_series(x: f64) -> f64 {
+    let x2 = x * x;
+    let mut acc = 0.0;
+    let mut fk = ERF_SERIES_NTERMS as f64 + 0.5;
+    for _ in 0..ERF_SERIES_NTERMS {
+        acc = 2.0 + x2 * acc / fk;
+        fk -= 1.0;
+    }
+    acc * x * (-x2).exp() / SQRTPI
+}
+
+fn erfc_contfrac(x: f64) -> f64 {
+    if x >= ERFC_CONTFRAC_CUTOFF {
+        return 0.0;
+    }
+    let x2 = x * x;
+    let mut a = 0.0;
+    let mut da = 0.5;
+    let (mut p, mut p_last) = (1.0, 0.0);
+    let mut q = da + x2;
+    let mut q_last = 1.0;
+    for _ in 0..ERFC_CONTFRAC_TERMS {
+        a += da;
+        da += 2.0;
+        let b = da + x2;
+        let temp_p = p;
+        p = b * p - a * p_last;
+        p_last = temp_p;
+        let temp_q = q;
+        q = b * q - a * q_last;
+        q_last = temp_q;
+    }
+    p / q * x * (-x2).exp() / SQRTPI
+}
+
+fn erf(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let absx = x.abs();
+    if absx < ERF_SERIES_CUTOFF {
+        erf_series(x)
+    } else {
+        let cf = erfc_contfrac(absx);
+        if x > 0.0 { 1.0 - cf } else { cf - 1.0 }
+    }
+}
+
+fn erfc(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let absx = x.abs();
+    if absx < ERF_SERIES_CUTOFF {
+        1.0 - erf_series(x)
+    } else {
+        let cf = erfc_contfrac(absx);
+        if x > 0.0 { cf } else { 2.0 - cf }
     }
 }
 
