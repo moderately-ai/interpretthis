@@ -1,0 +1,10 @@
+# bool is an int subclass, so it carries every int method and attribute.
+print((True).bit_length(), (False).bit_length())
+print((True).bit_count(), (False).bit_count())
+print(True.numerator, True.denominator, True.real, True.imag)
+print((True).to_bytes(2, "big"), (False).to_bytes(1, "little"))
+print((True).as_integer_ratio(), (False).as_integer_ratio())
+print(True.conjugate(), False.conjugate())
+print((True).__index__(), (False).__index__())
+print(int.from_bytes(bytes([True]), "big"))
+print(hex(True), bin(False), oct(True))

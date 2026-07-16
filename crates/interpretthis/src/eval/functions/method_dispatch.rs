@@ -626,6 +626,9 @@ fn int_methods(
         Value::Int(i) => {
             methods::int::dispatch_int_method(*i, method, args, kwargs).map(MethodOutcome::pure)
         }
+        // `bool` dispatches through the int method table as its `int` value.
+        Value::Bool(b) => methods::int::dispatch_int_method(i64::from(*b), method, args, kwargs)
+            .map(MethodOutcome::pure),
         Value::BigInt(i) => match i64::try_from(i.as_ref()) {
             Ok(n) => {
                 methods::int::dispatch_int_method(n, method, args, kwargs).map(MethodOutcome::pure)
@@ -1092,7 +1095,9 @@ fn methods_handler_for(obj: &Value) -> Option<MethodsHandler> {
         Value::Tuple(_) => Some(tuple_methods),
         Value::Slice(_) => Some(slice_methods),
         Value::Range { .. } => Some(range_methods),
-        Value::Int(_) | Value::BigInt(_) => Some(int_methods),
+        // `bool` is an `int` subclass, so it carries every int method
+        // (`True.bit_length()`, `False.to_bytes(...)`, ...).
+        Value::Int(_) | Value::BigInt(_) | Value::Bool(_) => Some(int_methods),
         Value::Float(_) => Some(float_methods),
         Value::Complex(_) => Some(complex_methods),
         Value::Bytes(_) => Some(bytes_methods),
