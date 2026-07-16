@@ -304,7 +304,7 @@ pub fn type_attribute(module: &str, type_name: &str, attr: &str) -> Option<crate
     }
 }
 
-fn module_not_found(module: &str) -> EvalError {
+pub(crate) fn module_not_found(module: &str) -> EvalError {
     EvalError::Exception(ExceptionValue::new(
         "ModuleNotFoundError",
         format!("No module named '{module}'"),

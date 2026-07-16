@@ -100,6 +100,7 @@ pub fn eval_name(state: &InterpreterState, node: &ast::ExprName, tools: &Tools) 
         "hex",
         "bytes",
         "bytearray",
+        "__import__",
     ];
     if builtin_functions.contains(&name) {
         return Ok(Value::BuiltinName(name.to_string()));

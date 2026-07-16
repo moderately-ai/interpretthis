@@ -1719,6 +1719,47 @@ pub(super) async fn try_builtin(
             let h = crate::eval::op::hash(state, &args[0], tools).await?;
             Ok(Some(Value::Int(h)))
         }
+        "__import__" => {
+            // `__import__(name, globals=None, locals=None, fromlist=(), level=0)`.
+            // The dynamic form of the `import` statement — routes through the same
+            // module allow-list (`is_known_module`), so it inherits the sandbox's
+            // import posture with no new surface. Only the flat top-level form is
+            // supported (matching the `import` statement); dotted names and
+            // relative imports (`level > 0`) are rejected.
+            check_arg_count(name, args, 1, 5)?;
+            let Value::String(module) = &args[0] else {
+                return Err(InterpreterError::TypeError(format!(
+                    "__import__() argument 1 must be str, not {}",
+                    args[0].type_name()
+                ))
+                .into());
+            };
+            if let Some(level) = args.get(4) {
+                let nonzero = match level {
+                    Value::Int(n) => *n != 0,
+                    Value::Bool(b) => *b,
+                    _ => false,
+                };
+                if nonzero {
+                    return Err(InterpreterError::Security(
+                        "relative imports are not supported (see CONFORMANCE.md#import-allowlist)"
+                            .into(),
+                    )
+                    .into());
+                }
+            }
+            if module.contains('.') {
+                return Err(InterpreterError::Security(
+                    "dotted/submodule imports are not supported (see CONFORMANCE.md#import-allowlist)"
+                        .into(),
+                )
+                .into());
+            }
+            if !crate::eval::modules::is_known_module(module) {
+                return Err(crate::eval::modules::module_not_found(module));
+            }
+            Ok(Some(Value::Module(module.to_string())))
+        }
         "pow" => {
             // CPython: pow(base, exp[, mod]). The 3-arg form is integer
             // modular exponentiation, used heavily in cryptographic code and
