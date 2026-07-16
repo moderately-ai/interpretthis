@@ -1099,7 +1099,24 @@ fn decode_utf8_with_errors(b: &[u8], errors: &str) -> EvalResult {
         _ => match std::str::from_utf8(b) {
             Ok(s) => Ok(Value::String(s.into())),
             Err(e) if errors == "strict" => {
-                Err(InterpreterError::ValueError(format!("invalid utf-8: {e}")).into())
+                // CPython raises UnicodeDecodeError (a ValueError subclass) with
+                // the byte, position, and reason — not a plain ValueError.
+                let pos = e.valid_up_to();
+                let byte = b.get(pos).copied().unwrap_or(0);
+                let reason = match e.error_len() {
+                    None => "unexpected end of data",
+                    // A valid start byte (0xC2..=0xF4) followed by a bad
+                    // continuation is "invalid continuation byte"; anything else
+                    // is a bad start byte.
+                    Some(_) if (0xC2..=0xF4).contains(&byte) => "invalid continuation byte",
+                    Some(_) => "invalid start byte",
+                };
+                Err(EvalError::Exception(ExceptionValue::new(
+                    "UnicodeDecodeError",
+                    format!(
+                        "'utf-8' codec can't decode byte 0x{byte:02x} in position {pos}: {reason}"
+                    ),
+                )))
             }
             Err(_) => Err(unknown_error_handler(errors)),
         },
