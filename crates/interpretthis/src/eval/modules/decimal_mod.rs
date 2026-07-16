@@ -89,6 +89,39 @@ pub(crate) fn dispatch_decimal_method(
                 ))
             })
         }
+        // Transcendentals at the default context precision (28 significant
+        // digits). `exp` is bigdecimal's; `ln`/`log10` use Newton's method on
+        // `exp`. Accurate to 28 digits but — like `math.erf` — not guaranteed
+        // bit-identical to CPython's correctly-rounded result in the final ULP.
+        // exp(0) is exactly 1 (CPython returns the bare `1`, not `1.000…`).
+        "exp" if d.is_zero() => Ok(Value::Decimal(Box::new(BigDecimal::from(1)), false)),
+        "exp" => Ok(Value::Decimal(Box::new(d.exp().with_prec(28)), false)),
+        "ln" => {
+            // ln(1) is exactly 0 (CPython returns the bare `0`, not a padded
+            // 28-digit form). Every other value gives an irrational result.
+            if power_of_ten_exponent(d) == Some(0) {
+                Ok(Value::Decimal(Box::new(BigDecimal::from(0)), false))
+            } else {
+                decimal_ln_prec(d, 45)
+                    .map(|r| Value::Decimal(Box::new(r.with_prec(28)), false))
+                    .ok_or_else(|| non_positive_log_error("ln"))
+            }
+        }
+        "log10" => {
+            // log10 of an exact power of ten is the exact integer exponent
+            // (CPython: `Decimal(1000).log10()` is `3`, not `3.000…`).
+            if let Some(k) = power_of_ten_exponent(d) {
+                Ok(Value::Decimal(Box::new(BigDecimal::from(k)), false))
+            } else {
+                let ten = BigDecimal::from(10);
+                match (decimal_ln_prec(d, 48), decimal_ln_prec(&ten, 48)) {
+                    (Some(ln_d), Some(ln_ten)) => {
+                        Ok(Value::Decimal(Box::new((ln_d / ln_ten).with_prec(28)), false))
+                    }
+                    _ => Err(non_positive_log_error("log10")),
+                }
+            }
+        }
         // `compare(other)` yields Decimal(-1 / 0 / 1) (not a bare int).
         "compare" => {
             let Some(Value::Decimal(other, _)) = args.first() else {
@@ -150,6 +183,51 @@ pub(crate) fn dispatch_decimal_method(
         ))
         .into()),
     }
+}
+
+/// `InvalidOperation` for `ln`/`log10` of a value that is not strictly
+/// positive, matching CPython's error class.
+fn non_positive_log_error(op: &str) -> EvalError {
+    EvalError::Exception(crate::value::ExceptionValue::new(
+        "InvalidOperation",
+        format!("{op} of a non-positive value"),
+    ))
+}
+
+/// If `d` is an exact power of ten (`10**k`), return `k`; else `None`. Used to
+/// short-circuit `log10` (and `ln(1)`) to an exact integer result, matching
+/// CPython's special-casing.
+fn power_of_ten_exponent(d: &BigDecimal) -> Option<i64> {
+    let (mantissa, scale) = d.normalized().into_bigint_and_exponent();
+    (mantissa == num_bigint::BigInt::from(1)).then_some(-scale)
+}
+
+/// Natural logarithm of a positive `BigDecimal`, computed to `guard`
+/// significant digits by Newton's method on `exp`
+/// (`y ← y + d/exp(y) − 1`, which solves `exp(y) = d`). Quadratically
+/// convergent from an `f64` seed. Returns `None` for a non-positive input.
+/// The result carries `guard` digits so callers can round to the context
+/// precision (or divide, for `log10`) without compounding rounding error.
+fn decimal_ln_prec(d: &BigDecimal, guard: u64) -> Option<BigDecimal> {
+    use num_traits::{FromPrimitive as _, Signed as _, ToPrimitive as _};
+    if !d.is_positive() {
+        return None;
+    }
+    let one = BigDecimal::from(1);
+    let mut y = BigDecimal::from_f64(d.to_f64()?.ln())?;
+    // Newton converges quadratically; from ~15 f64 digits, a handful of
+    // iterations reaches `guard`. Cap the loop as a safety bound.
+    for _ in 0..40 {
+        let ey = y.exp().with_prec(guard);
+        let ratio = (d / &ey).with_prec(guard);
+        let correction = (ratio - &one).with_prec(guard);
+        let y_next = (&y + &correction).with_prec(guard);
+        if y_next == y {
+            break;
+        }
+        y = y_next;
+    }
+    Some(y)
 }
 
 pub const CONTEXT_CLASS: &str = "decimal.Context";
