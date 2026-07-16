@@ -1210,7 +1210,6 @@ pub(super) async fn try_builtin(
         }
         "enumerate" => {
             check_arg_count(name, args, 1, 2)?;
-            let items = crate::eval::op::iter(state, &args[0], tools).await?;
             // `start` accepted positionally OR via keyword.
             let start = if args.len() >= 2 {
                 value_to_i64(&args[1])?
@@ -1219,6 +1218,19 @@ pub(super) async fn try_builtin(
             } else {
                 0
             };
+            // Over an infinite producer, enumerate is lazy (CPython's `enumerate`
+            // object) — `next(enumerate(count()))` streams, not hangs.
+            if has_infinite_arg(&args[..1]) {
+                if let Some(g) = lazy_gen_builtin(
+                    state,
+                    "<enumerate>",
+                    "i = start\nfor x in it:\n    yield (i, x)\n    i = i + 1\n",
+                    &[("it", args[0].clone()), ("start", Value::Int(start))],
+                ) {
+                    return Ok(Some(g));
+                }
+            }
+            let items = crate::eval::op::iter(state, &args[0], tools).await?;
             let mut result = Vec::with_capacity(items.len());
             for (i, v) in items.into_iter().enumerate() {
                 result.push(Value::Tuple(vec![Value::Int(start + to_len_i64(i)?), v]));
@@ -1609,6 +1621,18 @@ pub(super) async fn try_builtin(
         "filter" => {
             check_arg_count(name, args, 2, 2)?;
             let func = &args[0];
+            // Over an infinite producer, filter is lazy (CPython's `filter`
+            // object) — `next(filter(pred, count()))` streams, not hangs.
+            if has_infinite_arg(&args[1..]) {
+                if let Some(g) = lazy_gen_builtin(
+                    state,
+                    "<filter>",
+                    "for x in it:\n    if (x if pred is None else pred(x)):\n        yield x\n",
+                    &[("pred", func.clone()), ("it", args[1].clone())],
+                ) {
+                    return Ok(Some(g));
+                }
+            }
             let iterable = crate::eval::op::iter(state, &args[1], tools).await?;
             let mut result = Vec::new();
             for item in iterable {
@@ -1641,6 +1665,20 @@ pub(super) async fn try_builtin(
                 .into());
             }
             let func = &args[0];
+            // Over an infinite producer, map is lazy (CPython's `map` object).
+            if has_infinite_arg(&args[1..]) {
+                if let Some(g) = lazy_gen_builtin(
+                    state,
+                    "<map>",
+                    "for row in zip(*iters):\n    yield func(*row)\n",
+                    &[
+                        ("func", func.clone()),
+                        ("iters", Value::List(shared_list(args[1..].to_vec()))),
+                    ],
+                ) {
+                    return Ok(Some(g));
+                }
+            }
             if args.len() == 2 {
                 let iterable = crate::eval::op::iter(state, &args[1], tools).await?;
                 let mut result = Vec::new();
@@ -1954,19 +1992,30 @@ fn sum_float_neumaier(start: &Value, items: &[Value]) -> Option<Value> {
 /// per round. Iteration stops as soon as any argument is exhausted —
 /// pulling left-to-right and discarding a partial round, matching
 /// CPython. `zip(count(), count())` (all-infinite) never terminates,
-/// Build a truly lazy `zip` as a synthesized generator that pulls one row at a
-/// time and stops when any argument is exhausted — so `zip(count(), count())`
-/// streams instead of hanging. Returns `None` if the body is not suspend-
-/// drivable (caller falls back to `zip_lazy`).
-fn zip_lazy_gen(state: &mut InterpreterState, args: &[Value]) -> Option<Value> {
-    // sources is the tuple of arguments; the body builds one iterator per source
-    // and yields a tuple per round until the first is exhausted.
-    let body_src = "its = [iter(a) for a in sources]\n_missing = object()\ndone = False\nwhile not done:\n    row = []\n    for it in its:\n        v = next(it, _missing)\n        if v is _missing:\n            done = True\n            break\n        row.append(v)\n    if not done:\n        yield tuple(row)\n";
+/// True for an *infinite* builtin producer (`count`/`cycle`/`repeat`). A builtin
+/// consumed over one of these must be lazy or it hangs materialising the source.
+fn has_infinite_arg(args: &[Value]) -> bool {
+    args.iter().any(|a| matches!(a, Value::BuiltinIter { .. }))
+}
+
+/// Build a lazy builtin (`zip`/`map`/`filter`/`enumerate`) as a synthesized
+/// generator: parse a Python body template and bind its free parameters as
+/// frame locals so the body's `for x in <input>` streams one item at a time.
+/// Returns `None` if the body is not suspend-drivable.
+fn lazy_gen_builtin(
+    state: &mut InterpreterState,
+    name: &str,
+    body_src: &str,
+    bindings: &[(&str, Value)],
+) -> Option<Value> {
     let body = crate::parser::parse(body_src).ok()?;
     let (assigned, _globals) = crate::eval::functions::collect_assigned_names(&body);
     let mut locals: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
-    locals.insert("sources".to_string(), Value::List(shared_list(args.to_vec())));
-    let mut touched = vec!["sources".to_string()];
+    let mut touched: Vec<String> = Vec::new();
+    for (n, v) in bindings {
+        locals.insert((*n).to_string(), v.clone());
+        touched.push((*n).to_string());
+    }
     for n in assigned {
         if !touched.iter().any(|t| t == &n) {
             touched.push(n);
@@ -1974,10 +2023,23 @@ fn zip_lazy_gen(state: &mut InterpreterState, args: &[Value]) -> Option<Value> {
     }
     crate::eval::functions::create_synthetic_generator(
         state,
-        "<zip>",
+        name,
         std::sync::Arc::new(body),
         locals,
         touched,
+    )
+}
+
+/// Build a truly lazy `zip` as a synthesized generator that pulls one row at a
+/// time and stops when any argument is exhausted — so `zip(count(), count())`
+/// streams instead of hanging. Returns `None` if the body is not suspend-
+/// drivable (caller falls back to `zip_lazy`).
+fn zip_lazy_gen(state: &mut InterpreterState, args: &[Value]) -> Option<Value> {
+    lazy_gen_builtin(
+        state,
+        "<zip>",
+        "its = [iter(a) for a in sources]\n_missing = object()\ndone = False\nwhile not done:\n    row = []\n    for it in its:\n        v = next(it, _missing)\n        if v is _missing:\n            done = True\n            break\n        row.append(v)\n    if not done:\n        yield tuple(row)\n",
+        &[("sources", Value::List(shared_list(args.to_vec())))],
     )
 }
 
