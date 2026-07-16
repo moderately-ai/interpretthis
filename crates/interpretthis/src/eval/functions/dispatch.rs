@@ -63,8 +63,10 @@ pub(crate) async fn call_user_function(
 ) -> EvalResult {
     // Calling an `async def` does not run the body — it captures the call into a
     // coroutine that is driven later by `await` / `asyncio.run` (which call the
-    // inner path directly, bypassing this check).
-    if func_def.is_async {
+    // inner path directly, bypassing this check). An `async def` that also
+    // `yield`s is an async *generator*, not a coroutine: it flows through the
+    // normal generator machinery (and `async for` drives it like a generator).
+    if func_def.is_async && !func_def.is_generator {
         return Ok(Value::Coroutine(Box::new(crate::value::CoroutineValue {
             func: std::sync::Arc::new(func_def.clone()),
             args: args.to_vec(),

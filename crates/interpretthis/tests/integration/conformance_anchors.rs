@@ -34,4 +34,16 @@ async fn assert_has_anchor(code: &str) {
 // `async def` / `await` / `asyncio` and `async for` / `async with` over user
 // async iterators / context managers are now supported (sequential coroutines);
 // async generators remain unsupported but fail with a runtime error rather than
-// a dedicated "unsupported feature" anchor, so they are not gated here.
+// a dedicated "unsupported feature" anchor, so they are not gated here. The gate
+// now covers the still-unsupported import-allow-list constructs, which do carry
+// a CONFORMANCE anchor.
+
+#[tokio::test]
+async fn relative_import_error_has_conformance_anchor() {
+    assert_has_anchor("from . import x\n").await;
+}
+
+#[tokio::test]
+async fn star_import_error_has_conformance_anchor() {
+    assert_has_anchor("from math import *\n").await;
+}

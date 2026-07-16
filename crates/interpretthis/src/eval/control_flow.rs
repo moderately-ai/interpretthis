@@ -316,13 +316,36 @@ pub async fn eval_async_for(
         Err(_) => iterable.clone(),
     };
 
+    // An async generator (`async def` with `yield`) flows through the regular
+    // generator machinery, so it is stepped via `__next__`/StopIteration; a user
+    // async iterator is stepped via the awaited `__anext__`/StopAsyncIteration.
+    let is_generator_source =
+        matches!(aiter, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. });
+    let empty = indexmap::IndexMap::new();
     let mut result = Value::None;
     let mut broke = false;
     loop {
-        let item = match call_and_drive(state, &aiter, "__anext__", &[], tools).await {
-            Ok(v) => v,
-            Err(EvalError::Exception(e)) if e.type_name == "StopAsyncIteration" => break,
-            Err(e) => return Err(e),
+        let item = if is_generator_source {
+            match crate::eval::functions::dispatch_generator_method(
+                state,
+                &aiter,
+                "__next__",
+                &[],
+                &empty,
+                tools,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
+                Err(e) => return Err(e),
+            }
+        } else {
+            match call_and_drive(state, &aiter, "__anext__", &[], tools).await {
+                Ok(v) => v,
+                Err(EvalError::Exception(e)) if e.type_name == "StopAsyncIteration" => break,
+                Err(e) => return Err(e),
+            }
         };
         let body = ForBodyArgs { state, item, node: &sync_node, tools };
         let cont = run_for_body(body, &mut result, &mut broke).await?;
