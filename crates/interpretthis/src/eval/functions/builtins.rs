@@ -1047,64 +1047,50 @@ pub(super) async fn try_builtin(
                     Err(e) => return Err(e),
                 })));
             }
-            // CPython hasattr(obj, name): True iff getattr(obj, name)
-            // doesn't raise. Route through dispatch_getattr_opt first
-            // (covers every builtin-with-attributes type); if the slot
-            // is None for this variant, consult the Class / Exception /
-            // Function / ... fallbacks so hasattr stays in sync with
-            // eval_attribute's state-aware path. (Instances are handled
-            // above via the real getattr resolution.)
+            // CPython hasattr(obj, name): True iff getattr(obj, name) doesn't
+            // raise. `dispatch_getattr_opt` first covers builtin VALUE attributes
+            // (list methods on a list, etc.). On a miss:
+            //
+            //  * A builtin TYPE OBJECT (`str`, `float`, …) exposes its methods as
+            //    unbound descriptors through a dedicated registry — check it
+            //    directly (`hasattr(str, "upper")`).
+            //  * Everything else (Class / Function / Lambda / Exception / Module /
+            //    Date / …) routes through the SAME resolution `getattr` uses
+            //    (`legacy_attribute`), so hasattr can't drift from it. These are
+            //    side-effect-free introspection reads; AttributeError (or a
+            //    blocked-dunder Security error) maps to False.
             let has = match crate::types::dispatch_getattr_opt(&args[0], attr_name) {
                 Ok(Some(_)) => true,
                 Ok(None) => match &args[0] {
-                    Value::Class(class_name) => {
-                        attr_name == "__name__"
-                            || attr_name == "__qualname__"
-                            || state.classes.get(class_name).is_some_and(|c| {
-                                c.class_attrs.contains_key(attr_name)
-                                    || c.methods.contains_key(attr_name)
-                            })
-                    }
-                    Value::Exception(_) => attr_name == "message" || attr_name == "args",
-                    Value::Function(func_def) => {
-                        attr_name == "__name__"
-                            || attr_name == "__qualname__"
-                            || attr_name == "__doc__"
-                            || attr_name == "__annotations__"
-                            || attr_name == "__call__"
-                            || attr_name == "__defaults__"
-                            || attr_name == "__kwdefaults__"
-                            || state
-                                .function_attrs
-                                .get(func_def.body_cache_key())
-                                .is_some_and(|m| m.contains_key(attr_name))
-                    }
-                    // A builtin type object (`str`, `float`, ...) exposes its
-                    // methods and dunders as unbound descriptors, so
-                    // `hasattr(str, "upper")` is True — mirror the resolution
-                    // `getattr` uses via the shared attribute registry.
                     Value::BuiltinName(type_name) | Value::Type(type_name) => {
                         crate::types::builtin_type_attr_present(type_name, attr_name)
                     }
-                    Value::Lambda(_) => attr_name == "__name__" || attr_name == "__qualname__",
-                    Value::Module(module) => {
-                        crate::eval::modules::module_member(module, attr_name).is_ok()
+                    _ => {
+                        let resolved = crate::eval::names::getattr_on_value(
+                            state,
+                            args[0].clone(),
+                            attr_name,
+                            tools,
+                            None,
+                        )
+                        .await;
+                        match resolved {
+                            Ok(_) => true,
+                            Err(EvalError::Interpreter(
+                                InterpreterError::AttributeError(_) | InterpreterError::Security(_),
+                            )) => false,
+                            Err(EvalError::Exception(ref e))
+                                if e.type_name == "AttributeError"
+                                    || crate::eval::exceptions::builtin_exception_issubclass(
+                                        &e.type_name,
+                                        "AttributeError",
+                                    ) =>
+                            {
+                                false
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
-                    Value::Date(_) => {
-                        matches!(attr_name, "year" | "month" | "day" | "isoformat" | "weekday")
-                    }
-                    // Keep in sync with the introspection arms in
-                    // `names::legacy_attribute`.
-                    Value::LruCache(_) => {
-                        matches!(attr_name, "__name__" | "__qualname__" | "__doc__" | "__wrapped__")
-                    }
-                    Value::BoundMethod { .. } => {
-                        matches!(attr_name, "__name__" | "__qualname__" | "__self__")
-                    }
-                    Value::BuiltinTypeMethod { .. } => {
-                        matches!(attr_name, "__name__" | "__qualname__")
-                    }
-                    _ => false,
                 },
                 Err(_) => false,
             };
