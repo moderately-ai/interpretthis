@@ -45,6 +45,7 @@ pub mod struct_mod;
 pub mod sys_mod;
 pub mod textwrap;
 pub mod typing;
+pub mod user_collections;
 
 use std::{collections::HashMap, sync::LazyLock};
 
@@ -184,7 +185,11 @@ pub fn eval_import(state: &mut InterpreterState, node: &ast::StmtImport) -> Eval
 }
 
 /// Evaluate a `from module import name, …` statement.
-pub fn eval_import_from(state: &mut InterpreterState, node: &ast::StmtImportFrom) -> EvalResult {
+pub async fn eval_import_from(
+    state: &mut InterpreterState,
+    node: &ast::StmtImportFrom,
+    tools: &crate::tools::Tools,
+) -> EvalResult {
     if node.level.is_some_and(|level| level.to_u32() > 0) {
         return Err(InterpreterError::Security(
             "relative imports are not supported (see CONFORMANCE.md#import-allowlist)".into(),
@@ -209,8 +214,14 @@ pub fn eval_import_from(state: &mut InterpreterState, node: &ast::StmtImportFrom
             )
             .into());
         }
-        let value = module_member(module, name)?;
         let bind = alias.asname.as_ref().map_or(name, rustpython_parser::ast::Identifier::as_str);
+        // `collections.UserDict`/`UserList`/`UserString` are pure-Python
+        // delegating base classes bootstrapped lazily into the class registry.
+        if module == "collections" && user_collections::is_user_collection(name) {
+            user_collections::import_binding(state, name, bind, tools).await?;
+            continue;
+        }
+        let value = module_member(module, name)?;
         state.set_variable(bind, value).map_err(EvalError::Interpreter)?;
     }
     Ok(Value::None)
