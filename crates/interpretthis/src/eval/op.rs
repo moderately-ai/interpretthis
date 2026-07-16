@@ -315,6 +315,16 @@ pub async fn iter(
         // Boxed to satisfy async recursion rules (iter → next → body → iter).
         return Box::pin(drain_generator(state, *id, tools)).await;
     }
+    // A live `iter(list)` cursor drains from its current position to the end of
+    // the shared list — finite, so no iteration cap is needed. The infinite
+    // BuiltinIters (count/cycle/repeat) are not materialised here.
+    if let Value::BuiltinIter { id, kind: crate::value::BuiltinIterName::ListIterator } = value {
+        let mut out = Vec::new();
+        while let Some(v) = state.step_builtin_iter(*id) {
+            out.push(v);
+        }
+        return Ok(out);
+    }
     // Iterating an enum class yields its members in definition order
     // (`for color in Color`, `list(Color)`).
     if let Value::Class(class_name) = value {
@@ -350,7 +360,7 @@ pub async fn iter(
     // `__iter__` may return a generator (a generator method's `yield`s) or any
     // builtin iterable; drain those directly rather than requiring an Instance.
     match &iterator {
-        Value::Lazy { .. } | Value::Generator { .. } => {
+        Value::Lazy { .. } | Value::Generator { .. } | Value::BuiltinIter { .. } => {
             return Box::pin(iter(state, &iterator, tools)).await;
         }
         Value::List(_) | Value::Tuple(_) | Value::Range { .. } => {

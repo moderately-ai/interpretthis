@@ -25,6 +25,10 @@ pub enum BuiltinIterState {
     Cycle { items: Vec<crate::value::Value>, pos: usize },
     /// `itertools.repeat(obj)` with no count — yields `obj` forever.
     Repeat { value: crate::value::Value },
+    /// `iter(list)` — holds the shared list and a cursor, so the iterator
+    /// reflects mutations made before the cursor reaches them (CPython's
+    /// `list_iterator` semantics), unlike an eager snapshot.
+    ListIter { list: crate::value::SharedList, index: usize },
 }
 
 /// `itertools.count` step: `next + step` over the numeric types count
@@ -606,6 +610,16 @@ impl InterpreterState {
                 Some(v)
             }
             BuiltinIterState::Repeat { value } => Some(value.clone()),
+            BuiltinIterState::ListIter { list, index } => {
+                let guard = list.lock();
+                if *index < guard.len() {
+                    let v = guard[*index].clone();
+                    *index += 1;
+                    Some(v)
+                } else {
+                    None
+                }
+            }
         }
     }
 

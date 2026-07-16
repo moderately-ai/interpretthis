@@ -373,6 +373,9 @@ pub enum BuiltinIterName {
     Count,
     Cycle,
     Repeat,
+    /// `iter(list)` — a live iterator sharing the list, so items appended (or
+    /// removed) before the cursor reaches them are observed, as in CPython.
+    ListIterator,
 }
 
 impl BuiltinIterName {
@@ -383,6 +386,7 @@ impl BuiltinIterName {
             Self::Count => "count",
             Self::Cycle => "cycle",
             Self::Repeat => "repeat",
+            Self::ListIterator => "list_iterator",
         }
     }
 }

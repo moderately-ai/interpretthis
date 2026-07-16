@@ -2097,8 +2097,16 @@ pub(crate) async fn make_iterator(
         {
             Ok(value.clone())
         }
+        // `iter(list)` shares the underlying list, so items appended (or
+        // removed) before the cursor reaches them are observed — CPython's
+        // `list_iterator` reference semantics, which an eager snapshot loses.
+        Value::List(items) => Ok(state.alloc_builtin_iter(
+            crate::value::BuiltinIterName::ListIterator,
+            crate::state::BuiltinIterState::ListIter { list: items.clone(), index: 0 },
+        )),
         // Any other iterable: materialise into a fresh cursor-backed iterator (a
-        // list/tuple/str/range/dict/set is iterable but not itself an iterator).
+        // tuple/str/range/dict/set is iterable but not itself an iterator, and
+        // being immutable a snapshot is indistinguishable from a live cursor).
         // `op::iter` raises TypeError for a non-iterable.
         other => {
             let items = crate::eval::op::iter(state, other, tools).await?;
