@@ -76,6 +76,10 @@ pub async fn eval_class_def(
         if key == Some("metaclass") {
             match val {
                 Value::BuiltinName(n) | Value::Type(n) if n == "type" => {}
+                // `metaclass=abc.ABCMeta` (or `abc.ABC`) just marks the class
+                // abstract; the abstract-method tracking below enforces it, so
+                // no metaclass registration is needed — same as `class C(ABC)`.
+                Value::Type(n) if n == "abc.ABCMeta" || n == "abc.ABC" => {}
                 Value::Class(n) => metaclass_name = Some(n),
                 other => {
                     return Err(InterpreterError::TypeError(format!(
