@@ -298,6 +298,25 @@ pub fn value_to_key(val: &Value) -> Result<ValueKey, crate::error::EvalError> {
             hash: std::sync::Arc::as_ptr(ld) as *const () as usize as i64,
             value: Box::new(val.clone()),
         }),
+        // Class and type objects, builtin types/functions (`int`, `len`), and
+        // exception classes are hashable by identity in CPython — usable as dict
+        // keys / set members (e.g. a metaclass registry `{cls: instance}` or a
+        // `{int: ..., str: ...}` dispatch table). Each is name-keyed in our
+        // model, so the name IS the identity; the key hashes on the name and
+        // compares via the boxed value's equality.
+        Value::Class(name)
+        | Value::Type(name)
+        | Value::ExceptionType(name)
+        | Value::BuiltinName(name) => {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            name.hash(&mut hasher);
+            #[expect(
+                clippy::cast_possible_wrap,
+                reason = "hash bits reinterpreted as i64 — CPython hashes are also signed"
+            )]
+            Ok(ValueKey::Instance { hash: hasher.finish() as i64, value: Box::new(val.clone()) })
+        }
         _ => Err(crate::error::InterpreterError::TypeError(format!(
             "unhashable type: '{}'",
             val.type_name()

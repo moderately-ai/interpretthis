@@ -1099,6 +1099,34 @@ pub async fn instantiate(
     kwargs: &IndexMap<String, Value>,
     tools: &Tools,
 ) -> EvalResult {
+    // Metaclass `__call__` interception: if `type(cls)` defines a user
+    // `__call__`, calling `cls(...)` dispatches through it (CPython: the class's
+    // metaclass drives instantiation). The metaclass method typically ends with
+    // `super().__call__(*a, **kw)`, which routes back to the default
+    // construction (see the `__call__` arm in `super_class_method_call`).
+    if let Some(meta) = state.classes.get(class_name).and_then(|c| c.metaclass.clone()) {
+        if let Some((_, call_def)) = lookup_method_in_mro(state, &meta, "__call__") {
+            let call = CallArgs { positional: args, keyword: kwargs };
+            let (returned, _) =
+                call_method(state, &call_def, Value::Class(class_name.to_string()), call, tools)
+                    .await?;
+            return Ok(returned);
+        }
+    }
+    instantiate_default(state, class_name, args, kwargs, tools).await
+}
+
+/// The default construction protocol (`__new__` + `__init__`, abstract/enum/
+/// exception special-cases) — the behaviour of `type.__call__`. Reached
+/// directly by `cls(...)` when the metaclass adds no `__call__`, and via
+/// `super().__call__(...)` from inside a metaclass `__call__`.
+async fn instantiate_default(
+    state: &mut InterpreterState,
+    class_name: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+    tools: &Tools,
+) -> EvalResult {
     // An abstract class (unresolved `@abstractmethod`s) can't be instantiated.
     if let Some(class) = state.classes.get(class_name) {
         if !class.abstract_methods.is_empty() {
@@ -1936,6 +1964,19 @@ pub fn class_attribute(state: &InterpreterState, class_name: &str, attr: &str) -
     if let Some((_, def)) = lookup_method_in_mro(state, class_name, attr) {
         return Ok(Value::Function(std::sync::Arc::new(def)));
     }
+    // Fall back to the metaclass: `cls.attr` resolves through `type(cls)`'s MRO
+    // in CPython, so a metaclass-stored value (a registry like
+    // `cls._instances`, or a metaclass classmethod) is reachable from the
+    // managed class. A class attribute is shared/reference-semantic, so
+    // mutating it (`cls._instances[cls] = …`) persists on the metaclass.
+    if let Some(meta) = state.classes.get(class_name).and_then(|c| c.metaclass.clone()) {
+        if let Some(value) = lookup_class_attr(state, &meta, attr) {
+            return Ok(value);
+        }
+        if let Some((_, def)) = lookup_method_in_mro(state, &meta, attr) {
+            return Ok(Value::Function(std::sync::Arc::new(def)));
+        }
+    }
     Err(InterpreterError::AttributeError(format!(
         "type object '{class_name}' has no attribute '{attr}'"
     ))
@@ -2256,6 +2297,13 @@ pub async fn super_class_method_call(
                 class_name: target,
                 fields: crate::value::shared_fields(BTreeMap::new()),
             }))
+        }
+        // `super().__call__(*a, **kw)` inside a metaclass `__call__`: this is
+        // `type.__call__`, the default instantiation (`__new__` + `__init__`) of
+        // the class the metaclass manages.
+        None if method_name == "__call__" => {
+            Box::pin(instantiate_default(state, class_name, call.positional, call.keyword, tools))
+                .await
         }
         // Object-level defaults: the class-creation hooks are no-ops.
         None if matches!(method_name, "__init_subclass__" | "__set_name__" | "__init__") => {
