@@ -699,6 +699,45 @@ async fn groupby_impl(
     Ok(Value::List(shared_list(out)))
 }
 
+/// True for a lazy iterator value (a generator / lazy buffer / count-cycle-repeat).
+fn is_lazy_iter(v: &Value) -> bool {
+    matches!(v, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. })
+}
+
+/// Build a lazy itertools generator by parsing a Python body template and
+/// binding its free parameters as frame locals — the body's `for x in <input>`
+/// is then stepped one item at a time by the generator suspend engine. Returns
+/// `None` if the body is not suspend-drivable (caller falls back to the eager
+/// path). Reused so an infinite or closure-bearing lazy input is not
+/// materialised (which would hang or capture the final loop value).
+fn lazy_it_gen(
+    state: &mut crate::state::InterpreterState,
+    name: &str,
+    body_src: &str,
+    bindings: &[(&str, Value)],
+) -> Option<Value> {
+    let body = crate::parser::parse(body_src).ok()?;
+    let (assigned, _globals) = crate::eval::functions::collect_assigned_names(&body);
+    let mut locals: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+    let mut touched: Vec<String> = Vec::new();
+    for (n, v) in bindings {
+        locals.insert((*n).to_string(), v.clone());
+        touched.push((*n).to_string());
+    }
+    for n in assigned {
+        if !touched.iter().any(|t| t == &n) {
+            touched.push(n);
+        }
+    }
+    crate::eval::functions::create_synthetic_generator(
+        state,
+        name,
+        std::sync::Arc::new(body),
+        locals,
+        touched,
+    )
+}
+
 async fn takewhile_impl(
     state: &mut crate::state::InterpreterState,
     args: &[Value],
@@ -708,39 +747,17 @@ async fn takewhile_impl(
     let iter_val = need_arg("takewhile", args, 1)?.clone();
     let kwargs = indexmap::IndexMap::new();
     let mut out = Vec::new();
-    // Lazy consumption for a generator input, so `takewhile(pred, infinite())`
-    // stops as soon as the predicate fails instead of draining forever.
-    if matches!(iter_val, Value::Generator { .. } | Value::Lazy { .. } | Value::BuiltinIter { .. })
-    {
-        loop {
-            let item = match crate::eval::functions::dispatch_generator_method(
-                state,
-                &iter_val,
-                "__next__",
-                &[],
-                &kwargs,
-                tools,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(EvalError::Exception(e)) if e.type_name == "StopIteration" => break,
-                Err(e) => return Err(e),
-            };
-            let verdict = crate::eval::modules::call_callable(
-                state,
-                &pred,
-                std::slice::from_ref(&item),
-                &kwargs,
-                tools,
-            )
-            .await?;
-            if !verdict.is_truthy() {
-                break;
-            }
-            out.push(item);
+    // A lazy input is stepped one item at a time (so an infinite source stops at
+    // the predicate and loop-var closures capture their interleaved value).
+    if is_lazy_iter(&iter_val) {
+        if let Some(g) = lazy_it_gen(
+            state,
+            "<takewhile>",
+            "for item in it:\n    if not pred(item):\n        break\n    yield item\n",
+            &[("pred", pred.clone()), ("it", iter_val.clone())],
+        ) {
+            return Ok(g);
         }
-        return Ok(Value::List(shared_list(out)));
     }
     for item in iterate_value(&iter_val)? {
         let verdict = crate::eval::modules::call_callable(
@@ -769,6 +786,16 @@ async fn dropwhile_impl(
 ) -> EvalResult {
     let pred = need_arg("dropwhile", args, 0)?.clone();
     let iter_val = need_arg("dropwhile", args, 1)?.clone();
+    if is_lazy_iter(&iter_val) {
+        if let Some(g) = lazy_it_gen(
+            state,
+            "<dropwhile>",
+            "dropping = True\nfor item in it:\n    if dropping and pred(item):\n        continue\n    dropping = False\n    yield item\n",
+            &[("pred", pred.clone()), ("it", iter_val.clone())],
+        ) {
+            return Ok(g);
+        }
+    }
     let items = crate::eval::op::iter(state, &iter_val, tools).await?;
     let kwargs = indexmap::IndexMap::new();
     let mut out = Vec::new();
@@ -840,6 +867,16 @@ async fn starmap_impl(
 ) -> EvalResult {
     let func = need_arg("starmap", args, 0)?.clone();
     let iter_val = need_arg("starmap", args, 1)?.clone();
+    if is_lazy_iter(&iter_val) {
+        if let Some(g) = lazy_it_gen(
+            state,
+            "<starmap>",
+            "for item in it:\n    yield func(*item)\n",
+            &[("func", func.clone()), ("it", iter_val.clone())],
+        ) {
+            return Ok(g);
+        }
+    }
     let kwargs = indexmap::IndexMap::new();
     let mut out = Vec::new();
     for item in crate::eval::op::iter(state, &iter_val, tools).await? {
@@ -860,6 +897,16 @@ async fn filterfalse_impl(
 ) -> EvalResult {
     let pred = need_arg("filterfalse", args, 0)?.clone();
     let iter_val = need_arg("filterfalse", args, 1)?.clone();
+    if is_lazy_iter(&iter_val) {
+        if let Some(g) = lazy_it_gen(
+            state,
+            "<filterfalse>",
+            "for item in it:\n    if (not item) if pred is None else (not pred(item)):\n        yield item\n",
+            &[("pred", pred.clone()), ("it", iter_val.clone())],
+        ) {
+            return Ok(g);
+        }
+    }
     let kwargs = indexmap::IndexMap::new();
     let mut out = Vec::new();
     for item in crate::eval::op::iter(state, &iter_val, tools).await? {
@@ -892,8 +939,20 @@ async fn accumulate_impl(
     tools: &crate::tools::Tools,
 ) -> EvalResult {
     let iter_val = need_arg("accumulate", args, 0)?;
-    let items = iterate_value(iter_val)?;
     let reducer = args.get(1).cloned();
+    if is_lazy_iter(iter_val) {
+        let func = reducer.clone().unwrap_or(Value::None);
+        let initial = call_kwargs.get("initial").cloned().unwrap_or(Value::None);
+        if let Some(g) = lazy_it_gen(
+            state,
+            "<accumulate>",
+            "first = True\nacc = None\nif initial is not None:\n    acc = initial\n    first = False\n    yield acc\nfor item in it:\n    if first:\n        acc = item\n        first = False\n    else:\n        acc = (acc + item) if func is None else func(acc, item)\n    yield acc\n",
+            &[("it", iter_val.clone()), ("func", func), ("initial", initial)],
+        ) {
+            return Ok(g);
+        }
+    }
+    let items = iterate_value(iter_val)?;
     let kwargs = indexmap::IndexMap::new();
     let mut out: Vec<Value> = Vec::new();
     // `initial=`: seed the accumulator and emit it first, so the output has one
@@ -934,6 +993,47 @@ async fn accumulate_impl(
     Ok(Value::List(shared_list(out)))
 }
 
+/// `pairwise(iterable)` — overlapping pairs, lazy over a lazy input.
+async fn pairwise_impl(
+    state: &mut crate::state::InterpreterState,
+    args: &[Value],
+    _tools: &crate::tools::Tools,
+) -> EvalResult {
+    let iter_val = need_arg("pairwise", args, 0)?.clone();
+    if is_lazy_iter(&iter_val) {
+        if let Some(g) = lazy_it_gen(
+            state,
+            "<pairwise>",
+            "prev = None\nhas_prev = False\nfor item in it:\n    if has_prev:\n        yield (prev, item)\n    prev = item\n    has_prev = True\n",
+            &[("it", iter_val.clone())],
+        ) {
+            return Ok(g);
+        }
+    }
+    let items = iterate_value(&iter_val)?;
+    let out: Vec<Value> =
+        items.windows(2).map(|w| Value::Tuple(vec![w[0].clone(), w[1].clone()])).collect();
+    Ok(Value::List(shared_list(out)))
+}
+
+/// `compress(data, selectors)` — yield data items where the selector is truthy;
+/// lazy when either input is lazy so it does not drain an infinite source.
+async fn compress_lazy(state: &mut crate::state::InterpreterState, args: &[Value]) -> EvalResult {
+    let data = need_arg("compress", args, 0)?.clone();
+    let selectors = need_arg("compress", args, 1)?.clone();
+    if is_lazy_iter(&data) || is_lazy_iter(&selectors) {
+        if let Some(g) = lazy_it_gen(
+            state,
+            "<compress>",
+            "_missing = object()\nsit = iter(selectors)\nfor item in data:\n    s = next(sit, _missing)\n    if s is _missing:\n        break\n    if s:\n        yield item\n",
+            &[("data", data.clone()), ("selectors", selectors.clone())],
+        ) {
+            return Ok(g);
+        }
+    }
+    compress_impl(args)
+}
+
 /// `itertools` module registration. Predicate-driven functions
 /// (`takewhile`, `dropwhile`, `accumulate`) re-enter the evaluator to
 /// invoke the user-supplied callable; eager ones (`chain`, `repeat`,
@@ -960,7 +1060,8 @@ impl crate::eval::modules::Module for ItertoolsModule {
             "takewhile" => takewhile_impl(state, args, tools).await,
             "dropwhile" => dropwhile_impl(state, args, tools).await,
             "accumulate" => accumulate_impl(state, args, kwargs, tools).await,
-            "compress" => compress_impl(args),
+            "compress" => compress_lazy(state, args).await,
+            "pairwise" => pairwise_impl(state, args, tools).await,
             "groupby" => groupby_impl(state, args, kwargs, tools).await,
             "islice" => islice_impl(state, args, tools).await,
             "starmap" => starmap_impl(state, args, tools).await,
