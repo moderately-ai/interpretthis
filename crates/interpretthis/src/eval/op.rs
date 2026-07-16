@@ -812,7 +812,13 @@ pub async fn compare(
                 let (returned, post_self) =
                     invoke_slot(state, right, &method, std::slice::from_ref(left), tools).await?;
                 if !matches!(returned, Value::NotImplemented) {
-                    return Ok((returned.is_truthy(), None, Some(post_self)));
+                    // `!=` reflects to the right operand's `__eq__`, so negate.
+                    let result = if matches!(op, CmpOp::NotEq) {
+                        !returned.is_truthy()
+                    } else {
+                        returned.is_truthy()
+                    };
+                    return Ok((result, None, Some(post_self)));
                 }
             }
         }
@@ -1018,6 +1024,10 @@ const fn forward_compare_slot(op: rustpython_parser::ast::CmpOp) -> Option<&'sta
 const fn reflected_compare_slot(op: rustpython_parser::ast::CmpOp) -> Option<&'static str> {
     use rustpython_parser::ast::CmpOp;
     match op {
+        // `==`/`!=` are symmetric: `a == b` reflects to `b.__eq__(a)`. So when
+        // the left operand's `__eq__` is absent or returns NotImplemented (e.g.
+        // `5 == Instance`), the right instance's `__eq__` still gets a turn.
+        CmpOp::Eq | CmpOp::NotEq => Some("__eq__"),
         CmpOp::Lt => Some("__gt__"),
         CmpOp::LtE => Some("__ge__"),
         CmpOp::Gt => Some("__lt__"),
@@ -1274,6 +1284,20 @@ pub async fn contains(
         if let Some(map) = container.as_dict() {
             return Ok(dict_get_instance_key(state, map, item, tools).await?.is_some());
         }
+    }
+    // A membership test compares `element == item` for each element, so a custom
+    // `__eq__` on EITHER side must run: dispatch the async scan when the searched
+    // item is an instance OR any element is (structural `values_equal` in the
+    // sync fallback would miss the element's `__eq__`, e.g. `5 in [Reflected(5)]`).
+    // Restricted to list/tuple — a borrow-only check, no clone; sets/dicts stay
+    // hash-based (an instance element there needs `__hash__`, and the plain-item
+    // sync path already probes the right bucket).
+    let container_has_instance = || match container {
+        Value::List(items) => items.lock().iter().any(|v| matches!(v, Value::Instance(_))),
+        Value::Tuple(items) => items.iter().any(|v| matches!(v, Value::Instance(_))),
+        _ => false,
+    };
+    if matches!(item, Value::Instance(_)) || container_has_instance() {
         // list / tuple / set: scan with async `__eq__` (structural
         // `values_equal` misses custom equality logic).
         if let Value::List(items) = container {
