@@ -518,13 +518,25 @@ fn set_comprehension_target<'a>(
                 // Comprehension targets are comp-scoped (Python 3
                 // semantics) and overwritten every iteration. The full
                 // `set_variable` path runs memory accounting (estimate
-                // size of old + new value) and a nonlocal-cell
-                // write-through check that's irrelevant for comp
-                // targets — both are pure overhead per element. Direct
-                // map insert is correct: the result-accumulator's
-                // memory IS tracked (the .push into results), only the
-                // per-element target's churn is skipped.
-                state.variables.insert(name_node.id.as_str().to_string(), value.clone());
+                // size of old + new value) that's pure overhead per
+                // element, so a direct map insert is used. But a
+                // late-binding closure over the comp variable
+                // (`[lambda: i for i in range(n)]`) backs it with a
+                // capture cell owned by the enclosing frame, and every
+                // iteration must write through so the shared cell ends
+                // at the final value — otherwise the closures read the
+                // seed. Do just that targeted write-through here.
+                let name = name_node.id.as_str();
+                if let Some(&cell_id) =
+                    state.frame_cell_owners.last().and_then(|owners| owners.get(name))
+                {
+                    state
+                        .nonlocal_cells
+                        .entry(cell_id)
+                        .or_default()
+                        .insert(name.to_string(), value.clone());
+                }
+                state.variables.insert(name.to_string(), value.clone());
                 Ok(())
             }
             Expr::Tuple(tuple_node) => {

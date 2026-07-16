@@ -143,6 +143,17 @@ pub async fn eval_function_def(
     let closure: BTreeMap<String, Value> =
         state.variables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
+    // Late-binding closure cells: back any enclosing-frame local this nested
+    // `def` reads with a live capture cell (registered on the enclosing frame),
+    // so the reader observes the variable's final value — CPython's cell
+    // semantics — not the def-time snapshot. Must run before
+    // `resolve_closure_cells`, which reads the freshly-registered cells into
+    // `cell_refreshes`.
+    let mut bound = param_names(&params);
+    bound.extend(collect_assigned_names(&node.body).0);
+    let free = collect_free_names(&bound, &node.body);
+    ensure_capture_cells(state, &free);
+
     let (nonlocal_names, nonlocal_cell_id, cell_refreshes) =
         resolve_closure_cells(state, node, &closure);
 
@@ -258,6 +269,14 @@ pub(super) fn apply_function_scope(
         if local_scope.contains_key(name) || func_def.global_names.contains(name) {
             continue;
         }
+        // A cell-backed capture is set from the live cell by
+        // `apply_cell_refreshes` below; overlaying the def-time snapshot here
+        // would both stomp the live value and (via `set_variable`'s
+        // write-through) corrupt the shared cell when the closure is called
+        // while the enclosing frame is still active.
+        if func_def.cell_refreshes.iter().any(|(n, _)| n == name) {
+            continue;
+        }
         if func_def.is_module_level && state.variables.contains_key(name) {
             // Module-level def: live module dict wins.
             continue;
@@ -275,7 +294,7 @@ pub(super) fn apply_function_scope(
         state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
     }
     apply_nonlocal_cell(state, func_def, local_scope)?;
-    apply_cell_refreshes(state, func_def, local_scope)?;
+    apply_cell_refreshes(state, &func_def.cell_refreshes, local_scope)?;
     for (name, value) in local_scope {
         state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
     }
@@ -283,14 +302,15 @@ pub(super) fn apply_function_scope(
 }
 
 /// Refresh free names backed by an enclosing frame's cell from the live cell so
-/// a reader sees sibling closures' `nonlocal` writes. Kept out of
+/// a reader sees sibling closures' writes (`nonlocal` mutations and
+/// late-binding loop/reassignment captures alike). Kept out of
 /// `apply_function_scope` so that hot frame stays small on the recursion path.
 fn apply_cell_refreshes(
     state: &mut InterpreterState,
-    func_def: &FunctionDef,
+    refreshes: &[(String, u64)],
     local_scope: &rustc_hash::FxHashMap<String, Value>,
 ) -> Result<(), EvalError> {
-    for (name, cell_id) in &func_def.cell_refreshes {
+    for (name, cell_id) in refreshes {
         if local_scope.contains_key(name) {
             continue;
         }
@@ -313,6 +333,12 @@ pub(super) fn apply_lambda_scope(
         if local_scope.contains_key(name) {
             continue;
         }
+        // Cell-backed captures are set from the live cell by
+        // `apply_cell_refreshes`; skip the snapshot overlay (see
+        // `apply_function_scope`).
+        if lambda_def.cell_refreshes.iter().any(|(n, _)| n == name) {
+            continue;
+        }
         if lambda_def.is_module_level && state.variables.contains_key(name) {
             continue;
         }
@@ -323,6 +349,7 @@ pub(super) fn apply_lambda_scope(
         }
         state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
     }
+    apply_cell_refreshes(state, &lambda_def.cell_refreshes, local_scope)?;
     for (name, value) in local_scope {
         state.set_variable(name, value.clone()).map_err(EvalError::Interpreter)?;
     }
@@ -422,6 +449,278 @@ fn collect_nonlocal_names_inner(body: &[ast::Stmt], out: &mut Vec<String>) {
 /// separately by the cell pattern) and `global` should not appear in
 /// `assigned` — the caller filters via the existing `nonlocal_names`
 /// list.
+/// Collect the free variables of a function/lambda body: every name read
+/// (`Expr::Name` in Load context, anywhere — including nested lambdas/defs,
+/// whose reads are also free in this scope) minus the names this scope binds
+/// (`bound`). Used to decide which enclosing-frame locals a nested closure
+/// captures, so those can be backed by a live cell (CPython's late binding).
+///
+/// Deliberately *over*-collects rather than under: any name not actually a
+/// live enclosing local is filtered later by the `state.variables` check in
+/// [`ensure_capture_cells`], and any expression form this walker misses simply
+/// falls back to the def-time snapshot (the prior behaviour) — never wrong,
+/// only conservatively early-bound.
+/// The names a `FunctionParams` binds (positional, `*args`, keyword-only,
+/// `**kwargs`) — the locals a nested closure must NOT treat as free.
+fn param_names(params: &FunctionParams) -> Vec<String> {
+    let mut names: Vec<String> = params.args.iter().map(|p| p.name.clone()).collect();
+    names.extend(params.kwonlyargs.iter().map(|p| p.name.clone()));
+    if let Some(v) = &params.vararg {
+        names.push(v.clone());
+    }
+    if let Some(k) = &params.kwarg {
+        names.push(k.clone());
+    }
+    names
+}
+
+#[must_use]
+pub(crate) fn collect_free_names(bound: &[String], body: &[ast::Stmt]) -> Vec<String> {
+    let mut reads = Vec::new();
+    for stmt in body {
+        collect_reads_stmt(stmt, &mut reads);
+    }
+    reads.retain(|n| !bound.contains(n));
+    reads
+}
+
+fn collect_reads_stmt(stmt: &ast::Stmt, out: &mut Vec<String>) {
+    use ast::Stmt;
+    let body_of = |b: &[Stmt], out: &mut Vec<String>| {
+        for s in b {
+            collect_reads_stmt(s, out);
+        }
+    };
+    match stmt {
+        Stmt::Expr(n) => collect_reads_expr(&n.value, out),
+        Stmt::Return(n) => {
+            if let Some(v) = &n.value {
+                collect_reads_expr(v, out);
+            }
+        }
+        Stmt::Assign(n) => collect_reads_expr(&n.value, out),
+        Stmt::AugAssign(n) => {
+            collect_reads_expr(&n.target, out);
+            collect_reads_expr(&n.value, out);
+        }
+        Stmt::AnnAssign(n) => {
+            if let Some(v) = &n.value {
+                collect_reads_expr(v, out);
+            }
+        }
+        Stmt::For(n) => {
+            collect_reads_expr(&n.iter, out);
+            body_of(&n.body, out);
+            body_of(&n.orelse, out);
+        }
+        Stmt::While(n) => {
+            collect_reads_expr(&n.test, out);
+            body_of(&n.body, out);
+            body_of(&n.orelse, out);
+        }
+        Stmt::If(n) => {
+            collect_reads_expr(&n.test, out);
+            body_of(&n.body, out);
+            body_of(&n.orelse, out);
+        }
+        Stmt::With(n) => {
+            for item in &n.items {
+                collect_reads_expr(&item.context_expr, out);
+            }
+            body_of(&n.body, out);
+        }
+        Stmt::Try(n) => {
+            body_of(&n.body, out);
+            body_of(&n.orelse, out);
+            body_of(&n.finalbody, out);
+            for h in &n.handlers {
+                let ast::ExceptHandler::ExceptHandler(eh) = h;
+                body_of(&eh.body, out);
+            }
+        }
+        Stmt::FunctionDef(n) => body_of(&n.body, out),
+        Stmt::ClassDef(n) => body_of(&n.body, out),
+        Stmt::Delete(n) => {
+            for t in &n.targets {
+                collect_reads_expr(t, out);
+            }
+        }
+        Stmt::Raise(n) => {
+            if let Some(e) = &n.exc {
+                collect_reads_expr(e, out);
+            }
+            if let Some(c) = &n.cause {
+                collect_reads_expr(c, out);
+            }
+        }
+        Stmt::Assert(n) => {
+            collect_reads_expr(&n.test, out);
+            if let Some(m) = &n.msg {
+                collect_reads_expr(m, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn collect_reads_expr(expr: &ast::Expr, out: &mut Vec<String>) {
+    use ast::Expr;
+    match expr {
+        Expr::Name(n) if matches!(n.ctx, ast::ExprContext::Load) => push_unique(out, n.id.as_str()),
+        Expr::Name(_) => {}
+        Expr::BoolOp(n) => {
+            for v in &n.values {
+                collect_reads_expr(v, out);
+            }
+        }
+        Expr::BinOp(n) => {
+            collect_reads_expr(&n.left, out);
+            collect_reads_expr(&n.right, out);
+        }
+        Expr::UnaryOp(n) => collect_reads_expr(&n.operand, out),
+        Expr::Compare(n) => {
+            collect_reads_expr(&n.left, out);
+            for c in &n.comparators {
+                collect_reads_expr(c, out);
+            }
+        }
+        Expr::IfExp(n) => {
+            collect_reads_expr(&n.test, out);
+            collect_reads_expr(&n.body, out);
+            collect_reads_expr(&n.orelse, out);
+        }
+        Expr::Call(n) => {
+            collect_reads_expr(&n.func, out);
+            for a in &n.args {
+                collect_reads_expr(a, out);
+            }
+            for k in &n.keywords {
+                collect_reads_expr(&k.value, out);
+            }
+        }
+        Expr::Attribute(n) => collect_reads_expr(&n.value, out),
+        Expr::Subscript(n) => {
+            collect_reads_expr(&n.value, out);
+            collect_reads_expr(&n.slice, out);
+        }
+        Expr::Starred(n) => collect_reads_expr(&n.value, out),
+        Expr::Slice(n) => {
+            if let Some(l) = &n.lower {
+                collect_reads_expr(l, out);
+            }
+            if let Some(u) = &n.upper {
+                collect_reads_expr(u, out);
+            }
+            if let Some(s) = &n.step {
+                collect_reads_expr(s, out);
+            }
+        }
+        Expr::Lambda(n) => collect_reads_expr(&n.body, out),
+        Expr::Tuple(n) => {
+            for e in &n.elts {
+                collect_reads_expr(e, out);
+            }
+        }
+        Expr::List(n) => {
+            for e in &n.elts {
+                collect_reads_expr(e, out);
+            }
+        }
+        Expr::Set(n) => {
+            for e in &n.elts {
+                collect_reads_expr(e, out);
+            }
+        }
+        Expr::Dict(n) => {
+            for k in n.keys.iter().flatten() {
+                collect_reads_expr(k, out);
+            }
+            for v in &n.values {
+                collect_reads_expr(v, out);
+            }
+        }
+        Expr::ListComp(n) => collect_reads_comp(&n.elt, None, &n.generators, out),
+        Expr::SetComp(n) => collect_reads_comp(&n.elt, None, &n.generators, out),
+        Expr::GeneratorExp(n) => collect_reads_comp(&n.elt, None, &n.generators, out),
+        Expr::DictComp(n) => collect_reads_comp(&n.key, Some(&n.value), &n.generators, out),
+        Expr::JoinedStr(n) => {
+            for v in &n.values {
+                collect_reads_expr(v, out);
+            }
+        }
+        Expr::FormattedValue(n) => {
+            collect_reads_expr(&n.value, out);
+            if let Some(spec) = &n.format_spec {
+                collect_reads_expr(spec, out);
+            }
+        }
+        Expr::NamedExpr(n) => collect_reads_expr(&n.value, out),
+        Expr::Await(n) => collect_reads_expr(&n.value, out),
+        Expr::Yield(n) => {
+            if let Some(v) = &n.value {
+                collect_reads_expr(v, out);
+            }
+        }
+        Expr::YieldFrom(n) => collect_reads_expr(&n.value, out),
+        _ => {}
+    }
+}
+
+fn collect_reads_comp(
+    elt: &ast::Expr,
+    value: Option<&ast::Expr>,
+    generators: &[ast::Comprehension],
+    out: &mut Vec<String>,
+) {
+    collect_reads_expr(elt, out);
+    if let Some(v) = value {
+        collect_reads_expr(v, out);
+    }
+    for comp in generators {
+        collect_reads_expr(&comp.iter, out);
+        for cond in &comp.ifs {
+            collect_reads_expr(cond, out);
+        }
+    }
+}
+
+/// For each free name currently live in the enclosing frame, ensure it is
+/// backed by a capture cell owned by that frame, and return the
+/// `(name, cell_id)` refresh list. Reuses an existing cell (so sibling
+/// closures — and successive loop iterations — share it, giving CPython's
+/// one-cell-per-variable late binding); newly-created cells are seeded with
+/// the variable's current value. Only fires below module scope: module-level
+/// free names are live-global reads (handled by the LEGB overlay), not cells.
+fn ensure_capture_cells(state: &mut InterpreterState, free_names: &[String]) -> Vec<(String, u64)> {
+    if state.call_depth == 0 || state.frame_cell_owners.is_empty() {
+        return Vec::new();
+    }
+    let mut refreshes = Vec::new();
+    for name in free_names {
+        // Only capture names that are actually live in the current scope.
+        let Some(current) = state.variables.get(name).cloned() else {
+            continue;
+        };
+        let existing = state.frame_cell_owners.last().and_then(|owners| owners.get(name).copied());
+        let cell_id = existing.unwrap_or_else(|| {
+            let id = state.next_nonlocal_cell_id;
+            state.next_nonlocal_cell_id = state.next_nonlocal_cell_id.wrapping_add(1);
+            id
+        });
+        // Seed a freshly-allocated cell with the current value; leave an
+        // existing cell (a sibling closure's) untouched so its live value wins.
+        if existing.is_none() {
+            state.nonlocal_cells.entry(cell_id).or_default().insert(name.clone(), current);
+            if let Some(owners) = state.frame_cell_owners.last_mut() {
+                owners.insert(name.clone(), cell_id);
+            }
+        }
+        refreshes.push((name.clone(), cell_id));
+    }
+    refreshes
+}
+
 pub(crate) fn collect_assigned_names(body: &[ast::Stmt]) -> (Vec<String>, Vec<String>) {
     let mut assigned = Vec::new();
     let mut globals = Vec::new();
@@ -1228,6 +1527,17 @@ pub async fn eval_lambda_def(
 
     let is_module_level = state.call_depth == 0;
 
+    // Late-binding capture cells (see `eval_function_def`): a lambda reading an
+    // enclosing-frame local — the classic `[lambda: i for i in range(N)]` —
+    // shares a live cell for it, so every lambda sees the loop variable's final
+    // value, matching CPython.
+    let mut bound = param_names(&params);
+    bound.extend(assigned_names.iter().cloned());
+    let mut free = Vec::new();
+    collect_reads_expr(&node.body, &mut free);
+    free.retain(|n| !bound.contains(n));
+    let cell_refreshes = ensure_capture_cells(state, &free);
+
     Ok(Value::Lambda(std::sync::Arc::new(LambdaDef {
         params,
         lambda_id,
@@ -1235,6 +1545,7 @@ pub async fn eval_lambda_def(
         closure,
         assigned_names,
         is_module_level,
+        cell_refreshes,
     })))
 }
 

@@ -1913,6 +1913,11 @@ pub struct LambdaDef {
     /// suppression rule applies.
     #[serde(default)]
     pub is_module_level: bool,
+    /// Free names backed by an enclosing frame's capture cell, read live
+    /// from the cell at call time (CPython's late-binding closure cells).
+    /// Mirrors [`FunctionDef::cell_refreshes`].
+    #[serde(default)]
+    pub cell_refreshes: Vec<(String, u64)>,
 }
 
 /// Function parameter specification.

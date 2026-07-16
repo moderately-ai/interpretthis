@@ -128,6 +128,11 @@ async fn call_user_function_inner(
         }
 
         state.body_source_stack.push(func_def.source.clone());
+        // Even on the trivial-frame path the body may create a nested closure
+        // that captures a local (`return [lambda: i for i in range(n)]`); it
+        // needs a `frame_cell_owners` scope so the capture cell registers on
+        // this frame (and the loop/comprehension writes through it).
+        state.frame_cell_owners.push(rustc_hash::FxHashMap::default());
         let outcome = if let Some(body_stmts) = body {
             match execute_body(state, body_stmts.as_slice(), tools).await {
                 Ok(v) => Ok(v),
@@ -137,6 +142,7 @@ async fn call_user_function_inner(
         } else {
             Ok(Value::None)
         };
+        state.frame_cell_owners.pop();
         state.body_source_stack.pop();
         state.exit_call();
         return outcome;
