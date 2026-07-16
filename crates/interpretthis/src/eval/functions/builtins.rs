@@ -502,6 +502,10 @@ pub(super) async fn try_builtin(
                 // this arm `type(e).__name__` collapses every variant
                 // to the static `"Exception"` label.
                 Value::Exception(exc) => Value::ExceptionType(exc.type_name.clone()),
+                // An enum member's type is its enum class, so
+                // `type(Color.RED).__name__ == 'Color'` and
+                // `type(Color.RED) is Color`.
+                Value::EnumMember { class_name, .. } => Value::Class(class_name.clone()),
                 Value::Type(_) | Value::Class(_) => Value::Type("type".to_string()),
                 Value::Module(_) => Value::Type("module".to_string()),
                 other => Value::Type(other.type_name().to_string()),

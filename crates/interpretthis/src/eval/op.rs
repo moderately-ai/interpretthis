@@ -1172,6 +1172,15 @@ pub async fn len(
     if let Some(items) = namedtuple_items(state, value) {
         return Ok(items.len());
     }
+    // `len(Color)` on an enum *class* is its member count (an enum class is
+    // iterable, so `len` mirrors that), matching CPython's EnumMeta.__len__.
+    if let Value::Class(class_name) = value {
+        if let Some(class) = state.classes.get(class_name) {
+            if class.enum_kind.is_some() {
+                return Ok(class.enum_members.len());
+            }
+        }
+    }
     crate::types::dispatch_len(value)
 }
 
@@ -1192,6 +1201,13 @@ pub async fn contains(
         let (returned, _self) =
             invoke_slot(state, container, &method, std::slice::from_ref(item), tools).await?;
         return Ok(returned.is_truthy());
+    }
+    // `member in EnumClass` (CPython 3.12 EnumMeta.__contains__): true iff the
+    // item is a member of this enum; any non-member is False (not an error).
+    if let Value::Class(class_name) = container {
+        if state.classes.get(class_name).is_some_and(|c| c.enum_kind.is_some()) {
+            return Ok(matches!(item, Value::EnumMember { class_name: m, .. } if m == class_name));
+        }
     }
     // An instance without `__contains__` falls back to iterating the container
     // (via `__iter__`, or the `__getitem__` sequence protocol) and comparing

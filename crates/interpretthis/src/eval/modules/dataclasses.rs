@@ -33,6 +33,18 @@ use crate::{
 /// existing class attributes for per-field configuration.
 const FIELD_SENTINEL: &str = "__interpretthis_dataclasses_field__";
 
+/// Class name for the `Field` objects `fields()` returns (so `f.name`
+/// resolves as an attribute, matching CPython's `dataclasses.Field`).
+const FIELD_CLASS: &str = "dataclasses.Field";
+
+/// Register the `Field` marker class once so its instances repr/isinstance
+/// sensibly. Attribute reads work off the instance dict regardless.
+fn ensure_field_class(state: &mut InterpreterState) {
+    if !state.classes.contains_key(FIELD_CLASS) {
+        state.classes.insert(FIELD_CLASS.to_string(), crate::value::ClassValue::new(FIELD_CLASS));
+    }
+}
+
 pub fn has_function(name: &str) -> bool {
     matches!(
         name,
@@ -114,25 +126,24 @@ pub fn call(
                     "fields() requires a dataclass instance or class; '{class_name}' is not a dataclass"
                 )))
             })?;
-            // Return a tuple of small dicts {name, default} per field —
-            // a CPython `Field` object has more methods, but the dict
-            // shape is the common consumer pattern.
-            let items = fields
+            // Return a tuple of `Field` objects exposing `.name` / `.default`
+            // as attributes — CPython's `fields()` yields `Field` instances, so
+            // `[f.name for f in fields(x)]` (the common consumer) must see
+            // attributes, not dict keys.
+            let field_values: Vec<Value> = fields
                 .iter()
                 .map(|f| {
-                    let mut entry = IndexMap::new();
-                    entry.insert(
-                        crate::value::ValueKey::String("name".into()),
-                        Value::String(f.name.as_str().into()),
-                    );
-                    entry.insert(
-                        crate::value::ValueKey::String("default".into()),
-                        f.default.clone().unwrap_or(Value::None),
-                    );
-                    Value::Dict(crate::value::shared_dict(entry))
+                    let mut entry = std::collections::BTreeMap::new();
+                    entry.insert("name".to_string(), Value::String(f.name.as_str().into()));
+                    entry.insert("default".to_string(), f.default.clone().unwrap_or(Value::None));
+                    Value::Instance(InstanceValue {
+                        class_name: FIELD_CLASS.to_string(),
+                        fields: crate::value::shared_fields(entry),
+                    })
                 })
                 .collect();
-            Ok(Value::Tuple(items))
+            ensure_field_class(state);
+            Ok(Value::Tuple(field_values))
         }
         "asdict" => match args.first() {
             Some(Value::Instance(inst)) => asdict_recursive(state, inst),

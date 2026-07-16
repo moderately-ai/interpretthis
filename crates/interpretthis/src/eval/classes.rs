@@ -1325,10 +1325,19 @@ async fn dataclass_instantiate(
         instance_fields.insert(field.name.clone(), value);
     }
 
-    Ok(Value::Instance(InstanceValue {
+    let instance = Value::Instance(InstanceValue {
         class_name: class_name.to_string(),
         fields: crate::value::shared_fields(instance_fields),
-    }))
+    });
+    // CPython's synthesized `__init__` calls `__post_init__(self)` after the
+    // fields are set, letting a dataclass derive computed fields. (InitVar
+    // pass-through is not modelled; the common no-arg form is.)
+    if let Some((_, post)) = lookup_method_in_mro(state, class_name, "__post_init__") {
+        let call = CallArgs { positional: &[], keyword: &IndexMap::new() };
+        let (_returned, updated) = call_method(state, &post, instance, call, tools).await?;
+        return Ok(updated);
+    }
+    Ok(instance)
 }
 
 fn empty_for_builtin_factory(name: &str) -> EvalResult {

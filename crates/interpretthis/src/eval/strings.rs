@@ -1088,6 +1088,13 @@ fn format_get_attr(value: &Value, attr: &str) -> EvalResult {
             .cloned()
             .ok_or_else(|| EvalError_value_error(format!("dict has no key '{attr}'")));
     }
+    // A user-class instance exposes its stored fields (`{o.name}` /
+    // `{0.value}`), the common `str.format` attribute-access pattern.
+    if let Value::Instance(inst) = value {
+        if let Some(v) = inst.fields.lock().get(attr) {
+            return Ok(v.clone());
+        }
+    }
     // Type-slot attributes — `{x.real}`, `{x.imag}`, `{x.numerator}`, etc. —
     // resolve through the shared state-free getattr dispatch.
     if let Some(resolved) = crate::types::dispatch_getattr_opt(value, attr)? {
