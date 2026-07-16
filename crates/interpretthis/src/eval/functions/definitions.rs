@@ -731,7 +731,12 @@ fn collect_reads_comp(
 /// the variable's current value. Only fires below module scope: module-level
 /// free names are live-global reads (handled by the LEGB overlay), not cells.
 fn ensure_capture_cells(state: &mut InterpreterState, free_names: &[String]) -> Vec<(String, u64)> {
-    if state.call_depth == 0 || state.frame_cell_owners.is_empty() {
+    // A frame-owners scope is required (function frames push one; the module
+    // body pushes a base one in `Interpreter::execute`). Module scope is
+    // included: cell write-through there gives correct live-global semantics
+    // too (a reassigned global flows to the cell), so a top-level comprehension
+    // over closures captures the loop variable's final value like CPython.
+    if state.frame_cell_owners.is_empty() {
         return Vec::new();
     }
     let mut refreshes = Vec::new();

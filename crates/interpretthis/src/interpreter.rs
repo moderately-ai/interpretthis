@@ -210,9 +210,16 @@ impl Interpreter {
             }
         };
 
+        // A module-scope cell-owners frame so a top-level closure that captures
+        // a loop/comprehension variable (`funcs = [lambda x: x+i for i in
+        // range(3)]`) gets a live capture cell, matching CPython's late binding
+        // — the same machinery function frames use. Balanced pop below.
+        state.frame_cell_owners.push(rustc_hash::FxHashMap::default());
+
         // Evaluate, then Drop the (possibly very deep) AST on a large stack so a
         // long operator chain / deep nesting can't overflow during recursive Drop.
         let eval_result = crate::eval::eval_body(&mut state, &stmts, tools).await;
+        state.frame_cell_owners.pop();
         stacker::grow(AST_STACK_SIZE, move || drop(stmts));
         match eval_result {
             Ok(_) => {
