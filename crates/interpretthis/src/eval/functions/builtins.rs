@@ -1014,67 +1014,49 @@ pub(super) async fn try_builtin(
             if attr_name == "__call__" {
                 return Ok(Some(Value::Bool(value_is_callable(state, &args[0]))));
             }
-            // An instance whose class overrides attribute access
-            // (`__getattr__` / `__getattribute__`) can resolve names the static
-            // lookup below misses. Mirror CPython by running the real lookup and
-            // reporting whether it raised AttributeError (any other exception
-            // propagates, as in CPython 3).
-            if let Value::Instance(inst) = &args[0] {
-                let overrides = crate::eval::classes::lookup_method_in_mro(
+            // For a user instance, `hasattr(x, name)` is CPython's "getattr
+            // succeeds": run the real attribute resolution — properties /
+            // descriptors (whose getters run, as in CPython), methods, instance
+            // fields, and `__getattr__` / `__getattribute__` overrides, all in one
+            // place — and map AttributeError (interpreter miss OR a user
+            // `raise AttributeError`, which surfaces as an Exception) to False;
+            // any other exception propagates. This keeps hasattr in lockstep with
+            // attribute access instead of a parallel presence table that drifts
+            // (properties were previously invisible to it).
+            if matches!(&args[0], Value::Instance(_)) {
+                let resolved = crate::eval::names::getattr_on_value(
                     state,
-                    &inst.class_name,
-                    "__getattr__",
+                    args[0].clone(),
+                    attr_name,
+                    tools,
+                    None,
                 )
-                .is_some()
-                    || crate::eval::classes::lookup_method_in_mro(
-                        state,
-                        &inst.class_name,
-                        "__getattribute__",
-                    )
-                    .is_some();
-                if overrides {
-                    let resolved = crate::eval::names::getattr_on_value(
-                        state,
-                        args[0].clone(),
-                        attr_name,
-                        tools,
-                        None,
-                    )
-                    .await;
-                    return Ok(Some(Value::Bool(match resolved {
-                        Ok(_) => true,
-                        // Internal miss, or a user `raise AttributeError` (which
-                        // surfaces as an Exception value) / a subclass thereof.
-                        Err(EvalError::Interpreter(InterpreterError::AttributeError(_))) => false,
-                        Err(EvalError::Exception(ref e))
-                            if e.type_name == "AttributeError"
-                                || crate::eval::exceptions::builtin_exception_issubclass(
-                                    &e.type_name,
-                                    "AttributeError",
-                                ) =>
-                        {
-                            false
-                        }
-                        Err(e) => return Err(e),
-                    })));
-                }
+                .await;
+                return Ok(Some(Value::Bool(match resolved {
+                    Ok(_) => true,
+                    Err(EvalError::Interpreter(InterpreterError::AttributeError(_))) => false,
+                    Err(EvalError::Exception(ref e))
+                        if e.type_name == "AttributeError"
+                            || crate::eval::exceptions::builtin_exception_issubclass(
+                                &e.type_name,
+                                "AttributeError",
+                            ) =>
+                    {
+                        false
+                    }
+                    Err(e) => return Err(e),
+                })));
             }
             // CPython hasattr(obj, name): True iff getattr(obj, name)
             // doesn't raise. Route through dispatch_getattr_opt first
             // (covers every builtin-with-attributes type); if the slot
-            // is None for this variant, consult Instance / Class /
-            // Exception fallbacks directly so hasattr stays in sync
-            // with eval_attribute's state-aware path.
+            // is None for this variant, consult the Class / Exception /
+            // Function / ... fallbacks so hasattr stays in sync with
+            // eval_attribute's state-aware path. (Instances are handled
+            // above via the real getattr resolution.)
             let has = match crate::types::dispatch_getattr_opt(&args[0], attr_name) {
                 Ok(Some(_)) => true,
                 Ok(None) => match &args[0] {
-                    Value::Instance(inst) => {
-                        inst.fields.lock().contains_key(attr_name)
-                            || state.classes.get(&inst.class_name).is_some_and(|c| {
-                                c.class_attrs.contains_key(attr_name)
-                                    || c.methods.contains_key(attr_name)
-                            })
-                    }
                     Value::Class(class_name) => {
                         attr_name == "__name__"
                             || attr_name == "__qualname__"
