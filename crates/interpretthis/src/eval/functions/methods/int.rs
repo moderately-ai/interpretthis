@@ -56,6 +56,8 @@ pub(crate) fn dispatch_int_method(
         "conjugate" | "real" | "numerator" => Ok(Value::Int(i)),
         "imag" => Ok(Value::Int(0)),
         "denominator" => Ok(Value::Int(1)),
+        // `int.is_integer()` (added in CPython 3.12) is always True.
+        "is_integer" => Ok(Value::Bool(true)),
         // `int.as_integer_ratio()` — every int is `(i, 1)`.
         "as_integer_ratio" => Ok(Value::Tuple(vec![Value::Int(i), Value::Int(1)])),
         // Identity conversions CPython exposes as dunders. `int()` /
@@ -114,6 +116,7 @@ pub(crate) fn dispatch_bigint_method(
         | "__floor__" | "__ceil__" | "__pos__" => big(b.clone()),
         "imag" => Ok(Value::Int(0)),
         "denominator" => Ok(Value::Int(1)),
+        "is_integer" => Ok(Value::Bool(true)),
         "as_integer_ratio" => {
             Ok(Value::Tuple(vec![crate::value::int_from_bigint(b.clone()), Value::Int(1)]))
         }

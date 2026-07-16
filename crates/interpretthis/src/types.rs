@@ -3345,8 +3345,15 @@ const MEMORYVIEW_METHODS: &[&str] = &["tobytes", "tolist", "hex"];
 /// Callable (non-attribute) methods of `int`/`bool`, so `(5).bit_length` and
 /// `hasattr(5, "to_bytes")` bind like CPython. The value attributes
 /// (`real`/`imag`/`numerator`/`denominator`) are handled separately.
-const INT_METHODS: &[&str] =
-    &["bit_length", "bit_count", "to_bytes", "from_bytes", "as_integer_ratio", "conjugate"];
+const INT_METHODS: &[&str] = &[
+    "bit_length",
+    "bit_count",
+    "to_bytes",
+    "from_bytes",
+    "as_integer_ratio",
+    "conjugate",
+    "is_integer",
+];
 
 /// Callable methods of `float` (the `real`/`imag` value attributes aside).
 const FLOAT_METHODS: &[&str] = &["is_integer", "as_integer_ratio", "hex", "fromhex", "conjugate"];
@@ -3446,7 +3453,6 @@ const STR_METHODS: &[&str] = &[
     "ljust",
     "rjust",
     "zfill",
-    "encode",
     "splitlines",
     "isidentifier",
     "istitle",
@@ -3455,6 +3461,9 @@ const STR_METHODS: &[&str] = &[
     "isdecimal",
     "isnumeric",
     "translate",
+    "format_map",
+    "maketrans",
+    "rindex",
 ];
 
 const LIST_METHODS: &[&str] = &[
