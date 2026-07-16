@@ -211,6 +211,18 @@ pub async fn eval_aug_assign(
     let rhs = eval_expr(state, &node.value, tools).await?;
     let new_value = crate::eval::op::aug_binop(state, node.op, &current, &rhs, tools).await?;
 
+    // A bare-name aug-assign (`i += 1`) writes directly into the slot below,
+    // bypassing `set_variable`'s cell write-through — so mirror it here for any
+    // capture cell the frame owns, letting a late-binding closure over `i` (the
+    // `while i < n: fns.append(lambda: i); i += 1` pattern) see the update.
+    let cell_writethrough = place.steps.is_empty().then(|| {
+        state
+            .frame_cell_owners
+            .last()
+            .and_then(|owners| owners.get(&place.root).copied())
+            .map(|cell_id| (cell_id, new_value.clone()))
+    });
+
     let delta = {
         let root = state
             .variables
@@ -224,6 +236,9 @@ pub async fn eval_aug_assign(
         })?
     };
     place::apply_mem_delta(state, delta)?;
+    if let Some(Some((cell_id, value))) = cell_writethrough {
+        state.nonlocal_cells.entry(cell_id).or_default().insert(place.root.clone(), value);
+    }
 
     Ok(Value::None)
 }
