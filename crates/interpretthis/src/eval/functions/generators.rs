@@ -59,8 +59,14 @@ fn top_level_suspendable(stmt: &Stmt) -> bool {
         return true;
     }
     match stmt {
-        Stmt::For(f) => for_loop_suspendable(f),
-        Stmt::While(w) => w.orelse.is_empty() && loop_body_suspendable(&w.body),
+        // A top-level `for`/`while` may nest the opposite loop kind (disjoint
+        // resume state) — `for i: while c: yield` / `while True: for j: yield`.
+        Stmt::For(f) => {
+            for_name_target(f).is_some()
+                && f.orelse.is_empty()
+                && cross_loop_body_suspendable(&f.body, false)
+        }
+        Stmt::While(w) => w.orelse.is_empty() && cross_loop_body_suspendable(&w.body, true),
         Stmt::If(n) => if_branch_suspendable(&n.body) && if_branch_suspendable(&n.orelse),
         Stmt::Try(t) => {
             if_branch_suspendable(&t.body)
@@ -112,6 +118,39 @@ fn loop_body_suspendable(stmts: &[Stmt]) -> bool {
         | Stmt::TryStar(_)
         | Stmt::Match(_) => !super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)),
         _ => true,
+    })
+}
+
+/// A top-level loop body in which a nested loop of the OPPOSITE kind may carry a
+/// yield: a `while` body may contain a `for`, and a `for` body a `while`. The
+/// two kinds use disjoint resume state (`while_resume` vs `for_stack`), so one
+/// of each can be suspended simultaneously — but the nested loop's own body must
+/// be strictly loop-free (`loop_body_suspendable`) so no THIRD loop ever becomes
+/// active, and same-kind nesting (for-in-for / while-in-while) stays forbidden.
+/// `enclosing_is_while` picks which nested kind is permitted. Nested `if`s
+/// recurse with the same rule.
+fn cross_loop_body_suspendable(stmts: &[Stmt], enclosing_is_while: bool) -> bool {
+    stmts.iter().all(|stmt| {
+        let yields = super::definitions::contains_yield_stmts(std::slice::from_ref(stmt));
+        match stmt {
+            Stmt::If(node) => {
+                cross_loop_body_suspendable(&node.body, enclosing_is_while)
+                    && cross_loop_body_suspendable(&node.orelse, enclosing_is_while)
+            }
+            // Opposite-kind nested loop: permitted once, with a loop-free body.
+            Stmt::For(f) if enclosing_is_while => !yields || for_loop_suspendable(f),
+            Stmt::While(w) if !enclosing_is_while => {
+                !yields || (w.orelse.is_empty() && loop_body_suspendable(&w.body))
+            }
+            // Same-kind loop, or with/try/match: no yield may appear here.
+            Stmt::For(_)
+            | Stmt::While(_)
+            | Stmt::With(_)
+            | Stmt::Try(_)
+            | Stmt::TryStar(_)
+            | Stmt::Match(_) => !yields,
+            _ => true,
+        }
     })
 }
 
@@ -816,15 +855,30 @@ async fn run_for_suspendable(
         }
         while body_index < node.body.len() {
             let stmt = &node.body[body_index];
+            let stmt_yields = super::definitions::contains_yield_stmts(std::slice::from_ref(stmt));
             // An `if` steps through `run_if_suspendable` so a yield inside its
             // branch resumes at the yield (via `if_stack`), not the branch top.
-            let (result, is_if) = match stmt {
+            // A nested `while` steps through `run_while_suspendable` (its
+            // `while_resume` is disjoint from this loop's `for_stack`), so
+            // `for i in …: while c: yield` suspends correctly.
+            let (result, nested) = match stmt {
                 Stmt::If(if_node)
                     if if_branch_suspendable(&if_node.body)
                         && if_branch_suspendable(&if_node.orelse)
-                        && super::definitions::contains_yield_stmts(std::slice::from_ref(stmt)) =>
+                        && stmt_yields =>
                 {
                     (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+                }
+                Stmt::While(w)
+                    if stmt_yields && w.orelse.is_empty() && loop_body_suspendable(&w.body) =>
+                {
+                    // Boxed: `run_for` ↔ `run_while` is a mutual async recursion.
+                    (
+                        Box::pin(run_while_suspendable(state, w, tools))
+                            .await
+                            .map(|()| Value::None),
+                        true,
+                    )
                 }
                 _ => (eval_stmt(state, stmt, tools).await, false),
             };
@@ -851,9 +905,9 @@ async fn run_for_suspendable(
                 Err(EvalError::Signal(ControlFlow::Yield(v))) => {
                     if let Some(&id) = state.active_generator_stack.last() {
                         if let Some(frame) = state.generators.get_mut(&id) {
-                            // `run_if_suspendable` recorded its own resume; only a
-                            // direct yield needs `resume_at_yield` set here.
-                            if !is_if {
+                            // A nested `if`/`while` stepper recorded its own
+                            // resume; only a direct yield needs `resume_at_yield`.
+                            if !nested {
                                 frame.resume_at_yield = true;
                             }
                             let entry = GeneratorForState {
@@ -1090,11 +1144,26 @@ async fn run_while_suspendable(
             let stmt = &node.body[body_index];
             // An `if` steps through `run_if_suspendable` so a yield inside its
             // branch (even after side-effecting statements) resumes exactly at
-            // the yield via `if_stack`, rather than re-running the branch.
-            let (result, is_if) = if let Stmt::If(if_node) = stmt {
-                (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
-            } else {
-                (eval_stmt(state, stmt, tools).await, false)
+            // the yield via `if_stack`, rather than re-running the branch. A
+            // nested `for` steps through `run_for_suspendable` (its `for_stack`
+            // is disjoint from this loop's `while_resume`), so
+            // `while True: for j in …: yield` suspends correctly.
+            let stmt_yields = super::definitions::contains_yield_stmts(std::slice::from_ref(stmt));
+            let (result, nested) = match stmt {
+                Stmt::If(if_node) => {
+                    (run_if_suspendable(state, if_node, tools).await.map(|()| Value::None), true)
+                }
+                Stmt::For(f) if stmt_yields && for_loop_suspendable(f) => {
+                    let target = for_name_target(f).unwrap_or_default().to_string();
+                    // Boxed: `run_while` ↔ `run_for` is a mutual async recursion.
+                    (
+                        Box::pin(run_for_suspendable(state, f, &target, tools))
+                            .await
+                            .map(|()| Value::None),
+                        true,
+                    )
+                }
+                _ => (eval_stmt(state, stmt, tools).await, false),
             };
             match result {
                 Ok(_) => {
@@ -1115,10 +1184,10 @@ async fn run_while_suspendable(
                 Err(EvalError::Signal(ControlFlow::Yield(v))) => {
                     if let Some(&id) = state.active_generator_stack.last() {
                         if let Some(frame) = state.generators.get_mut(&id) {
-                            // `run_if_suspendable` already recorded its own
+                            // A nested `if`/`for` stepper already recorded its own
                             // resume position; only a direct yield needs
                             // `resume_at_yield` set here.
-                            if !is_if {
+                            if !nested {
                                 frame.resume_at_yield = true;
                             }
                             frame.while_resume = Some(body_index); // re-enter this stmt
