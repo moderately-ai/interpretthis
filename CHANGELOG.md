@@ -84,10 +84,10 @@ release across all three registries.)
   absorb a panic: language bindings (where the name arrives from Python or
   JavaScript and a panic would cross an FFI boundary) and hosts registering
   tools from user-supplied config.
-- `NOTICE` documenting the one non-permissive transitive dependency
-  (`malachite`, LGPL-3.0-only, reached via `rustpython-parser`) and how the
-  LGPL-3.0 §4 relink obligation is met for distributed binaries. Inert for
-  source distribution; it governs the wheels and Node addons.
+- `NOTICE` recording that every dependency (source and statically-linked binary
+  distributions alike) is permissively licensed — `rustpython-parser` is built
+  with `num-bigint` rather than the LGPL-3.0-only `malachite`, so the wheels and
+  Node addons carry no copyleft obligation.
 
 ### Changed
 

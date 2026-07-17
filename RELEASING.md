@@ -19,12 +19,12 @@ required reviewer before the first release, or the gate does not exist.
 
 ## Before the first binary publish
 
-Binary artifacts statically link `malachite` (LGPL-3.0-only), reached transitively
-through `rustpython-parser`. This is inert for crates.io (source), but it attaches
-LGPL-3.0 §4 obligations to every wheel and `.node` we distribute. See `NOTICE`,
-which ships inside both packages.
+Every dependency is permissively licensed (MIT/Apache-2.0/BSD/ISC/Zlib/Unicode),
+enforced by `cargo deny` in CI. `rustpython-parser` is built with its `num-bigint`
+feature, so the LGPL-3.0-only `malachite` bignum is not in the tree — the binary
+artifacts carry no copyleft obligation. `NOTICE` (shipped in both packages)
+records this.
 
-- [ ] Legal sign-off on the LGPL position
 - [ ] `interpretthis` claimed on PyPI and npm
 - [ ] PyPI Trusted Publishing configured for this repo + workflow (no API token)
 - [ ] npm Trusted Publishing configured (no `NPM_TOKEN`)
