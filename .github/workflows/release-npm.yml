@@ -158,7 +158,10 @@ jobs:
         # assembles one npm package per platform (each carrying its `os`, `cpu`,
         # and `libc`), which the main package lists as optionalDependencies. npm
         # then installs only the one matching the consumer's machine.
-        run: npx napi prepublish --skip-gh-release -t npm
+        # No `--gh-release`: `@napi-rs/cli` 3.x makes GitHub-release creation
+        # opt-in (2.x's `--skip-gh-release` was removed), and we tag/release
+        # separately.
+        run: npx napi prepublish -t npm
 
       - name: Review the exact publish manifest
         run: npm publish --dry-run --provenance --access public
