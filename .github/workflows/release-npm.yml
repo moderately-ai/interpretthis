@@ -127,6 +127,12 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true' }}
     runs-on: ubuntu-latest
     environment: npm
+    # Set only for the first-ever publish of a brand-new package name (npm's
+    # trusted-publisher config can only be added after a package exists). Delete
+    # the `npm`-environment secret once the trusted publisher is configured, and
+    # publishing falls back to OIDC automatically.
+    env:
+      NPM_BOOTSTRAP_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
     permissions:
       contents: read
       id-token: write
@@ -153,21 +159,27 @@ jobs:
           merge-multiple: true
           path: crates/interpretthis-node
 
-      - name: Stage the platform packages
-        # `napi prepublish` reads the `napi.targets` list in package.json and
-        # assembles one npm package per platform (each carrying its `os`, `cpu`,
-        # and `libc`), which the main package lists as optionalDependencies. npm
-        # then installs only the one matching the consumer's machine.
-        # No `--gh-release`: `@napi-rs/cli` 3.x makes GitHub-release creation
-        # opt-in (2.x's `--skip-gh-release` was removed), and we tag/release
-        # separately.
-        run: npx napi prepublish -t npm
+      # `napi prepublish` assembles and publishes one package per platform (each
+      # carrying its `os`/`cpu`/`libc`), which the main package lists as
+      # optionalDependencies; then the main package is published. `--provenance`
+      # attests (via the OIDC id-token) that this workflow built these bytes. No
+      # `--gh-release`: @napi-rs/cli 3.x makes it opt-in and we tag separately.
+      #
+      # Two paths, differing only in authentication: the first-ever publish of a
+      # new name uses a granular token (npm has no trusted publisher for a package
+      # that does not exist yet); every later release uses OIDC and no secret.
+      - name: Stage and publish (token bootstrap)
+        if: ${{ env.NPM_BOOTSTRAP_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        run: |
+          npx napi prepublish -t npm
+          npm publish --dry-run --provenance --access public
+          npm publish --provenance --access public
 
-      - name: Review the exact publish manifest
-        run: npm publish --dry-run --provenance --access public
-
-      - name: Publish with OIDC provenance
-        # No NODE_AUTH_TOKEN: the package is configured for npm Trusted Publishing,
-        # so the OIDC id-token above is exchanged for a short-lived credential and
-        # no long-lived secret lives in this repo.
-        run: npm publish --provenance --access public
+      - name: Stage and publish (OIDC trusted publishing)
+        if: ${{ env.NPM_BOOTSTRAP_TOKEN == '' }}
+        run: |
+          npx napi prepublish -t npm
+          npm publish --dry-run --provenance --access public
+          npm publish --provenance --access public
