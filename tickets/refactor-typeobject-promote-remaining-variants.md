@@ -5,7 +5,7 @@ status: ready
 priority: p3
 dependencies: []
 related: []
-scopes: []
+scopes: [core, eval, tests]
 shared_scopes: []
 paths: [crates/interpretthis/src/types.rs, crates/interpretthis/src/eval/op.rs, crates/interpretthis/src/eval/names.rs, crates/interpretthis/tests/integration/**]
 tags: [refactor, typeobject, gap-audit]

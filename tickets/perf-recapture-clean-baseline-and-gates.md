@@ -5,7 +5,7 @@ status: ready
 priority: p1
 dependencies: []
 related: []
-scopes: []
+scopes: [benches, docs]
 shared_scopes: []
 paths: [crates/interpretthis/benches/**, crates/interpretthis/benches/baseline.json, CONFORMANCE.md, STATUS.md]
 tags: [perf, audit]

@@ -2,10 +2,10 @@
 id: gap-lazy-iterator-value-variant
 title: "Gap: lazy iteration for short-circuiting consumers over huge iterables"
 status: ready
-priority: p4
+priority: p3
 dependencies: []
 related: []
-scopes: []
+scopes: [eval]
 shared_scopes: []
 paths: [crates/interpretthis/src/eval/op.rs, crates/interpretthis/src/eval/comprehensions.rs]
 tags: [gap, iteration, performance]

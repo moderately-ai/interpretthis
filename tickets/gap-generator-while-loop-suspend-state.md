@@ -2,10 +2,10 @@
 id: gap-generator-while-loop-suspend-state
 title: "Gap: generator suspension for yields inside nested loops"
 status: ready
-priority: p4
+priority: p3
 dependencies: []
 related: []
-scopes: []
+scopes: [eval/functions]
 shared_scopes: []
 paths: [crates/interpretthis/src/eval/functions/generators.rs]
 tags: [gap, generators, parity]
